@@ -1,0 +1,443 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="ARV_V1_MODEL">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="4.06405754959603E-05 3.96062265211095E-05 -0.159587611333419"
+        rpy="0 0 0" />
+      <mass
+        value="0.349525984991482" />
+      <inertia
+        ixx="0.000258629195167638"
+        ixy="-5.10875001154551E-10"
+        ixz="-9.72936642265161E-09"
+        iyy="0.000258276357567582"
+        iyz="-1.14928164144097E-08"
+        izz="0.000395519919318191" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="link1_double8009">
+    <inertial>
+      <origin
+        xyz="-0.0154999931131982 -0.0261644185287386 -0.00790164285412044"
+        rpy="0 0 0" />
+      <mass
+        value="1.22525961510696" />
+      <inertia
+        ixx="0.00126118311285525"
+        ixy="-9.13199961592521E-06"
+        ixz="-4.1718719896748E-07"
+        iyy="0.00132467695230876"
+        iyz="-1.19448129551972E-06"
+        izz="0.00217005077700242" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0.03215 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link1_double8009.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0.03215 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link1_double8009.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint_1"
+    type="revolute">
+    <origin
+      xyz="0 0 0"
+      rpy="1.5708 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="link1_double8009" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="20"
+      velocity="10.47" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+    <safety_controller
+      soft_upper_limit="3.14"
+      soft_lower_limit="-3.14"
+      k_position="0"
+      k_velocity="0" />
+  </joint>
+  <link
+    name="link2_arm1">
+    <inertial>
+      <origin
+        xyz="-0.207835302221211 -0.000992870986534305 0.0570377412581278"
+        rpy="0 0 0" />
+      <mass
+        value="1.13036010199932" />
+      <inertia
+        ixx="0.00142587127922893"
+        ixy="-2.22161961679192E-05"
+        ixz="-6.82089241798511E-06"
+        iyy="0.0161880134214926"
+        iyz="-5.42767939874192E-06"
+        izz="0.0175303272584084" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0.381 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link2_arm1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0.381 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link2_arm1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint_2"
+    type="revolute">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="link1_double8009" />
+    <child
+      link="link2_arm1" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="20"
+      velocity="10.47" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+    <safety_controller
+      soft_upper_limit="3.14"
+      soft_lower_limit="-3.14"
+      k_position="0"
+      k_velocity="0" />
+  </joint>
+  <link
+    name="link3_sight">
+    <inertial>
+      <origin
+        xyz="0.0106080099260035 -0.0536251640173155 0.0110704875938024"
+        rpy="0 0 0" />
+      <mass
+        value="1.2559864019946" />
+      <inertia
+        ixx="0.00105270273008462"
+        ixy="1.9169565264512E-06"
+        ixz="1.70978398702773E-06"
+        iyy="0.000830969442918397"
+        iyz="2.32834239073742E-05"
+        izz="0.00111734642942268" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link3_sight.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link3_sight.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint_3"
+    type="revolute">
+    <origin
+      xyz="0.381999999999996 0 -0.00719999999911157"
+      rpy="0 0 0" />
+    <parent
+      link="link2_arm1" />
+    <child
+      link="link3_sight" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="20"
+      velocity="10.47" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+    <safety_controller
+      soft_upper_limit="3.14"
+      soft_lower_limit="-3.14"
+      k_position="0"
+      k_velocity="0" />
+  </joint>
+  <link
+    name="link4_arm2">
+    <inertial>
+      <origin
+        xyz="-0.0471747665346284 0.116147879122604 -0.00314898868309329"
+        rpy="0 0 0" />
+      <mass
+        value="0.406159969500003" />
+      <inertia
+        ixx="0.00241397711452733"
+        ixy="0.000109490600170552"
+        ixz="-4.82806684024964E-08"
+        iyy="0.000511634585525191"
+        iyz="1.62319990296964E-07"
+        izz="0.0029237195208925" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link4_arm2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link4_arm2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint_4"
+    type="revolute">
+    <origin
+      xyz="0 -0.418000000000065 0"
+      rpy="0 0 0" />
+    <parent
+      link="link3_sight" />
+    <child
+      link="link4_arm2" />
+    <axis
+      xyz="0 -1 0" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="1.2"
+      velocity="13.8" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+    <safety_controller
+      soft_upper_limit="3.14"
+      soft_lower_limit="-3.14"
+      k_position="0"
+      k_velocity="0" />
+  </joint>
+  <link
+    name="link5_4310pitch">
+    <inertial>
+      <origin
+        xyz="0.014937604120865 0.00443879636347264 0.00729204014938473"
+        rpy="0 0 0" />
+      <mass
+        value="0.145781968714655" />
+      <inertia
+        ixx="2.16256229288805E-05"
+        ixy="-9.21291007345439E-08"
+        ixz="-6.09796294548116E-07"
+        iyy="4.96762402972851E-05"
+        iyz="-5.03475756685659E-10"
+        izz="5.55815571281815E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link5_4310pitch.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link5_4310pitch.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint_5"
+    type="revolute">
+    <origin
+      xyz="0 0 0"
+      rpy="1.57079632679523 0 0" />
+    <parent
+      link="link4_arm2" />
+    <child
+      link="link5_4310pitch" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="7"
+      velocity="10.47" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+    <safety_controller
+      soft_upper_limit="3.14"
+      soft_lower_limit="-3.14"
+      k_position="0"
+      k_velocity="0" />
+  </joint>
+  <link
+    name="link6_2006roll">
+    <inertial>
+      <origin
+        xyz="-2.23154827949656E-14 5.10702591327572E-15 -0.0119546936603161"
+        rpy="0 0 0" />
+      <mass
+        value="0.114376166812813" />
+      <inertia
+        ixx="2.33675461159006E-05"
+        ixy="-6.77008334816112E-14"
+        ixz="3.01235029450962E-18"
+        iyy="2.33675461861855E-05"
+        iyz="-2.85317557316216E-19"
+        izz="4.03700299739344E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link6_2006roll.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://ARV_V1_MODEL/meshes/link6_2006roll.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint_6"
+    type="revolute">
+    <origin
+      xyz="0 0 0.0518000000000047"
+      rpy="0 0 -1.57079632679448" />
+    <parent
+      link="link5_4310pitch" />
+    <child
+      link="link6_2006roll" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="1"
+      velocity="10.47" />
+    <dynamics
+      damping="0.1"
+      friction="0.1" />
+    <safety_controller
+      soft_upper_limit="3.14"
+      soft_lower_limit="-3.14"
+      k_position="0"
+      k_velocity="0" />
+  </joint>
+</robot>
