@@ -7,6 +7,7 @@
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <kdl/jntarray.hpp>
 #include <kdl/chain.hpp>
 #include <kdl_parser/kdl_parser.hpp>
@@ -23,9 +24,29 @@ public: // 构造函数log
                                      is_executing_(false),
                                      q_actual_(6),
                                      q_dot_actual_(6),
-                                     state_received_(false)
+                                     state_received_(false),
+                                     Kp_(6),
+                                     Kd_(6),
+                                     control_frequency_(200.0)
     {
         RCLCPP_INFO(this->get_logger(), "🚀 力矩控制器节点启动");
+
+        // ========== 初始化 PD 增益 (新增) ==========
+        // 位置增益（根据关节大小调整）
+        Kp_(0) = 300.0; // joint_1: 大关节，需要较大增益
+        Kp_(1) = 400.0; // joint_2: 抬臂关节，负载大
+        Kp_(2) = 350.0; // joint_3: 肘关节
+        Kp_(3) = 150.0; // joint_4: 小关节
+        Kp_(4) = 100.0; // joint_5: 更小
+        Kp_(5) = 80.0;  // joint_6: 末端，增益最小
+
+        // 速度增益（通常是 Kp 的 1/10 ~ 1/5）
+        Kd_(0) = 30.0;
+        Kd_(1) = 40.0;
+        Kd_(2) = 35.0;
+        Kd_(3) = 15.0;
+        Kd_(4) = 10.0;
+        Kd_(5) = 8.0;
 
         // ========== 初始化动力学求解器 ==========
         if (!initializeDynamics())
@@ -51,6 +72,13 @@ public: // 构造函数log
             std::bind(&TorqueControllerActionServer::handleAccepted, this, std::placeholders::_1));                   // 回调函数，决定开始执行力矩计算器
 
         RCLCPP_INFO(this->get_logger(), "话题订阅！ 📡 Action Server 已创建: /follow_joint_trajectory");
+        torque_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
+            "/effort_controller/commands", // 话题名称
+            10                             // 队列大小
+        );
+
+        RCLCPP_INFO(this->get_logger(), "📡 力矩发布者已创建: /effort_controller/commands");
+        RCLCPP_INFO(this->get_logger(), "⚙️  控制频率: %.1f Hz", control_frequency_);
     }
 
     ~TorqueControllerActionServer()
@@ -75,6 +103,13 @@ private:
     KDL::Chain kdl_chain_;                               // 运动链实例
     std::unique_ptr<DynamicsComputer> dynamic_computer_; // 动力学解算器实例
 
+    KDL::JntArray Kp_; // P of position
+    KDL::JntArray Kd_; // D of position
+
+    rclcpp::TimerBase::SharedPtr control_timer_;                                // 控制循环定时器
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_; // 力矩发布者
+    double control_frequency_;                                                  // 控制频率 (Hz)
+
     // Action 回调函数
     rclcpp_action::GoalResponse handleGoal(
         const rclcpp_action::GoalUUID &uuid,
@@ -89,6 +124,19 @@ private:
     void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg); // 关节状态回调
 
     bool initializeDynamics(); // 动力学初始化
+
+    bool interpolateTrajectory(double t_now,
+                               KDL::JntArray &q_d,
+                               KDL::JntArray &qd_d,
+                               KDL::JntArray &qdd_d);
+
+    void computeFeedbackTorque(const KDL::JntArray &q_d,       // 期望位置
+                               const KDL::JntArray &qd_d,      // 期望速度
+                               const KDL::JntArray &q_actual,  // 实际位置
+                               const KDL::JntArray &qd_actual, // 实际速度
+                               KDL::JntArray &tau_fb);         // 输出：反馈力矩
+
+    void controlLoop(); // 核心控制循环
 };
 
 rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
@@ -129,46 +177,43 @@ void TorqueControllerActionServer::handleAccepted(
     const std::shared_ptr<GoalHandleFJT> goal_handle)
 {
     RCLCPP_INFO(this->get_logger(), "🎯 目标已接受，准备执行");
-
-    if (!state_received_)
-    { // 确认关节状态正确
+    
+    // 检查是否收到关节状态
+    if (!state_received_) {
         RCLCPP_ERROR(this->get_logger(), "❌ 未收到关节状态数据，拒绝执行");
         auto result = std::make_shared<FollowJointTrajectory::Result>();
         result->error_code = FollowJointTrajectory::Result::INVALID_JOINTS;
         goal_handle->abort(result);
         return;
     }
-
+    
+    // 缓存轨迹
     const auto goal = goal_handle->get_goal();
-    current_trajectory_ = goal->trajectory; // 往对象成员变量里存入轨迹
-
+    current_trajectory_ = goal->trajectory;
     current_goal_handle_ = goal_handle;
     trajectory_start_time_ = this->now();
     is_executing_ = true;
-    if (!current_trajectory_.points.empty()) // 输出信息
-    {
-        const auto &first_point = current_trajectory_.points[0];
-        RCLCPP_INFO(this->get_logger(), "   - 第一个点 (t=%.3f):",
-                    first_point.time_from_start.sec + first_point.time_from_start.nanosec * 1e-9);
-        RCLCPP_INFO(this->get_logger(), "     位置: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-                    first_point.positions[0], first_point.positions[1], first_point.positions[2],
-                    first_point.positions[3], first_point.positions[4], first_point.positions[5]);
-    }
-
-    const auto &last_point = current_trajectory_.points.back();
+    
+    // 打印轨迹信息
+    const auto& first_point = current_trajectory_.points[0];
+    const auto& last_point = current_trajectory_.points.back();
     double total_duration = last_point.time_from_start.sec + last_point.time_from_start.nanosec * 1e-9;
-    RCLCPP_INFO(this->get_logger(), "   - 最后一个点 (t=%.3f):", total_duration);
-    RCLCPP_INFO(this->get_logger(), "     位置: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-                last_point.positions[0], last_point.positions[1], last_point.positions[2],
-                last_point.positions[3], last_point.positions[4], last_point.positions[5]);
+    
+    RCLCPP_INFO(this->get_logger(), "📦 轨迹已缓存:");
+    RCLCPP_INFO(this->get_logger(), "   - 关节数: %zu", current_trajectory_.joint_names.size());
+    RCLCPP_INFO(this->get_logger(), "   - 轨迹点数: %zu", current_trajectory_.points.size());
     RCLCPP_INFO(this->get_logger(), "   - 总时长: %.3f 秒", total_duration);
-
-    // 现在先简单返回成功
-    auto result = std::make_shared<FollowJointTrajectory::Result>();
-    result->error_code = FollowJointTrajectory::Result::SUCCESSFUL;
-    goal_handle->succeed(result);
-
-    RCLCPP_INFO(this->get_logger(), "✅ 轨迹执行完成（当前为测试）");
+    
+    RCLCPP_INFO(this->get_logger(), "🚀 启动控制循环 (%.1f Hz)...", control_frequency_);
+    
+    // 计算定时器周期（单位：毫秒）
+    auto period = std::chrono::duration<double, std::milli>(1000.0 / control_frequency_);
+    
+    // 创建定时器
+    control_timer_ = this->create_wall_timer(
+        period,
+        std::bind(&TorqueControllerActionServer::controlLoop, this)
+    );
 }
 
 void TorqueControllerActionServer::jointStateCallback(
@@ -216,50 +261,195 @@ void TorqueControllerActionServer::jointStateCallback(
 bool TorqueControllerActionServer::initializeDynamics()
 {
     RCLCPP_INFO(this->get_logger(), "📦 开始初始化动力学求解器...");
-    
+
     // 1. 读取 URDF 文件
     std::string urdf_path = "/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf";
     std::ifstream urdf_file(urdf_path);
-    if (!urdf_file.is_open()) {
+    if (!urdf_file.is_open())
+    {
         RCLCPP_ERROR(this->get_logger(), "❌ 无法打开 URDF 文件: %s", urdf_path.c_str());
         return false;
     }
-    
+
     std::string urdf_string((std::istreambuf_iterator<char>(urdf_file)),
                             std::istreambuf_iterator<char>());
     urdf_file.close();
-        
+
     // 2. 解析 URDF
     urdf::Model urdf_model;
-    if (!urdf_model.initString(urdf_string)) {
+    if (!urdf_model.initString(urdf_string))
+    {
         RCLCPP_ERROR(this->get_logger(), "❌ URDF 解析失败");
         return false;
     }
-    
+
     // 3. 提取 KDL 树
     KDL::Tree kdl_tree;
-    if (!kdl_parser::treeFromUrdfModel(urdf_model, kdl_tree)) {
+    if (!kdl_parser::treeFromUrdfModel(urdf_model, kdl_tree))
+    {
         RCLCPP_ERROR(this->get_logger(), "❌ 从 URDF 构建 KDL 树失败");
         return false;
     }
-    
+
     // 4. 获取运动链（从 base_link 到 link6_2006roll）
-    if (!kdl_tree.getChain("base_link", "link6_2006roll", kdl_chain_)) {
+    if (!kdl_tree.getChain("base_link", "link6_2006roll", kdl_chain_))
+    {
         RCLCPP_ERROR(this->get_logger(), "❌ 提取运动链失败");
         return false;
     }
-    
-    
+
     // 5. 创建动力学计算工具
-    KDL::Vector gravity(0.0, 0.0, -9.81);  // 重力向量
+    KDL::Vector gravity(0.0, 0.0, -9.81); // 重力向量
     dynamic_computer_ = std::make_unique<DynamicsComputer>(kdl_chain_, gravity);
-    
+
     RCLCPP_INFO(this->get_logger(), "✅ 动力学求解器初始化完成");
-    RCLCPP_INFO(this->get_logger(), "   - 重力: [%.2f, %.2f, %.2f] m/s²", 
+    RCLCPP_INFO(this->get_logger(), "   - 重力: [%.2f, %.2f, %.2f] m/s²",
                 gravity.x(), gravity.y(), gravity.z());
 
     return true;
 }
+
+bool TorqueControllerActionServer::interpolateTrajectory(
+    double t_now,
+    KDL::JntArray &q_d,
+    KDL::JntArray &qd_d,
+    KDL::JntArray &qdd_d)
+{
+    // 1. 检查轨迹是否存在
+    if (current_trajectory_.points.empty())
+    {
+        RCLCPP_ERROR(this->get_logger(), "❌ 轨迹为空，无法插值");
+        return false;
+    }
+
+    // 2. 如果时间在第一个点之前，返回第一个点
+    const auto &first_point = current_trajectory_.points[0];
+    double t_first = first_point.time_from_start.sec + first_point.time_from_start.nanosec * 1e-9;
+
+    if (t_now <= t_first)
+    {
+        // 返回第一个点的值
+        for (size_t i = 0; i < 6; i++)
+        {
+            q_d(i) = first_point.positions[i];
+            qd_d(i) = first_point.velocities.empty() ? 0.0 : first_point.velocities[i];
+            qdd_d(i) = first_point.accelerations.empty() ? 0.0 : first_point.accelerations[i];
+        }
+        return true;
+    }
+
+    // 3. 如果时间在最后一个点之后，返回最后一个点
+    const auto &last_point = current_trajectory_.points.back();
+    double t_last = last_point.time_from_start.sec + last_point.time_from_start.nanosec * 1e-9;
+
+    if (t_now >= t_last)
+    {
+        // 返回最后一个点的值（速度和加速度应该为 0）
+        for (size_t i = 0; i < 6; i++)
+        {
+            q_d(i) = last_point.positions[i];
+            qd_d(i) = 0.0;  // 停止时速度为 0
+            qdd_d(i) = 0.0; // 停止时加速度为 0
+        }
+        return true;
+    }
+
+    // 4. 在轨迹中查找包围当前时间的两个点
+    size_t idx_before = 0;
+    size_t idx_after = 0;
+
+    for (size_t i = 0; i < current_trajectory_.points.size() - 1; i++)
+    {
+        double t_i = current_trajectory_.points[i].time_from_start.sec +
+                     current_trajectory_.points[i].time_from_start.nanosec * 1e-9;
+        double t_i_next = current_trajectory_.points[i + 1].time_from_start.sec +
+                          current_trajectory_.points[i + 1].time_from_start.nanosec * 1e-9;
+
+        if (t_now >= t_i && t_now <= t_i_next)
+        {
+            idx_before = i;
+            idx_after = i + 1;
+            break;
+        }
+    }
+
+    // 5. 获取两个点
+    const auto &point_before = current_trajectory_.points[idx_before];
+    const auto &point_after = current_trajectory_.points[idx_after];
+
+    double t_before = point_before.time_from_start.sec + point_before.time_from_start.nanosec * 1e-9;
+    double t_after = point_after.time_from_start.sec + point_after.time_from_start.nanosec * 1e-9;
+
+    // 6. 计算插值比例 α
+    double alpha = (t_now - t_before) / (t_after - t_before);
+
+    // 防止除零
+    if (t_after - t_before < 1e-9)
+    {
+        alpha = 0.0;
+    }
+
+    // 7. 线性插值
+    for (size_t i = 0; i < 6; i++)
+    {
+        // 位置插值
+        q_d(i) = point_before.positions[i] +
+                 alpha * (point_after.positions[i] - point_before.positions[i]);
+
+        // 速度插值
+        if (!point_before.velocities.empty() && !point_after.velocities.empty())
+        {
+            qd_d(i) = point_before.velocities[i] +
+                      alpha * (point_after.velocities[i] - point_before.velocities[i]);
+        }
+        else
+        {
+            qd_d(i) = 0.0;
+        }
+
+        // 加速度插值
+        if (!point_before.accelerations.empty() && !point_after.accelerations.empty())
+        {
+            qdd_d(i) = point_before.accelerations[i] +
+                       alpha * (point_after.accelerations[i] - point_before.accelerations[i]);
+        }
+        else
+        {
+            qdd_d(i) = 0.0;
+        }
+    }
+
+    return true;
+}
+
+// ========== PD 反馈控制 ==========
+void TorqueControllerActionServer::computeFeedbackTorque(
+    const KDL::JntArray &q_d,
+    const KDL::JntArray &qd_d,
+    const KDL::JntArray &q_actual,
+    const KDL::JntArray &qd_actual,
+    KDL::JntArray &tau_fb)
+{
+    KDL::JntArray error_p(6);
+    for (size_t i = 0; i < 6; i++)
+    {
+        error_p(i) = q_d(i) - q_actual(i);
+    }
+
+    KDL::JntArray error_v(6);
+    for (size_t i = 0; i < 6; i++)
+    {
+        error_v(i) = qd_d(i) - qd_actual(i);
+    }
+
+    // 3. PD 控制律: τ_fb = Kp·e_p + Kd·e_v
+    for (size_t i = 0; i < 6; i++)
+    {
+        tau_fb(i) = Kp_(i) * error_p(i) + Kd_(i) * error_v(i);
+    }
+}
+
+
 
 int main(int argc, char **argv)
 {
