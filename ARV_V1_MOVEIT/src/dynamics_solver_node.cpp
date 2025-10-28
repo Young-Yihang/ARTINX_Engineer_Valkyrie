@@ -1,3 +1,22 @@
+// ============================================================
+// 动力学求解器观察者节点 (Dynamics Solver Observer Node)
+// 
+// 职责:
+//   - 订阅 /joint_states 获取实时关节状态 (q, q̇)
+//   - 数值微分计算加速度 q̈ = (q̇_current - q̇_previous) / Δt
+//   - 计算动力学方程: τ = M(q)·q̈ + C(q,q̇) + G(q)
+//   - 发布到 /computed_torques 供观察和调试
+//
+// 注意:
+//   - 这是一个 **观察者节点**，不参与实际控制
+//   - 用于验证动力学计算的正确性
+//   - 实际控制由 torque_controller_node 负责 (Stage 4)
+//
+// Stage: 3 (已完成 ✅)
+// Author: ARV V1 Team
+// Date: 2025-10-28
+// ============================================================
+//注意：这个cpp已经不使用
 #include <rclcpp/rclcpp.hpp>
 #include <string>
 #include <fstream>
@@ -11,12 +30,7 @@
 #include <kdl/chaindynparam.hpp>
 #include <kdl/jntarray.hpp>
 #include <kdl/jntspaceinertiamatrix.hpp>
-#include "urdf_parser.cpp" // 包含我们刚才创建的URDF解析
-
-// step 2: 通过订阅 /joint_states 实现动力学求解器
-// - 订阅 /joint_states 获取 q 和 q̇
-// - 数值微分计算 q̈
-// - 实时计算动力学并发布力矩
+#include "urdf_parser.cpp" // 包含 URDF 解析工具
 
 class DynamicsSolverNode : public rclcpp::Node
 {
