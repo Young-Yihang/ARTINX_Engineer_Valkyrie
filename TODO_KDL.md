@@ -516,38 +516,103 @@ arv_dynamics_controller/
 
 ### 阶段2: URDF参数提取 (2-3天) 🔍
 
-**目标**: 从URDF中提取动力学参数
+**目标**: 从URDF中提取6个关节的运动链和动力学参数
 
-**实现**: `urdf_parser.cpp`
+**实现文件**: 
+- 📄 `ARV_V1_MOVEIT/src/urdf_parser.cpp` - 完整实现
+- 📄 `ARV_V1_MOVEIT/test_urdf_parser.cpp` - 测试程序
+- 📄 `ARV_V1_MOVEIT/build_test.sh` - 编译脚本
+
+#### **核心功能**
 
 ```cpp
 class URDFDynamicsParser {
 public:
-    struct LinkDynamics {
-        std::string name;
-        double mass;                    // 质量 [kg]
-        Eigen::Vector3d com;            // 质心位置 [m]
-        Eigen::Matrix3d inertia;        // 惯性张量 [kg·m²]
-    };
-    
-    struct JointInfo {
-        std::string name;
-        std::string type;               // revolute, prismatic, etc.
-        Eigen::Vector3d axis;           // 关节轴方向
-        double effort_limit;            // 力矩限制 [N·m]
-        double velocity_limit;          // 速度限制 [rad/s]
-        double damping;                 // 阻尼系数
-        double friction;                // 摩擦系数
-    };
-    
+    // 关键方法1: 解析URDF文件
     bool parseURDF(const std::string& urdf_path);
-    std::vector<LinkDynamics> getLinkDynamics();
-    std::vector<JointInfo> getJointInfo();
+    
+    // 关键方法2: 解析URDF字符串（ROS节点中使用）
+    bool parseURDFString(const std::string& urdf_string);
+    
+    // 关键方法3: 获取KDL运动链（最重要！）
+    KDL::Chain getKDLChain() const;
+    
+    // 辅助方法: 获取有序的参数列表
+    std::vector<LinkDynamics> getLinkDynamics() const;
+    std::vector<JointInfo> getJointInfo() const;
 };
 ```
 
-**提取数据示例**:
-```cpp
+#### **运动链提取原理**
+
+```
+你的URDF结构:
+  base_link (固定)
+    ↓ joint_1
+  link1_double8009 (质量: 0.208kg, 惯性: ...)
+    ↓ joint_2
+  link2_arm1
+    ↓ joint_3
+  link3_sight
+    ↓ joint_4
+  link4_arm2
+    ↓ joint_5
+  link5_4310pitch
+    ↓ joint_6
+  link6_2006roll
+
+KDL解析后:
+  KDL::Chain chain;
+  chain.getNrOfJoints()    → 6
+  chain.getNrOfSegments()  → 7 (包括base)
+  
+自动包含:
+  ✅ 每个连杆的质量、惯性、质心
+  ✅ 每个关节的轴方向、限制
+  ✅ 正确的运动学顺序
+```
+
+#### **测试步骤**
+
+````bash
+# 1. 进入目录
+cd /home/huan/ros2_ws/src/ARV_V1_MOVEIT
+
+# 2. 编译测试程序
+chmod +x build_test.sh
+./build_test.sh
+
+# 输出示例:
+# ✅ Successfully loaded URDF: ARV_V1_MODEL
+# ✅ KDL chain extracted: 7 segments, 6 joints
+# 📊 Extracted 6 joints and 6 links
+# 
+# 【KDL运动链】
+#   Segments: 7
+#   Joints:   6
+# 
+# 【关节信息】(6 个)
+#   [1] joint_1 | 类型: revolute | 轴: (0,0,1) | 力矩限制: 20 N·m | 阻尼: 0.1
+#   [2] joint_2 | ...
+#   ...
+````
+
+#### **关键点说明**
+
+**为什么使用KDL解析器？**
+1. ✅ **自动排序** - KDL会按运动学链的顺序排列关节
+2. ✅ **参数完整** - 自动提取所有URDF中的动力学参数
+3. ✅ **久经考验** - ROS社区广泛使用，稳定可靠
+4. ✅ **直接可用** - 返回的 `KDL::Chain` 可直接用于动力学计算
+
+**数据流**:
+```
+ARV_V1_MODEL.urdf
+    ↓ URDFDynamicsParser::parseURDF()
+    ↓ kdl_parser::treeFromFile()
+    ↓ tree.getChain("base_link", "link6_2006roll")
+KDL::Chain (6个关节，按正确顺序)
+```
 // 从你的URDF提取的实际数据
 LinkDynamics link1 = {
     .name = "link1_double8009",

@@ -1,27 +1,41 @@
 # This config file is used by ros2_control
+#为了ARV_V1模型的ros2_control假系统配置控制器
 controller_manager:
   ros__parameters:
     update_rate: 100  # Hz
 
-    ARM_controller:
-      type: joint_trajectory_controller/JointTrajectoryController
+   # ARM_controller:
+   #   type: joint_trajectory_controller/JointTrajectoryController
+  #为了去掉原有位置控制器
 
+    effort_controller:
+      type: effort_controllers/JointGroupEffortController
 
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
-ARM_controller:
+# ARM_controller:
+#   ros__parameters:
+#     joints:
+#       - joint_1
+#       - joint_2
+#       - joint_3
+#       - joint_4
+#       - joint_5
+#       - joint_6
+#     command_interfaces:
+#       - position
+#     state_interfaces:
+#       - position
+#       - velocity
+#     allow_nonzero_velocity_at_trajectory_end: true
+effort_controller:
   ros__parameters:
-    joints:
+    joint_names:
       - joint_1
       - joint_2
       - joint_3
       - joint_4
       - joint_5
       - joint_6
-    command_interfaces:
-      - position
-    state_interfaces:
-      - position
-      - velocity
-    allow_nonzero_velocity_at_trajectory_end: true
+    interface_name: effort

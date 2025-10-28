@@ -6,7 +6,7 @@ moveit_simple_controller_manager:
   controller_names:
     - ARM_controller
 
-  ARM_controller:
+  ARM_controller: # fake controller for ARV_V1_MODEL
     type: FollowJointTrajectory
     action_ns: follow_joint_trajectory
     default: true
