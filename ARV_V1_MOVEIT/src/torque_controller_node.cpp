@@ -3,10 +3,15 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 #include <string>
 #include <mutex>
+#include <fstream>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <kdl/jntarray.hpp>
+#include <kdl/chain.hpp>
+#include <kdl_parser/kdl_parser.hpp>
+#include <urdf/model.h>
+#include "dynamics_computer.hpp"
 
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GoalHandleFJT = rclcpp_action::ServerGoalHandle<FollowJointTrajectory>;
@@ -22,6 +27,14 @@ public: // 构造函数log
     {
         RCLCPP_INFO(this->get_logger(), "🚀 力矩控制器节点启动");
 
+        // ========== 初始化动力学求解器 ==========
+        if (!initializeDynamics())
+        {
+            RCLCPP_ERROR(this->get_logger(), "❌ 动力学求解器初始化失败");
+            throw std::runtime_error("Failed to initialize dynamics");
+        }
+
+        // ========== 订阅关节状态 ==========
         joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
             "/joint_states",                                             // 话题名称
             10,                                                          // 队列大小
@@ -29,7 +42,7 @@ public: // 构造函数log
                       this,
                       std::placeholders::_1));
 
-        // 创建 Action Server
+        // ========== 创建 Action Server ==========
         action_server_ = rclcpp_action::create_server<FollowJointTrajectory>(
             this,
             "follow_joint_trajectory",                                                                                /// 回调函数被传递给ros2服务器系统                                                                           // Action 名称，用于和moveit的action对齐
@@ -59,6 +72,9 @@ private:
     std::mutex state_mutex_;     // 保护共享数据
     bool state_received_;        // 是否收到过状态
 
+    KDL::Chain kdl_chain_;                               // 运动链实例
+    std::unique_ptr<DynamicsComputer> dynamic_computer_; // 动力学解算器实例
+
     // Action 回调函数
     rclcpp_action::GoalResponse handleGoal(
         const rclcpp_action::GoalUUID &uuid,
@@ -70,7 +86,9 @@ private:
     void handleAccepted(
         const std::shared_ptr<GoalHandleFJT> goal_handle);
 
-    void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg); //关节状态回调
+    void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg); // 关节状态回调
+
+    bool initializeDynamics(); // 动力学初始化
 };
 
 rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
@@ -112,7 +130,8 @@ void TorqueControllerActionServer::handleAccepted(
 {
     RCLCPP_INFO(this->get_logger(), "🎯 目标已接受，准备执行");
 
-     if (!state_received_) { //确认关节状态正确
+    if (!state_received_)
+    { // 确认关节状态正确
         RCLCPP_ERROR(this->get_logger(), "❌ 未收到关节状态数据，拒绝执行");
         auto result = std::make_shared<FollowJointTrajectory::Result>();
         result->error_code = FollowJointTrajectory::Result::INVALID_JOINTS;
@@ -157,40 +176,89 @@ void TorqueControllerActionServer::jointStateCallback(
 {
     // 线程安全：加锁
     std::lock_guard<std::mutex> lock(state_mutex_);
-    
+
     // 首次接收数据
-    if (!state_received_) {
+    if (!state_received_)
+    {
         RCLCPP_INFO(this->get_logger(), "✅ 首次接收关节状态数据");
         state_received_ = true;
     }
-    
+
     // 验证数据
-    if (msg->position.size() != 6 || msg->velocity.size() != 6) {
+    if (msg->position.size() != 6 || msg->velocity.size() != 6)
+    {
         RCLCPP_WARN_THROTTLE(
-            this->get_logger(), 
-            *this->get_clock(), 
-            1000,  // 每秒最多打印一次
+            this->get_logger(),
+            *this->get_clock(),
+            1000, // 每秒最多打印一次
             "⚠️  关节状态数据不完整: position=%zu, velocity=%zu",
-            msg->position.size(), msg->velocity.size()
-        );
+            msg->position.size(), msg->velocity.size());
         return;
     }
-    
+
     // 提取位置和速度
-    for (size_t i = 0; i < 6; i++) {
+    for (size_t i = 0; i < 6; i++)
+    {
         q_actual_(i) = msg->position[i];
         q_dot_actual_(i) = msg->velocity[i];
     }
-    
+
     // 调试输出（限流）
     RCLCPP_INFO_THROTTLE(
         this->get_logger(),
         *this->get_clock(),
-        5000,  // 每 5 秒打印一次
+        5000, // 每 5 秒打印一次
         "📊 关节状态: q=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
         q_actual_(0), q_actual_(1), q_actual_(2),
-        q_actual_(3), q_actual_(4), q_actual_(5)
-    );
+        q_actual_(3), q_actual_(4), q_actual_(5));
+}
+
+bool TorqueControllerActionServer::initializeDynamics()
+{
+    RCLCPP_INFO(this->get_logger(), "📦 开始初始化动力学求解器...");
+    
+    // 1. 读取 URDF 文件
+    std::string urdf_path = "/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf";
+    std::ifstream urdf_file(urdf_path);
+    if (!urdf_file.is_open()) {
+        RCLCPP_ERROR(this->get_logger(), "❌ 无法打开 URDF 文件: %s", urdf_path.c_str());
+        return false;
+    }
+    
+    std::string urdf_string((std::istreambuf_iterator<char>(urdf_file)),
+                            std::istreambuf_iterator<char>());
+    urdf_file.close();
+        
+    // 2. 解析 URDF
+    urdf::Model urdf_model;
+    if (!urdf_model.initString(urdf_string)) {
+        RCLCPP_ERROR(this->get_logger(), "❌ URDF 解析失败");
+        return false;
+    }
+    
+    // 3. 提取 KDL 树
+    KDL::Tree kdl_tree;
+    if (!kdl_parser::treeFromUrdfModel(urdf_model, kdl_tree)) {
+        RCLCPP_ERROR(this->get_logger(), "❌ 从 URDF 构建 KDL 树失败");
+        return false;
+    }
+    
+    // 4. 获取运动链（从 base_link 到 link6_2006roll）
+    if (!kdl_tree.getChain("base_link", "link6_2006roll", kdl_chain_)) {
+        RCLCPP_ERROR(this->get_logger(), "❌ 提取运动链失败");
+        return false;
+    }
+    
+    
+    // 5. 创建动力学计算工具
+    KDL::Vector gravity(0.0, 0.0, -9.81);  // 重力向量
+    dynamic_computer_ = std::make_unique<DynamicsComputer>(kdl_chain_, gravity);
+    
+    RCLCPP_INFO(this->get_logger(), "✅ 动力学求解器初始化完成");
+    RCLCPP_INFO(this->get_logger(), "   - 重力: [%.2f, %.2f, %.2f] m/s²", 
+                gravity.x(), gravity.y(), gravity.z());
+
+    return true;
 }
 
 int main(int argc, char **argv)
