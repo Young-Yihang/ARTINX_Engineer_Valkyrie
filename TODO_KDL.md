@@ -1,53 +1,236 @@
-# ARV V1 机械臂力矩控制系统设计蓝图
+# ARV V1 力矩控制系统 - 实现要点
 
-> **项目目标**: 基于MoveIt路径规划，实现自定义动力学解算的力矩控制仿真系统
+> **项目目标**: 基于MoveIt规划，实现自定义动力学解算的力矩控制
 > 
-> **创建时间**: 2025-10-28  
-> **版本**: v1.0  
-> **状态**: 规划阶段 🎯
+> **更新时间**: 2025-10-28  
+> **状态**: 阶段3 完成 ✅
 
 ---
 
-## 📦 现有资源分析
+## ✅ 已完成功能
 
-### ARV_V1_MODEL 包
-**描述**: 6自由度机械臂的完整URDF模型
+### 1. URDF 运动链提取 (urdf_parser.cpp)
 
-✅ **机械结构**:
-- 6个旋转关节 (joint_1 到 joint_6)
-- 完整的运动学链: base_link → link6_2006roll
+**核心功能**:
+- 使用 KDL 解析 URDF 文件
+- 提取 6 个关节的有序运动链
+- 自动包含质量、惯性、质心等动力学参数
 
-✅ **动力学参数**:
-- 质量参数 (mass): 每个连杆的质量
-- 惯性矩阵 (inertia): ixx, ixy, ixz, iyy, iyz, izz
-- 几何形状 (meshes): STL网格文件
-- 质心位置 (COM): xyz坐标
+**关键代码**:
+```cpp
+KDL::Chain getKDLChain() const;  // 返回包含完整动力学信息的运动链
+```
 
-✅ **关节限制**:
-- 力矩限制 (effort): 20 N·m
-- 速度限制 (velocity): 10.47 rad/s
-- 位置限制 (position): -3.14 ~ 3.14 rad
+**数据来源**: `base_link` → `link6_2006roll` (6个关节)
 
-✅ **动力学特性**:
-- 阻尼系数 (damping): 0.1
-- 摩擦系数 (friction): 0.1
+---
 
-### ARV_V1_MOVEIT 包
-**描述**: MoveIt运动规划配置
+### 2. 动力学求解器 (dynamics_solver_node.cpp)
 
-✅ **规划配置**:
-- 规划组 "ARM": base_link → link6_2006roll
-- 运动学求解器: KDL
-- 路径规划器: OMPL (RRTConnect等)
-- 预定义姿态: Escape, Start
+**核心功能**:
+- 订阅 `/joint_states` 获取关节状态 (q, q̇)
+- 数值微分计算加速度 q̈ = (q̇_current - q̇_previous) / Δt
+- 计算动力学方程: **τ = M(q)·q̈ + C(q,q̇) + G(q)**
+- 发布计算的力矩到 `/computed_torques`
 
-✅ **控制接口**:
-- 控制器: ARM_controller
-- 当前类型: JointTrajectoryController
-- 硬件接口: FakeSystem (需改为Gazebo)
-- 状态接口: position, velocity
+**动力学计算详解**:
 
-✅ **配置文件**:
+```
+τ₁ = M₁₁·q̈₁ + M₁₂·q̈₂ + ... + M₁₆·q̈₆ + C₁ + G₁
+     └──────────┬──────────┘         ↑    ↑
+          惯性项(考虑耦合)         科氏力 重力
+```
+
+**M(q)**: 质量矩阵 [6×6] - 由 URDF 的质量和惯性参数生成  
+**C(q,q̇)**: 科氏力/离心力 [6×1] - 速度耦合效应  
+**G(q)**: 重力项 [6×1] - 重力补偿
+
+**KDL 库函数**:
+```cpp
+dyn_param_->JntToMass(q, M);              // 计算质量矩阵
+dyn_param_->JntToCoriolis(q, q_dot, C);   // 计算科氏力
+dyn_param_->JntToGravity(q, G);           // 计算重力项
+```
+
+---
+
+### 3. 关键配置文件
+
+**ros2_controllers.yaml**:
+```yaml
+ARM_controller:  # MoveIt 使用的标准位置控制器
+  type: joint_trajectory_controller/JointTrajectoryController
+  
+effort_controller:  # 后续力矩控制用（预留）
+  type: effort_controllers/JointGroupEffortController
+```
+
+**ARV_V1_MODEL.ros2_control.xacro**:
+```xml
+<command_interface name="effort"/>  # 支持力矩命令
+<state_interface name="position"/>
+<state_interface name="velocity"/>
+<state_interface name="effort"/>
+```
+
+---
+
+## 🎯 核心技术要点
+
+### 惯性矩阵如何生成？
+
+**来源**: URDF 文件中的 `<inertial>` 标签
+```xml
+<inertial>
+  <mass value="0.208"/>
+  <inertia ixx="0.0001" ixy="0" ixz="0" 
+           iyy="0.0002" iyz="0" izz="0.0001"/>
+</inertial>
+```
+
+**生成过程**:
+```
+URDF 参数 → KDL::Chain → ChainDynParam → JntToMass(q, M)
+```
+
+KDL 使用**递归牛顿-欧拉算法**，考虑：
+- 每个连杆的质量
+- 惯性张量（6个独立参数）
+- 当前关节位置 q
+- 运动学约束
+
+**结果**: 6×6 对称正定矩阵 M(q)，随关节位置变化
+
+---
+
+### 科氏力/离心力如何计算？
+
+**物理意义**:
+- **离心力**: 旋转运动产生的向外力
+- **科氏力**: 一个关节运动对其他关节的影响
+
+**KDL 实现**:
+```cpp
+dyn_param_->JntToCoriolis(q, q_dot, C);
+// 内部计算: C = h(q,q̇) - M(q)·0
+// h 包含所有速度相关项
+```
+
+**注意**: KDL 直接返回向量 C，而不是矩阵 C(q,q̇)
+
+---
+
+### 数值微分的噪声问题
+
+**当前实现**:
+```cpp
+q̈ ≈ (q̇_current - q̇_previous) / Δt
+```
+
+**优点**: 简单直接  
+**缺点**: 对噪声敏感
+
+**后续改进方向**:
+- 低通滤波器（Butterworth）
+- 卡尔曼滤波
+- 多点差分法
+
+---
+
+## 📊 数据流总结
+
+### 当前实现（阶段3）
+
+```
+/joint_states (50 Hz) 
+  ├─ position: q
+  ├─ velocity: q̇
+  └─ (无 q̈)
+       ↓
+dynamics_solver_node
+  ├─ 数值微分: q̈ = Δq̇/Δt
+  ├─ KDL 计算: M(q), C(q,q̇), G(q)
+  └─ 力矩: τ = M·q̈ + C + G
+       ↓
+/computed_torques (观察学习用)
+```
+
+---
+
+## 🔜 下一步规划（阶段4）
+
+### Action Server 控制器
+
+**目标**: 让 MoveIt 能发送轨迹到我们的力矩控制器
+
+**实现架构**:
+```
+MoveIt 
+  ↓ FollowJointTrajectory Action
+TorqueControllerActionServer (待开发)
+  ├─ 接收完整轨迹（包含 q, q̇, q̈）
+  ├─ 轨迹插值
+  ├─ 动力学计算
+  ├─ PD 反馈控制
+  └─ 发布力矩到 Gazebo
+       ↓
+Gazebo (物理仿真)
+```
+
+**关键点**:
+- 提供 `/ARM_controller/follow_joint_trajectory` Action Server
+- MoveIt 认为是位置控制器，实际内部做力矩控制
+- 高频控制循环 (200-1000 Hz)
+
+---
+
+## 📝 技术细节记录
+
+### 为什么 joint_1 的重力项 G₁ ≈ 0？
+
+**原因**: joint_1 是**基座旋转关节**（绕 Z 轴）
+- 重力方向: (0, 0, -9.81)
+- 旋转轴方向: (0, 0, 1)
+- 力矩 = 力 × 力臂 × sin(角度)
+- 重力与旋转轴平行 → 力臂 = 0 → G₁ = 0
+
+**对比**: joint_2 是抬升关节（绕 Y 轴），需要对抗重力，G₂ >> 0
+
+---
+
+### 加速度计算的时间间隔
+
+**当前**: Δt ≈ 0.01s (100 Hz)  
+**来源**: `controller_manager` 的 `update_rate: 100`
+
+**验证方法**: 查看调试输出的 `dt` 值
+
+---
+
+## 🛠️ 关键文件清单
+
+| 文件 | 作用 | 状态 |
+|------|------|------|
+| `urdf_parser.cpp` | URDF 解析，提取运动链 | ✅ 完成 |
+| `dynamics_solver_node.cpp` | 动力学求解器 | ✅ 完成 |
+| `ros2_controllers.yaml` | 控制器配置 | ✅ 已配置 |
+| `ARV_V1_MODEL.ros2_control.xacro` | 硬件接口 | ✅ 已配置 |
+| `TODO_KDL.md` | 技术文档（本文件） | ✅ 持续更新 |
+
+---
+
+## 📚 学习要点总结
+
+1. **KDL 库的作用**: 自动化动力学计算，无需手写复杂公式
+2. **URDF 的重要性**: 包含所有必需的动力学参数
+3. **数值微分**: 简单但有噪声，需要后续优化
+4. **分层架构**: MoveIt 不需要知道底层是力矩控制
+5. **调试技巧**: 分解力矩组成，理解每一项的物理意义
+
+---
+
+**最后更新**: 2025-10-28  
+**当前进度**: 阶段3 完成，动力学求解器可以实时计算并观察力矩
 - joint_limits.yaml: 关节限制
 - kinematics.yaml: 运动学参数
 - ros2_controllers.yaml: 控制器配置
