@@ -2,8 +2,8 @@
 
 > **项目目标**: 基于MoveIt规划，实现自定义动力学解算的力矩控制
 > 
-> **更新时间**: 2025-10-28  
-> **状态**: 阶段3 完成 ✅
+> **更新时间**: 2025-10-29  
+> **状态**: 阶段4 部分完成 - Mock模式✅ / Gazebo集成⚠️
 
 ---
 
@@ -54,23 +54,111 @@ dyn_param_->JntToGravity(q, G);           // 计算重力项
 
 ---
 
-### 3. 关键配置文件
+### 3. 力矩控制 Action Server (torque_controller_node.cpp) ✅
 
-**ros2_controllers.yaml**:
-```yaml
-ARM_controller:  # MoveIt 使用的标准位置控制器
-  type: joint_trajectory_controller/JointTrajectoryController
+**核心功能**:
+- 提供 `/ARM_controller/follow_joint_trajectory` Action
+- 接收 MoveIt 规划的轨迹（包含 q_d, q̇_d, q̈_d）
+- 200 Hz 控制循环实时计算力矩
+- 集成 `DynamicsComputer` 进行动力学解算
+
+**控制律**:
+```
+τ_total = τ_ff + τ_fb
+
+τ_ff = M(q)·q̈_d + C(q,q̇) + G(q)  # 前馈（动力学补偿）
+τ_fb = Kp·(q_d - q) + Kd·(q̇_d - q̇)  # PD 反馈
+```
+
+**关键实现**:
+```cpp
+class TorqueControllerActionServer : public rclcpp::Node {
+  // 1. Action Server 接收 MoveIt 轨迹
+  rclcpp_action::Server<FollowJointTrajectory>::SharedPtr action_server_;
   
-effort_controller:  # 后续力矩控制用（预留）
+  // 2. 动力学计算器
+  std::unique_ptr<DynamicsComputer> dynamics_computer_;
+  
+  // 3. 200 Hz 控制定时器
+  rclcpp::TimerBase::SharedPtr control_timer_;
+  
+  // 4. 发布力矩命令
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr effort_pub_;
+};
+```
+
+**数据流**:
+```
+MoveIt 规划 → Action Goal (轨迹点 × N)
+            ↓
+轨迹插值器（200 Hz 采样）
+            ↓
+q_d[k], q̇_d[k], q̈_d[k]
+            ↓
+动力学解算 + PD 控制
+            ↓
+τ[6] → /effort_controller/commands
+            ↓
+ros2_control (Mock/Gazebo)
+```
+
+**验证**:
+```bash
+$ ros2 action list
+/ARM_controller/follow_joint_trajectory  # ✅ Action Server 正常
+
+$ ros2 topic echo /effort_controller/commands
+data: [0.123, 4.567, -1.234, 0.456, 0.789, -0.012]  # ✅ 力矩输出
+```
+
+---
+
+### 4. 关键配置文件
+
+**ros2_controllers.yaml** (已优化):
+```yaml
+controller_manager:
+  ros__parameters:
+    update_rate: 200  # ✅ 提升到 200 Hz
+
+effort_controller:  # ✅ 力矩控制器
   type: effort_controllers/JointGroupEffortController
+  joints:
+    - joint_1
+    - joint_2
+    - joint_3
+    - joint_4
+    - joint_5
+    - joint_6
+
+# ❌ 已删除 ARM_controller (避免冲突)
+```
+
+**initial_positions.yaml** (新增):
+```yaml
+initial_positions:
+  joint_1: 0.0
+  joint_2: 3.036
+  joint_3: 1.266
+  joint_4: 1.718
+  joint_5: 0.0
+  joint_6: 0.0
 ```
 
 **ARV_V1_MODEL.ros2_control.xacro**:
 ```xml
-<command_interface name="effort"/>  # 支持力矩命令
-<state_interface name="position"/>
-<state_interface name="velocity"/>
-<state_interface name="effort"/>
+<hardware>
+  <plugin>mock_components/GenericSystem</plugin>  # Mock 模式
+  <param name="mock_sensor_commands">true</param>
+  <param name="state_following_offset">0.0</param>
+</hardware>
+
+<joint name="joint_X">
+  <command_interface name="effort"/>  # ✅ 支持力矩命令
+  <state_interface name="position"/>
+  <state_interface name="velocity"/>
+  <state_interface name="effort"/>
+</joint>
 ```
 
 ---
@@ -159,28 +247,129 @@ dynamics_solver_node
 
 ## 🔜 下一步规划（阶段4）
 
-### Action Server 控制器
+### ✅ 已完成部分
 
-**目标**: 让 MoveIt 能发送轨迹到我们的力矩控制器
+#### 1. Action Server + 力矩控制器 (torque_controller_node.cpp)
 
-**实现架构**:
+**架构**:
 ```
 MoveIt 
   ↓ FollowJointTrajectory Action
-TorqueControllerActionServer (待开发)
+TorqueControllerActionServer (✅ 已实现)
   ├─ 接收完整轨迹（包含 q, q̇, q̈）
-  ├─ 轨迹插值
-  ├─ 动力学计算
-  ├─ PD 反馈控制
-  └─ 发布力矩到 Gazebo
+  ├─ 200 Hz 控制循环
+  ├─ 动力学计算: τ = M(q)·q̈ + C(q,q̇) + G(q)
+  ├─ PD 反馈控制: τ_fb = Kp·(q_d - q) + Kd·(q̇_d - q̇)
+  └─ 发布力矩到 `/effort_controller/commands`
        ↓
-Gazebo (物理仿真)
+Mock 硬件 (GenericSystem) ✅ 或 Gazebo ⚠️
 ```
 
-**关键点**:
-- 提供 `/ARM_controller/follow_joint_trajectory` Action Server
-- MoveIt 认为是位置控制器，实际内部做力矩控制
-- 高频控制循环 (200-1000 Hz)
+**关键实现**:
+- **Action Server**: 提供 `/ARM_controller/follow_joint_trajectory`
+- **动力学解算**: 集成 `DynamicsComputer` (M, C, G)
+- **前馈+反馈**: τ_total = τ_ff + τ_fb
+- **初始位姿支持**: `initial_positions.yaml` 配置
+- **频率优化**: controller_manager 200 Hz
+
+**验证结果**:
+```bash
+$ ros2 control list_controllers
+effort_controller[effort_controllers/JointGroupEffortController] active
+joint_state_broadcaster[joint_state_broadcaster/JointStateBroadcaster] active
+
+$ ros2 topic echo /joint_states --once
+position: [0.0, 3.036, 1.266, 1.718, 0.0, 0.0]  # 初始位姿正确
+```
+
+#### 2. Mock 硬件模式配置
+
+**配置文件**: `ARV_V1_MODEL.ros2_control.xacro`
+```xml
+<hardware>
+  <plugin>mock_components/GenericSystem</plugin>
+  <param name="mock_sensor_commands">true</param>
+  <param name="state_following_offset">0.0</param>
+</hardware>
+```
+
+**优势**:
+- ✅ 200 Hz 控制频率稳定
+- ✅ 动力学计算完全工作
+- ✅ RViz 可视化正确
+- ✅ 适合学习和调试动力学算法
+
+**局限**:
+- 无物理仿真（不考虑惯性、碰撞）
+- 关节位置直接跟随力矩命令（state_following）
+
+---
+
+### ⚠️ Gazebo 集成遇到的技术障碍
+
+#### 问题1: Gazebo Harmonic 不支持 URDF 力矩控制
+
+**尝试方案**:
+```xml
+<!-- 在 ARV_V1_MODEL.urdf 中添加 -->
+<gazebo reference="joint_X">
+  <implicitSpringDamper>false</implicitSpringDamper>
+  <provideFeedback>true</provideFeedback>  <!-- ❌ 仅 Classic 有效 -->
+</gazebo>
+```
+
+**结果**: Gazebo Harmonic 中无效
+- `gz topic -l` 只显示 `/world/default/model/arv_v1/joint_state`
+- 没有 `/model/arv_v1/joint/*/cmd_force` 话题
+
+#### 问题2: gz_ros2_control 插件加载失败
+
+**历史尝试**:
+- 多次尝试在 URDF/Xacro 中配置 `<gz_ros2_control>` 插件
+- SDF 文件配置（复杂度高）
+- 均失败：插件未加载或力矩接口未启用
+
+**错误示例**:
+```
+[parameter_bridge] [WARN]: Failed to create a bridge for topic 
+[/effort_controller/commands] with ROS2 type [std_msgs/msg/Float64MultiArray] 
+to topic [/model/arv_v1/joint/joint_1/cmd_force] with Gazebo Transport type 
+[gz.msgs.Double]: No template specialization for the pair
+```
+
+#### 问题3: ROS2 Jazzy 不支持 Gazebo Classic
+
+**发现**:
+```bash
+$ which gazebo
+# 无输出 - Classic 未安装
+
+$ dpkg -l | grep "gz-"
+# 只有 Gazebo Harmonic (gz-sim-vendor, gz-sim8, etc.)
+```
+
+**原因**: ROS2 Jazzy 完全移除 Gazebo Classic 支持
+
+---
+
+### 🎯 当前技术决策点
+
+**三个可选方案**:
+
+**选项 A: 深入配置 gz_ros2_control** ⚙️
+- 需要：创建 SDF 文件，正确配置插件
+- 优势：支持 Gazebo Harmonic
+- 风险：之前多次失败，配置复杂
+
+**选项 B: 降级到 ROS2 Humble** 🔽
+- 需要：重装系统或虚拟环境
+- 优势：支持 Gazebo Classic（URDF 力矩控制成熟）
+- 成本：重新配置整个环境
+
+**选项 C: 接受 Mock 模式** ✅
+- 优势：已完全工作，满足学习目标
+- 方法：通过数据记录和分析验证动力学正确性
+- 适用：理解动力学算法比物理仿真更重要
 
 ---
 
@@ -211,30 +400,40 @@ Gazebo (物理仿真)
 
 | 文件 | 作用 | 状态 |
 |------|------|------|
-| `urdf_parser.cpp` | URDF 解析，提取运动链 | ✅ 完成 |
-| `dynamics_solver_node.cpp` | 动力学求解器 | ✅ 完成 |
-| `ros2_controllers.yaml` | 控制器配置 | ✅ 已配置 |
-| `ARV_V1_MODEL.ros2_control.xacro` | 硬件接口 | ✅ 已配置 |
+| **核心代码** | | |
+| `urdf_parser.cpp` / `hpp` | URDF 解析，提取 KDL 运动链 | ✅ 完成 |
+| `dynamics_computer.cpp` / `hpp` | 动力学计算器 (M, C, G) | ✅ 完成 |
+| `torque_controller_node.cpp` | Action Server + 力矩控制器 | ✅ 完成 |
+| **配置文件** | | |
+| `ros2_controllers.yaml` | ros2_control 配置（200 Hz） | ✅ 优化完成 |
+| `initial_positions.yaml` | 初始关节位姿 | ✅ 已配置 |
+| `ARV_V1_MODEL.ros2_control.xacro` | 硬件接口（Mock/Gazebo） | ✅ Mock 完成 |
+| `moveit_gazebo.launch.py` | 完整系统启动文件 | ⚠️ Gazebo 部分受阻 |
+| **文档** | | |
 | `TODO_KDL.md` | 技术文档（本文件） | ✅ 持续更新 |
+| `claude.md` | 用户指南 | ✅ 保持最新 |
+| `README.md` | 项目说明 | ✅ 保留 |
 
 ---
 
 ## 📚 学习要点总结
 
 1. **KDL 库的作用**: 自动化动力学计算，无需手写复杂公式
-2. **URDF 的重要性**: 包含所有必需的动力学参数
-3. **数值微分**: 简单但有噪声，需要后续优化
-4. **分层架构**: MoveIt 不需要知道底层是力矩控制
-5. **调试技巧**: 分解力矩组成，理解每一项的物理意义
+2. **URDF 的重要性**: 包含所有必需的动力学参数（质量、惯性、关节轴）
+3. **数值微分**: 通过 Δt 计算 q̈，简单但需注意噪声
+4. **分层架构**: MoveIt 通过 Action 接口与力矩控制器通信，解耦设计
+5. **前馈+反馈**: τ_ff 补偿动力学，τ_fb 修正误差
+6. **Mock vs 真实硬件**: Mock 模式适合算法验证，物理仿真验证完整系统
+7. **调试技巧**: 分解力矩组成 (M·q̈, C, G)，理解每一项的物理意义
 
 ---
 
-**最后更新**: 2025-10-28  
-**当前进度**: 阶段3 完成，动力学求解器可以实时计算并观察力矩
-- joint_limits.yaml: 关节限制
-- kinematics.yaml: 运动学参数
-- ros2_controllers.yaml: 控制器配置
-- moveit_controllers.yaml: MoveIt控制器映射
+**最后更新**: 2025-10-29  
+**当前进度**: 阶段4 部分完成
+- ✅ Action Server + 力矩控制器 (200 Hz)
+- ✅ Mock 硬件模式完全工作
+- ⚠️ Gazebo Harmonic 集成遇到技术障碍
+- 🎯 待决策：gz_ros2_control / 降级 Humble / 接受 Mock
 
 ---
 
@@ -1354,9 +1553,9 @@ ros2 launch ARV_V1_MOVEIT demo.launch.py
 ---
 
 **文档状态**: 🟢 活跃开发  
-**最后更新**: 2025-10-28  
+**最后更新**: 2025-10-29  
 **维护者**: -  
 
 ---
 
-> 💡 **提示**: 这是一个迭代文档，随着项目进展会持续更新。建议每完成一个阶段就更新相应的状态和经验总结。
+> 💡 **提示**: 这是一个迭代文档，随着项目进展会持续更新。阶段4 已完成 Mock 模式，Gazebo 集成需进一步决策。

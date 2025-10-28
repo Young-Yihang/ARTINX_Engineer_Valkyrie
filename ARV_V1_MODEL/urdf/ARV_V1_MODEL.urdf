@@ -440,4 +440,40 @@
       k_position="0"
       k_velocity="0" />
   </joint>
+
+  <!-- Gazebo 关节配置：启用力矩控制 -->
+  <gazebo reference="joint_1">
+    <implicitSpringDamper>false</implicitSpringDamper>
+    <provideFeedback>true</provideFeedback>
+  </gazebo>
+  <gazebo reference="joint_2">
+    <implicitSpringDamper>false</implicitSpringDamper>
+    <provideFeedback>true</provideFeedback>
+  </gazebo>
+  <gazebo reference="joint_3">
+    <implicitSpringDamper>false</implicitSpringDamper>
+    <provideFeedback>true</provideFeedback>
+  </gazebo>
+  <gazebo reference="joint_4">
+    <implicitSpringDamper>false</implicitSpringDamper>
+    <provideFeedback>true</provideFeedback>
+  </gazebo>
+  <gazebo reference="joint_5">
+    <implicitSpringDamper>false</implicitSpringDamper>
+    <provideFeedback>true</provideFeedback>
+  </gazebo>
+  <gazebo reference="joint_6">
+    <implicitSpringDamper>false</implicitSpringDamper>
+    <provideFeedback>true</provideFeedback>
+  </gazebo>
+
+  <!-- 固定底座到世界坐标系，防止机械臂倒下 -->
+  <link name="world"/>
+  
+  <joint name="world_fixed" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.5" rpy="0 0 0"/>  <!-- Z=0.5米，让底座在地面上方 -->
+  </joint>
+
 </robot>

@@ -5,11 +5,12 @@
 
         <ros2_control name="${name}" type="system">
             <hardware>
-                <!-- By default, set up controllers for simulation. This won't work on real hardware -->
+                <!-- 使用 mock 硬件用于测试和开发 -->
                 <plugin>mock_components/GenericSystem</plugin>
             </hardware>
             <joint name="joint_1">
                 <command_interface name="position"/>
+                <command_interface name="effort"/>  <!-- 添加力矩命令接口 -->
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['joint_1']}</param>
                 </state_interface>
@@ -18,6 +19,7 @@
             </joint>
             <joint name="joint_2">
                 <command_interface name="position"/>
+                <command_interface name="effort"/>  <!-- 添加力矩命令接口 -->
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['joint_2']}</param>
                 </state_interface>
@@ -26,6 +28,7 @@
             </joint>
             <joint name="joint_3">
                 <command_interface name="position"/>
+                <command_interface name="effort"/>  <!-- 添加力矩命令接口 -->
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['joint_3']}</param>
                 </state_interface>
@@ -34,6 +37,7 @@
             </joint>
             <joint name="joint_4">
                 <command_interface name="position"/>
+                <command_interface name="effort"/>  <!-- 添加力矩命令接口 -->
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['joint_4']}</param>
                 </state_interface>
@@ -42,6 +46,7 @@
             </joint>
             <joint name="joint_5">
                 <command_interface name="position"/>
+                <command_interface name="effort"/>  <!-- 添加力矩命令接口 -->
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['joint_5']}</param>
                 </state_interface>
@@ -50,6 +55,7 @@
             </joint>
             <joint name="joint_6">
                 <command_interface name="position"/>
+                <command_interface name="effort"/>  <!-- 添加力矩命令接口 -->
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['joint_6']}</param>
                 </state_interface>

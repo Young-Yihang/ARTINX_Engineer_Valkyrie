@@ -8,7 +8,7 @@
     <!-- Import control_xacro -->
     <xacro:include filename="ARV_V1_MODEL.ros2_control.xacro" />
 
-
+    <!-- ros2_control 标签（使用 mock 硬件） -->
     <xacro:ARV_V1_MODEL_ros2_control name="FakeSystem" initial_positions_file="$(arg initial_positions_file)"/>
 
 </robot>

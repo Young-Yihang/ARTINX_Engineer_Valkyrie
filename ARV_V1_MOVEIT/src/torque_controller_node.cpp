@@ -7,7 +7,7 @@
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>  // 力矩数组消息
 #include <kdl/jntarray.hpp>
 #include <kdl/chain.hpp>
 #include <kdl_parser/kdl_parser.hpp>
@@ -64,17 +64,20 @@ public: // 构造函数log
                       std::placeholders::_1));
 
         // ========== 创建 Action Server ==========
+        // MoveIt 会发送到: /ARM_controller/follow_joint_trajectory
         action_server_ = rclcpp_action::create_server<FollowJointTrajectory>(
             this,
-            "follow_joint_trajectory",                                                                                /// 回调函数被传递给ros2服务器系统                                                                           // Action 名称，用于和moveit的action对齐
-            std::bind(&TorqueControllerActionServer::handleGoal, this, std::placeholders::_1, std::placeholders::_2), // 回调函数，收到新目标
-            std::bind(&TorqueControllerActionServer::handleCancel, this, std::placeholders::_1),                      // 回调函数，收到取消请求
-            std::bind(&TorqueControllerActionServer::handleAccepted, this, std::placeholders::_1));                   // 回调函数，决定开始执行力矩计算器
+            "ARM_controller/follow_joint_trajectory",  // 完整的 action 名称
+            std::bind(&TorqueControllerActionServer::handleGoal, this, std::placeholders::_1, std::placeholders::_2),
+            std::bind(&TorqueControllerActionServer::handleCancel, this, std::placeholders::_1),
+            std::bind(&TorqueControllerActionServer::handleAccepted, this, std::placeholders::_1));
 
-        RCLCPP_INFO(this->get_logger(), "话题订阅！ 📡 Action Server 已创建: /follow_joint_trajectory");
+        RCLCPP_INFO(this->get_logger(), "📡 Action Server 已创建: /ARM_controller/follow_joint_trajectory");
+        
+        // ========== 创建力矩发布者 ==========
         torque_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
-            "/effort_controller/commands", // 话题名称
-            10                             // 队列大小
+            "/effort_controller/commands",  // ros2_control 的 effort_controller 会订阅这个话题
+            10
         );
 
         RCLCPP_INFO(this->get_logger(), "📡 力矩发布者已创建: /effort_controller/commands");
@@ -106,9 +109,9 @@ private:
     KDL::JntArray Kp_; // P of position
     KDL::JntArray Kd_; // D of position
 
-    rclcpp::TimerBase::SharedPtr control_timer_;                                // 控制循环定时器
-    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_; // 力矩发布者
-    double control_frequency_;                                                  // 控制频率 (Hz)
+    rclcpp::TimerBase::SharedPtr control_timer_;                                  // 控制循环定时器
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_;   // 力矩发布者
+    double control_frequency_;                                                    // 控制频率 (Hz)
 
     // Action 回调函数
     rclcpp_action::GoalResponse handleGoal(
@@ -177,43 +180,43 @@ void TorqueControllerActionServer::handleAccepted(
     const std::shared_ptr<GoalHandleFJT> goal_handle)
 {
     RCLCPP_INFO(this->get_logger(), "🎯 目标已接受，准备执行");
-    
+
     // 检查是否收到关节状态
-    if (!state_received_) {
+    if (!state_received_)
+    {
         RCLCPP_ERROR(this->get_logger(), "❌ 未收到关节状态数据，拒绝执行");
         auto result = std::make_shared<FollowJointTrajectory::Result>();
         result->error_code = FollowJointTrajectory::Result::INVALID_JOINTS;
         goal_handle->abort(result);
         return;
     }
-    
+
     // 缓存轨迹
     const auto goal = goal_handle->get_goal();
     current_trajectory_ = goal->trajectory;
     current_goal_handle_ = goal_handle;
     trajectory_start_time_ = this->now();
     is_executing_ = true;
-    
+
     // 打印轨迹信息
-    const auto& first_point = current_trajectory_.points[0];
-    const auto& last_point = current_trajectory_.points.back();
+    const auto &first_point = current_trajectory_.points[0];
+    const auto &last_point = current_trajectory_.points.back();
     double total_duration = last_point.time_from_start.sec + last_point.time_from_start.nanosec * 1e-9;
-    
+
     RCLCPP_INFO(this->get_logger(), "📦 轨迹已缓存:");
     RCLCPP_INFO(this->get_logger(), "   - 关节数: %zu", current_trajectory_.joint_names.size());
     RCLCPP_INFO(this->get_logger(), "   - 轨迹点数: %zu", current_trajectory_.points.size());
     RCLCPP_INFO(this->get_logger(), "   - 总时长: %.3f 秒", total_duration);
-    
+
     RCLCPP_INFO(this->get_logger(), "🚀 启动控制循环 (%.1f Hz)...", control_frequency_);
-    
+
     // 计算定时器周期（单位：毫秒）
     auto period = std::chrono::duration<double, std::milli>(1000.0 / control_frequency_);
-    
+
     // 创建定时器
     control_timer_ = this->create_wall_timer(
         period,
-        std::bind(&TorqueControllerActionServer::controlLoop, this)
-    );
+        std::bind(&TorqueControllerActionServer::controlLoop, this));
 }
 
 void TorqueControllerActionServer::jointStateCallback(
@@ -449,7 +452,119 @@ void TorqueControllerActionServer::computeFeedbackTorque(
     }
 }
 
+void TorqueControllerActionServer::controlLoop()
+{
+    if (!is_executing_)
+    {
+        return;
+    }
 
+    // 现在时间获取
+    double t_now = (this->now() - trajectory_start_time_).seconds();
+
+    // 获取轨迹TIME
+    const auto &last_point = current_trajectory_.points.back();
+    double total_duration = last_point.time_from_start.sec +
+                            last_point.time_from_start.nanosec * 1e-9;
+
+    if (t_now >= total_duration) // 检查是否完成
+    {
+        RCLCPP_INFO(this->get_logger(), "✅ 轨迹执行完成！");
+
+        // 停止定时器
+        control_timer_->cancel();
+
+        // 发布零力矩（停止）
+        std_msgs::msg::Float64MultiArray zero_torque;
+        zero_torque.data.resize(6, 0.0);
+        torque_pub_->publish(zero_torque);
+
+        // 返回成功结果
+        auto result = std::make_shared<FollowJointTrajectory::Result>();
+        result->error_code = FollowJointTrajectory::Result::SUCCESSFUL;
+        current_goal_handle_->succeed(result);
+
+        // 清理状态
+        is_executing_ = false;
+        current_goal_handle_.reset();
+        return;
+    }
+
+    // 插值（时间不连续）
+    KDL::JntArray q_d(6), qd_d(6), qdd_d(6);
+    if (!interpolateTrajectory(t_now, q_d, qd_d, qdd_d))
+    {
+        RCLCPP_ERROR(this->get_logger(), "❌ 轨迹插值失败");
+        return;
+    }
+
+    // 获取实际状态（线程安全）
+    KDL::JntArray q_actual(6), qd_actual(6);
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        q_actual = q_actual_;
+        qd_actual = q_dot_actual_;
+    }
+
+    KDL::JntArray tau_ff(6);
+    dynamic_computer_->computeFeedforwardTorque(q_d, qd_d, qdd_d, tau_ff); // 计算前馈
+
+    KDL::JntArray tau_fb(6);
+    computeFeedbackTorque(q_d, qd_d, q_actual, qd_actual, tau_fb); // 计算反馈
+
+    KDL::JntArray tau_total(6);
+    for (size_t i = 0; i < 6; i++)
+    {
+        tau_total(i) = tau_ff(i) + tau_fb(i);
+    } // PD+前馈力矩
+
+    // 发送力矩到 ros2_control effort_controller
+    std_msgs::msg::Float64MultiArray torque_msg;
+    torque_msg.data.resize(6);
+    for (size_t i = 0; i < 6; i++)
+    {
+        torque_msg.data[i] = tau_total(i);
+    }
+    torque_pub_->publish(torque_msg);
+
+    auto feedback = std::make_shared<FollowJointTrajectory::Feedback>();
+    feedback->header.stamp = this->now(); // 获取反馈指针
+
+    feedback->actual.positions.resize(6);
+    feedback->actual.velocities.resize(6);
+    for (size_t i = 0; i < 6; i++)
+    {
+        feedback->actual.positions[i] = q_actual(i);
+        feedback->actual.velocities[i] = qd_actual(i); // 更新q-当前
+    }
+
+    feedback->desired.positions.resize(6);
+    feedback->desired.velocities.resize(6);
+    for (size_t i = 0; i < 6; i++)
+    {
+        feedback->desired.positions[i] = q_d(i);
+        feedback->desired.velocities[i] = qd_d(i); // 更新q-期望
+    }
+
+    feedback->error.positions.resize(6);
+    feedback->error.velocities.resize(6);
+    for (size_t i = 0; i < 6; i++)
+    {
+        feedback->error.positions[i] = q_d(i) - q_actual(i);
+        feedback->error.velocities[i] = qd_d(i) - qd_actual(i); // error
+    }
+
+    current_goal_handle_->publish_feedback(feedback);
+
+    RCLCPP_INFO_THROTTLE(
+        this->get_logger(),
+        *this->get_clock(),
+        1000, // 每秒打印一次
+        "⏱️  t=%.3f/%.3f | τ=[%.1f, %.1f, %.1f, ...] | err_p=[%.4f, %.4f, %.4f, ...]",
+        t_now, total_duration,
+        tau_total(0), tau_total(1), tau_total(2),
+        feedback->error.positions[0], feedback->error.positions[1], feedback->error.positions[2]);
+}
 
 int main(int argc, char **argv)
 {

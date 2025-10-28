@@ -8,7 +8,7 @@ endif()
 # 查找依赖
 find_package(ament_cmake REQUIRED)
 
-# 安装目录
+# 安装目录（一次性安装所有资源）
 install(DIRECTORY
   launch
   meshes
@@ -16,5 +16,5 @@ install(DIRECTORY
   config
   DESTINATION share/${PROJECT_NAME}/
 )
-#
+
 ament_package()

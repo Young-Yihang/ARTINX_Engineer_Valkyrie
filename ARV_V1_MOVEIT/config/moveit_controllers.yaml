@@ -4,11 +4,11 @@ moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControll
 
 moveit_simple_controller_manager:
   controller_names:
-    - ARM_controller
+    - ARM_controller  # 指向你的自定义控制器的 action namespace
 
-  ARM_controller: # fake controller for ARV_V1_MODEL
+  ARM_controller:  # 你的 TorqueControllerActionServer 需要提供这个 action
     type: FollowJointTrajectory
-    action_ns: follow_joint_trajectory
+    action_ns: follow_joint_trajectory  # 完整路径: /ARM_controller/follow_joint_trajectory
     default: true
     joints:
       - joint_1

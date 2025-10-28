@@ -140,5 +140,11 @@ install(
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(FILES .setup_assistant DESTINATION share/${PROJECT_NAME})
 
+# 安装 Python 脚本
+install(PROGRAMS
+  scripts/effort_to_gazebo.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # ============= 5. ament_package() 必须在最后 =============
 ament_package()

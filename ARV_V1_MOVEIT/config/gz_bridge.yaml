@@ -1,0 +1,29 @@
+# Gazebo <-> ROS2 话题桥接配置
+# 用于力矩控制和状态反馈
+
+# ========== 力矩命令：ROS2 → Gazebo ==========
+# torque_controller_node 发布 → Gazebo 物理引擎接收
+- ros_topic_name: "/effort_controller/commands"
+  gz_topic_name: "/model/arv_v1/joint/joint_1/cmd_force"
+  ros_type_name: "std_msgs/msg/Float64MultiArray"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+# 注意：Gazebo 每个关节需要单独的力矩话题
+# 这里使用自定义转换节点处理数组 → 单个力矩
+
+# ========== 关节状态：Gazebo → ROS2 ==========
+# Gazebo 物理反馈 → torque_controller_node 闭环控制
+- ros_topic_name: "/joint_states"
+  gz_topic_name: "/world/default/model/arv_v1/joint_state"
+  ros_type_name: "sensor_msgs/msg/JointState"
+  gz_type_name: "gz.msgs.Model"
+  direction: GZ_TO_ROS
+
+# ========== 时钟同步 ==========
+# Gazebo 仿真时钟 → ROS2 节点使用
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
