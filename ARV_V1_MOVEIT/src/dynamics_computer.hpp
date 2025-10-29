@@ -27,6 +27,15 @@ public:
         KDL::JntArray &tau_ff);
 
     /**
+     * @brief 计算重力补偿力矩 τ_g = G(q)
+     * @param q 期望关节位置
+     * @param tau_ff 输出：前馈力矩
+     */
+    void computeGravityTorque(
+        const KDL::JntArray &q,
+        KDL::JntArray &tau_ff);
+
+    /**
      * @brief 单独获取惯性矩阵 M(q)
      */
     void getMassMatrix(const KDL::JntArray &q,

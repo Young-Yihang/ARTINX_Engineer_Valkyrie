@@ -13,6 +13,20 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
+find_package(glfw3 REQUIRED)
+# ========== MuJoCo手动配置 ==========
+# 设置MuJoCo安装路径
+set(MUJOCO_DIR "/home/huan/.local/lib/python3.12/site-packages/mujoco")
+
+# 头文件目录
+set(MUJOCO_INCLUDE_DIRS "${MUJOCO_DIR}/include")
+
+# 库文件
+set(MUJOCO_LIBRARIES "${MUJOCO_DIR}/libmujoco.so.3.3.7")
+
+# 打印找到的路径（调试用）
+message(STATUS "MuJoCo include: ${MUJOCO_INCLUDE_DIRS}")
+message(STATUS "MuJoCo library: ${MUJOCO_LIBRARIES}")
 
 # 包含头文件目录
 include_directories(include)
@@ -76,7 +90,6 @@ ament_target_dependencies(dynamics_solver_node
 )
 
 # -------------------------------------------
-
 # 力矩控制器 Action Server 节点 (Stage 4)
 add_executable(torque_controller_node 
   src/torque_controller_node.cpp
@@ -119,6 +132,41 @@ ament_target_dependencies(torque_controller_node
   Eigen3
 )
 
+# -------------------------------------------
+
+# MuJoCo接口节点 (Stage 4 - MuJoCo仿真)
+add_executable(mujoco_interface_node 
+  src/mujoco_interface_node.cpp
+)
+
+# 链接库
+target_link_libraries(mujoco_interface_node
+  ${rclcpp_LIBRARIES}
+  ${MUJOCO_LIBRARIES}  # ← 使用手动配置的MuJoCo库
+  glfw  # GLFW窗口库
+)
+
+# 头文件路径
+target_include_directories(mujoco_interface_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${rclcpp_INCLUDE_DIRS}
+  ${MUJOCO_INCLUDE_DIRS}  # ← 添加MuJoCo头文件
+)
+
+# 设置运行时库路径 
+set_target_properties(mujoco_interface_node PROPERTIES
+  INSTALL_RPATH "${MUJOCO_DIR}"
+  BUILD_WITH_INSTALL_RPATH TRUE
+)
+
+# ROS2 依赖
+ament_target_dependencies(mujoco_interface_node
+  rclcpp
+  sensor_msgs
+  std_msgs
+)
+
 # ============= 4. 安装 =============
 
 # 安装可执行文件和库
@@ -126,6 +174,7 @@ install(TARGETS
   dynamics_computer       # ← 新增：安装工具类库
   dynamics_solver_node
   torque_controller_node
+  mujoco_interface_node 
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -142,7 +191,6 @@ install(FILES .setup_assistant DESTINATION share/${PROJECT_NAME})
 
 # 安装 Python 脚本
 install(PROGRAMS
-  scripts/effort_to_gazebo.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

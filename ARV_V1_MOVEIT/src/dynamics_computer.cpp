@@ -45,6 +45,14 @@ void DynamicsComputer::computeFeedforwardTorque(
     }
 }
 
+void DynamicsComputer::computeGravityTorque(
+    const KDL::JntArray &q,
+    KDL::JntArray &tau_ff)
+{
+    // 直接计算重力项 G(q)
+    dyn_param_->JntToGravity(q, tau_ff);
+}
+
 void DynamicsComputer::getMassMatrix(const KDL::JntArray& q, 
                                      KDL::JntSpaceInertiaMatrix& M)
 {

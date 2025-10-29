@@ -4,6 +4,11 @@
      For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
 <robot
   name="ARV_V1_MODEL">
+  <mujoco>
+    <compiler meshdir="/home/huan/ros2_ws/src/ARV_V1_MODEL/meshes" strippath="false"/>
+    <option timestep="0.005"/>
+  </mujoco>
+
   <link
     name="base_link">
     <inertial>
@@ -26,7 +31,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/base_link.STL" />
+          filename="base_link.STL" />
       </geometry>
       <material
         name="">
@@ -40,7 +45,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/base_link.STL" />
+          filename="base_link.STL" />
       </geometry>
     </collision>
   </link>
@@ -66,7 +71,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link1_double8009.STL" />
+          filename="link1_double8009.STL" />
       </geometry>
       <material
         name="">
@@ -80,7 +85,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link1_double8009.STL" />
+          filename="link1_double8009.STL" />
       </geometry>
     </collision>
   </link>
@@ -132,7 +137,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link2_arm1.STL" />
+          filename="link2_arm1.STL" />
       </geometry>
       <material
         name="">
@@ -146,7 +151,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link2_arm1.STL" />
+          filename="link2_arm1.STL" />
       </geometry>
     </collision>
   </link>
@@ -198,7 +203,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link3_sight.STL" />
+          filename="link3_sight.STL" />
       </geometry>
       <material
         name="">
@@ -212,7 +217,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link3_sight.STL" />
+          filename="link3_sight.STL" />
       </geometry>
     </collision>
   </link>
@@ -264,7 +269,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link4_arm2.STL" />
+          filename="link4_arm2.STL" />
       </geometry>
       <material
         name="">
@@ -278,7 +283,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link4_arm2.STL" />
+          filename="link4_arm2.STL" />
       </geometry>
     </collision>
   </link>
@@ -330,7 +335,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link5_4310pitch.STL" />
+          filename="link5_4310pitch.STL" />
       </geometry>
       <material
         name="">
@@ -344,7 +349,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link5_4310pitch.STL" />
+          filename="link5_4310pitch.STL" />
       </geometry>
     </collision>
   </link>
@@ -396,7 +401,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link6_2006roll.STL" />
+          filename="link6_2006roll.STL" />
       </geometry>
       <material
         name="">
@@ -410,7 +415,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://ARV_V1_MODEL/meshes/link6_2006roll.STL" />
+          filename="link6_2006roll.STL" />
       </geometry>
     </collision>
   </link>

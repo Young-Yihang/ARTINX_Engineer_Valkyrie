@@ -7,7 +7,7 @@
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/float64_multi_array.hpp>  // 力矩数组消息
+#include <std_msgs/msg/float64_multi_array.hpp> // 力矩数组消息
 #include <kdl/jntarray.hpp>
 #include <kdl/chain.hpp>
 #include <kdl_parser/kdl_parser.hpp>
@@ -67,21 +67,27 @@ public: // 构造函数log
         // MoveIt 会发送到: /ARM_controller/follow_joint_trajectory
         action_server_ = rclcpp_action::create_server<FollowJointTrajectory>(
             this,
-            "ARM_controller/follow_joint_trajectory",  // 完整的 action 名称
+            "ARM_controller/follow_joint_trajectory", // 完整的 action 名称
             std::bind(&TorqueControllerActionServer::handleGoal, this, std::placeholders::_1, std::placeholders::_2),
             std::bind(&TorqueControllerActionServer::handleCancel, this, std::placeholders::_1),
             std::bind(&TorqueControllerActionServer::handleAccepted, this, std::placeholders::_1));
 
         RCLCPP_INFO(this->get_logger(), "📡 Action Server 已创建: /ARM_controller/follow_joint_trajectory");
-        
+
         // ========== 创建力矩发布者 ==========
         torque_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
-            "/effort_controller/commands",  // ros2_control 的 effort_controller 会订阅这个话题
-            10
-        );
+            "/effort_controller/commands", // ros2_control 的 effort_controller 会订阅这个话题
+            10);
 
         RCLCPP_INFO(this->get_logger(), "📡 力矩发布者已创建: /effort_controller/commands");
         RCLCPP_INFO(this->get_logger(), "⚙️  控制频率: %.1f Hz", control_frequency_);
+
+        auto period = std::chrono::duration<double, std::milli>(1000.0 / control_frequency_);
+        control_timer_ = this->create_wall_timer(
+            period,
+            std::bind(&TorqueControllerActionServer::controlLoop, this));
+
+        RCLCPP_INFO(this->get_logger(), "⚙️  控制循环定时器已启动 (%.1f Hz)", control_frequency_);
     }
 
     ~TorqueControllerActionServer()
@@ -109,9 +115,9 @@ private:
     KDL::JntArray Kp_; // P of position
     KDL::JntArray Kd_; // D of position
 
-    rclcpp::TimerBase::SharedPtr control_timer_;                                  // 控制循环定时器
-    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_;   // 力矩发布者
-    double control_frequency_;                                                    // 控制频率 (Hz)
+    rclcpp::TimerBase::SharedPtr control_timer_;                                // 控制循环定时器
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_; // 力矩发布者
+    double control_frequency_;                                                  // 控制频率 (Hz)
 
     // Action 回调函数
     rclcpp_action::GoalResponse handleGoal(
@@ -208,8 +214,8 @@ void TorqueControllerActionServer::handleAccepted(
     RCLCPP_INFO(this->get_logger(), "   - 轨迹点数: %zu", current_trajectory_.points.size());
     RCLCPP_INFO(this->get_logger(), "   - 总时长: %.3f 秒", total_duration);
 
-    RCLCPP_INFO(this->get_logger(), "🚀 启动控制循环 (%.1f Hz)...", control_frequency_);
 
+    
     // 计算定时器周期（单位：毫秒）
     auto period = std::chrono::duration<double, std::milli>(1000.0 / control_frequency_);
 
@@ -456,6 +462,36 @@ void TorqueControllerActionServer::controlLoop()
 {
     if (!is_executing_)
     {
+        // 没有活动轨迹时，发送重力补偿力矩保持位置
+        std::lock_guard<std::mutex> lock(state_mutex_);
+
+        if (!state_received_)
+        {
+            return; // 还没收到状态，无法计算
+        }
+
+        // 计算重力补偿
+        KDL::JntArray tau_gravity(6);
+        dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
+
+        // 发布重力补偿力矩
+        std_msgs::msg::Float64MultiArray torque_msg;
+        torque_msg.data.resize(6);
+        for (size_t i = 0; i < 6; i++)
+        {
+            torque_msg.data[i] = tau_gravity(i);
+        }
+        torque_pub_->publish(torque_msg);
+
+        // 调试输出
+        RCLCPP_INFO_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            5000,
+            "🔧 保持模式：发送重力补偿 τ_g=[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
+            tau_gravity(0), tau_gravity(1), tau_gravity(2),
+            tau_gravity(3), tau_gravity(4), tau_gravity(5));
+
         return;
     }
 
@@ -474,10 +510,23 @@ void TorqueControllerActionServer::controlLoop()
         // 停止定时器
         control_timer_->cancel();
 
-        // 发布零力矩（停止）
-        std_msgs::msg::Float64MultiArray zero_torque;
-        zero_torque.data.resize(6, 0.0);
-        torque_pub_->publish(zero_torque);
+        // 发布重力补偿力矩（保持最终位置，而不是零力矩）
+        KDL::JntArray tau_gravity(6);
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
+        }
+        std_msgs::msg::Float64MultiArray hold_torque;
+        hold_torque.data.resize(6);
+        for (size_t i = 0; i < 6; i++)
+        {
+            hold_torque.data[i] = tau_gravity(i);
+        }
+        torque_pub_->publish(hold_torque);
+
+        RCLCPP_INFO(this->get_logger(), "✅ 轨迹执行完成，保持最终位置（重力补偿: τ_g=[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]）",
+                    tau_gravity(0), tau_gravity(1), tau_gravity(2),
+                    tau_gravity(3), tau_gravity(4), tau_gravity(5));
 
         // 返回成功结果
         auto result = std::make_shared<FollowJointTrajectory::Result>();
