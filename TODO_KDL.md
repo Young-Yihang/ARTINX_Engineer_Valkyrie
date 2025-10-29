@@ -1,9 +1,9 @@
 # ARV V1 力矩控制系统 - 实现要点
 
 > **项目目标**: 基于MoveIt规划，实现自定义动力学解算的力矩控制
-> 
-> **更新时间**: 2025-10-29  
-> **状态**: 阶段4 部分完成 - Mock模式✅ / Gazebo集成⚠️
+>
+> **更新时间**: 2025-10-29
+> **状态**: 阶段4 完成 - Mock模式✅ / Gazebo集成❌ (系统级bug) / 计划切换到MuJoCo
 
 ---
 
@@ -305,9 +305,52 @@ position: [0.0, 3.036, 1.266, 1.718, 0.0, 0.0]  # 初始位姿正确
 
 ---
 
-### ⚠️ Gazebo 集成遇到的技术障碍
+### ❌ Gazebo Harmonic 集成失败 - 系统级 Bug（2025-10-29）
 
-#### 问题1: Gazebo Harmonic 不支持 URDF 力矩控制
+**最终诊断结果**: ROS2 Jazzy + gz_ros2_control 存在**系统级 bug**
+
+**问题根源**:
+1. ❌ `robot_description` 话题中**不包含 `<ros2_control>` 标签**
+2. ❌ gz_ros2_control 插件解析时插件类名为**空字符串**
+3. ❌ **官方 demo 也出现相同错误**（GitHub Issues 一天前报告）
+
+**错误信息**:
+```
+[ERROR] The plugin failed to load for some reason.
+Error: According to the loaded plugin descriptions the class  with base class type
+gz_ros2_control::GazeboSimSystemInterface does not exist.
+                                                            ↑
+                                                        空字符串！
+```
+
+**关键发现**:
+```bash
+# 验证 robot_description 话题内容
+ros2 topic echo /robot_description --once | grep "<plugin>"
+# 输出：无 ← 整个 <ros2_control> 标签被过滤掉了
+```
+
+**尝试的解决方案**（均失败）:
+1. ✅ 采用官方 gz_ros2_control 架构
+2. ✅ 使用扁平 URDF 结构（移除 xacro 宏嵌套）
+3. ✅ 移除 Gazebo Classic 过时配置
+4. ✅ 完全对齐官方 demo 的配置格式
+5. ❌ **结果：官方 demo 也失败**
+
+**相关资源**:
+- GitHub Issue: https://github.com/ros-controls/gz_ros2_control/issues (一天前报告)
+- 问题状态：**待官方修复**
+
+**结论**:
+- Gazebo Harmonic 集成在当前版本**不可用**
+- 建议使用 **Mock 模式**（已验证可工作）
+- 或切换到 **MuJoCo** 进行物理仿真
+
+---
+
+### 📚 历史问题记录（已解决）
+
+#### 历史问题1: Gazebo Harmonic 不支持 URDF 力矩控制
 
 **尝试方案**:
 ```xml
@@ -428,12 +471,12 @@ $ dpkg -l | grep "gz-"
 
 ---
 
-**最后更新**: 2025-10-29  
-**当前进度**: 阶段4 部分完成
+**最后更新**: 2025-10-29
+**当前进度**: 阶段4 完成（Mock模式）
 - ✅ Action Server + 力矩控制器 (200 Hz)
 - ✅ Mock 硬件模式完全工作
-- ⚠️ Gazebo Harmonic 集成遇到技术障碍
-- 🎯 待决策：gz_ros2_control / 降级 Humble / 接受 Mock
+- ❌ Gazebo Harmonic 集成失败（ROS2 Jazzy 系统级 bug，待官方修复）
+- 🎯 下一步：切换到 MuJoCo 进行物理仿真
 
 ---
 
