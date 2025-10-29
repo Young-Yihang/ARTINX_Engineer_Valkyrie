@@ -139,21 +139,21 @@ main() {
     log_info "步骤 4/5: 启动所有节点"
     echo ""
 
-    # 节点1：MuJoCo 仿真节点
+    # 节点1：力矩控制器（先启动，确保重力补偿就绪）
     start_node \
-        "1. MuJoCo Interface" \
-        "ros2 run ARV_V1_MOVEIT mujoco_interface_node" \
-        0
-
-    sleep 3  # 等待 MuJoCo 节点完全启动
-
-    # 节点2：力矩控制器
-    start_node \
-        "2. Torque Controller" \
+        "1. Torque Controller" \
         "ros2 run ARV_V1_MOVEIT torque_controller_node" \
         0
 
-    sleep 2  # 等待控制器启动
+    sleep 3  # 等待控制器完全启动并开始发布重力补偿
+
+    # 节点2：MuJoCo 仿真节点（后启动，避免机械臂下落）
+    start_node \
+        "2. MuJoCo Interface" \
+        "ros2 run ARV_V1_MOVEIT mujoco_interface_node" \
+        0
+
+    sleep 2  # 等待 MuJoCo 节点启动
 
     # 节点3：MoveIt + RViz
     start_node \
@@ -172,16 +172,17 @@ main() {
     echo "  系统已启动，节点信息："
     echo "==========================================${NC}"
     echo ""
-    echo -e "${GREEN}终端 1:${NC} MuJoCo Interface Node"
-    echo "  - 功能: MuJoCo 物理仿真"
-    echo "  - 发布: /joint_states (200 Hz)"
-    echo "  - 订阅: /effort_controller/commands"
-    echo ""
-    echo -e "${GREEN}终端 2:${NC} Torque Controller Node"
+    echo -e "${GREEN}终端 1:${NC} Torque Controller Node"
     echo "  - 功能: 动力学计算 + PD控制"
     echo "  - 发布: /effort_controller/commands"
     echo "  - 订阅: /joint_states"
     echo "  - Action: /ARM_controller/follow_joint_trajectory"
+    echo "  - 启动时立即发送重力补偿（防止机械臂下落）"
+    echo ""
+    echo -e "${GREEN}终端 2:${NC} MuJoCo Interface Node"
+    echo "  - 功能: MuJoCo 物理仿真 + 3D可视化"
+    echo "  - 发布: /joint_states (200 Hz)"
+    echo "  - 订阅: /effort_controller/commands"
     echo ""
     echo -e "${GREEN}终端 3:${NC} MoveIt + RViz"
     echo "  - 功能: 轨迹规划 + 可视化"

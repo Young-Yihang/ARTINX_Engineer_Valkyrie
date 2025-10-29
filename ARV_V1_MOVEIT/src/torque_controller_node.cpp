@@ -41,12 +41,12 @@ public: // 构造函数log
         Kp_(5) = 80.0;  // joint_6: 末端，增益最小
 
         // 速度增益（通常是 Kp 的 1/10 ~ 1/5）
-        Kd_(0) = 30.0;
-        Kd_(1) = 40.0;
-        Kd_(2) = 35.0;
-        Kd_(3) = 15.0;
-        Kd_(4) = 10.0;
-        Kd_(5) = 8.0;
+        Kd_(0) = 3.0;
+        Kd_(1) = 4.0;
+        Kd_(2) = 3.0;
+        Kd_(3) = 1.0;
+        Kd_(4) = 1.0;
+        Kd_(5) = 0.0;
 
         // ========== 初始化动力学求解器 ==========
         if (!initializeDynamics())
@@ -214,8 +214,6 @@ void TorqueControllerActionServer::handleAccepted(
     RCLCPP_INFO(this->get_logger(), "   - 轨迹点数: %zu", current_trajectory_.points.size());
     RCLCPP_INFO(this->get_logger(), "   - 总时长: %.3f 秒", total_duration);
 
-
-    
     // 计算定时器周期（单位：毫秒）
     auto period = std::chrono::duration<double, std::milli>(1000.0 / control_frequency_);
 
@@ -470,16 +468,24 @@ void TorqueControllerActionServer::controlLoop()
             return; // 还没收到状态，无法计算
         }
 
-        // 计算重力补偿
+        // 计算重力补偿，带入PD控制
         KDL::JntArray tau_gravity(6);
-        dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
+        }
+        KDL::JntArray tau_pd(6);
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            computeFeedbackTorque(q_actual_, KDL::JntArray(6), q_actual_, KDL::JntArray(6), tau_pd);
+        }
 
         // 发布重力补偿力矩
         std_msgs::msg::Float64MultiArray torque_msg;
         torque_msg.data.resize(6);
         for (size_t i = 0; i < 6; i++)
         {
-            torque_msg.data[i] = tau_gravity(i);
+            torque_msg.data[i] = tau_gravity(i) + tau_pd(i);
         }
         torque_pub_->publish(torque_msg);
 

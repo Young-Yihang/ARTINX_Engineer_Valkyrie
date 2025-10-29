@@ -22,7 +22,8 @@ public:
                             model_(nullptr),
                             data_(nullptr),
                             sim_frequency_(200.0),
-                            urdf_path_("/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf")
+                            urdf_path_("/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf"),
+                            received_first_command_(false)
     {
         RCLCPP_INFO(this->get_logger(), "🚀 MuJoCo接口节点启动");
 
@@ -141,6 +142,9 @@ private:
     mjvOption opt_;        // 渲染选项
     mjrContext con_;       // 渲染上下文
     std::mutex sim_mutex_; // 保护model_和data_的互斥锁
+
+    // ========== 启动安全相关 ==========
+    std::atomic<bool> received_first_command_; // 是否收到首次力矩命令
 
     // ========== 关节名称 ==========
     const std::vector<std::string> joint_names_ = {
@@ -414,7 +418,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
 void MuJoCoInterfaceNode::setInitialPose()
 {
     RCLCPP_INFO(this->get_logger(), "设置0位置初始位姿");
-    double initial_q[6] = {0.0, 3.036, 1.266, 1.718, 0.0, 0.0};
+    double initial_q[6] = {0.0, 2.06, 0.766, 1.718, 0.0, 0.0};
 
     for (int i = 0; i < 6; i++)
     {
@@ -438,6 +442,13 @@ void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray:
         return;
     }
 
+    // 检查是否首次收到命令
+    if (!received_first_command_)
+    {
+        received_first_command_ = true;
+        RCLCPP_INFO(this->get_logger(), "✅ 收到首次力矩命令，MuJoCo仿真现在启动！");
+    }
+
     for (size_t i = 0; i < 6; i++)
     {
         data_->ctrl[i] = msg->data[i];
@@ -453,14 +464,25 @@ void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray:
 
 void MuJoCoInterfaceNode::simulationStep()
 {
+    // ========== 安全检查：等待首次力矩命令 ==========
+    if (!received_first_command_)
+    {
+        // 还没收到力矩命令，不执行仿真步进
+        // 这样可以防止机械臂在启动时因重力下落
+        RCLCPP_INFO_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            2000,  // 每2秒提示一次
+            "⏸️  等待力矩控制器发送命令...");
+
+        // 仍然发布当前状态（初始位姿）
+        publishJointStates();
+        return;
+    }
+
     // 线程安全：渲染线程可能同时访问data_
     std::lock_guard<std::mutex> lock(sim_mutex_);
 
-    // 执行MuJoCo单步仿真
-    mj_step(model_, data_);
-
-    // 发布关节状态
-    publishJointStates();
     // 执行MuJoCo单步仿真
     mj_step(model_, data_);
 
