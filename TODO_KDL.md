@@ -1,405 +1,344 @@
-# ARV V1 力矩控制系统 - 技术要点
+# ARV V1 力矩控制系统 - 核心要点
 
-> **项目目标**: 基于 MoveIt 规划，实现自定义动力学解算的力矩控制
-> **更新时间**: 2025-10-29
-> **当前状态**: MuJoCo 仿真集成完成 ✅ | 控制效果需优化 ⚠️
+> **更新**: 2025-10-31 | **状态**: 轨迹跟踪效果良好 ✅ | D 项调优中 ⚙️
 
 ---
 
-## ✅ 系统架构
-
-### 数据流
+## 📊 系统架构
 
 ```
-MoveIt 规划器
-    ↓ /ARM_controller/follow_joint_trajectory (Action)
-Torque Controller Node (200Hz)
-    ├─ 动力学计算: τ_ff = M(q)·q̈ + C(q,q̇) + G(q)
-    ├─ PD 反馈: τ_fb = Kp·(q_d - q) + Kd·(q̇_d - q̇)
-    └─ 总力矩: τ = τ_ff + τ_fb
-    ↓ /effort_controller/commands
-MuJoCo Interface Node (200Hz)
-    ├─ 接收力矩命令
-    ├─ 仿真物理（mj_step）
-    ├─ 3D 可视化（GLFW + OpenGL）
-    └─ 发布关节状态
-    ↓ /joint_states
-回到 Torque Controller (闭环反馈)
-```
-
-### 核心节点
-
-| 节点 | 功能 | 频率 | 状态 |
-|------|------|------|------|
-| `torque_controller_node` | 动力学计算 + PD 控制 | 200Hz | ✅ |
-| `mujoco_interface_node` | MuJoCo 仿真 + 可视化 | 200Hz | ✅ |
-| `move_group` | MoveIt 运动规划 | - | ✅ |
-| `joint_state_broadcaster` | ~~关节状态广播~~ | - | ❌ 禁用 |
-
----
-
-## 🔧 核心实现
-
-### 1. 动力学计算 (dynamics_computer.cpp)
-
-**功能**: 使用 KDL 库计算机器人动力学
-
-```cpp
-// 前馈力矩计算
-void computeFeedforwardTorque(q, qd, qdd, tau_ff) {
-    M(q);              // 惯性矩阵
-    C(q, qd);          // 科氏力/离心力
-    G(q);              // 重力项
-    tau_ff = M*qdd + C + G;
-}
-
-// 重力补偿（空闲模式）
-void computeGravityTorque(q, tau_g) {
-    tau_g = G(q);
-}
-```
-
-**参数来源**: URDF `<inertial>` 标签 → KDL::Chain → ChainDynParam
-
-### 2. 力矩控制器 (torque_controller_node.cpp)
-
-**关键功能**:
-- Action Server: 接收 MoveIt 轨迹
-- 轨迹插值: 200Hz 实时插值期望状态
-- 空闲重力补偿: `is_executing_ = false` 时发送 G(q)
-- 轨迹跟踪: 前馈 + PD 反馈
-
-**控制循环**:
-```cpp
-void controlLoop() {
-    if (!is_executing_) {
-        // 空闲模式：发送重力补偿
-        tau = computeGravityTorque(q_actual);
-        publish(tau);
-        return;
-    }
-
-    // 轨迹跟踪模式
-    interpolate(t_now, q_d, qd_d, qdd_d);
-    tau_ff = computeFeedforwardTorque(q_d, qd_d, qdd_d);
-    tau_fb = Kp*(q_d - q) + Kd*(qd_d - qd);
-    tau_total = tau_ff + tau_fb;
-    publish(tau_total);
-}
-```
-
-**PD 增益** (config/controller_params.yaml):
-```yaml
-Kp: [300, 400, 350, 150, 100, 80]   # 位置增益
-Kd: [30, 40, 35, 15, 10, 8]         # 速度增益
-```
-
-### 3. MuJoCo 接口 (mujoco_interface_node.cpp)
-
-**模型加载流程**:
-```
-URDF → 插入 <mujoco> compiler → mj_loadXML
-    → mj_saveLastXML → MJCF
-    → 插入 <actuator> 定义 → 重新加载
-    → 创建 mjData
-```
-
-**执行器配置** (6 个关节):
-```xml
-<motor name="actuator_X" joint="joint_X"
-       gear="1" ctrllimited="true" ctrlrange="-20 20"/>
-```
-
-**可视化**:
-- GLFW 窗口 (1200x900)
-- 独立渲染线程 (60Hz)
-- OpenGL 上下文在渲染线程中初始化
-
-**关键**:
-- `sim_mutex_` 保护 model_ 和 data_
-- 仿真线程 200Hz，渲染线程 60Hz 独立运行
-
----
-
-## ⚠️ 已解决的关键问题
-
-### 问题1: 控制器不发送任何输出
-
-**根因**: 控制定时器在 `handleAccepted()` 中创建，如果没收到轨迹则永不启动
-
-**解决**: 在构造函数中立即创建定时器
-```cpp
-// 构造函数中（83行之后）
-auto period = std::chrono::duration<double, std::milli>(5.0);
-control_timer_ = this->create_wall_timer(period, ...);
-```
-
-### 问题2: 关节漂移导致 START_STATE_INVALID
-
-**根因**: 空闲时不发送力矩 → 重力导致漂移 → 超出关节限位
-
-**解决**: 实现空闲重力补偿 (456-489行)
-```cpp
-if (!is_executing_) {
-    tau_gravity = computeGravityTorque(q_actual_);
-    publish(tau_gravity);
-}
-```
-
-### 问题3: RViz 机械臂闪烁
-
-**根因**: 两个节点同时发布 /joint_states
-- `joint_state_broadcaster`
-- `mujoco_interface_node`
-
-**解决**: 创建 `mujoco_demo.launch.py`，不启动 joint_state_broadcaster
-
-### 问题4: MuJoCo 执行器数量为 0
-
-**根因**: MuJoCo URDF 加载器不支持 `<actuator>` 标签
-
-**解决**: 两步转换
-1. URDF → MJCF
-2. 修改 MJCF 插入 `<actuator>` → 重新加载
-
-### 问题5: MuJoCo 窗口黑屏
-
-**根因**: OpenGL 上下文在主线程创建，渲染线程无法访问
-
-**解决**: 在渲染线程开始时绑定上下文
-```cpp
-void renderLoop() {
-    glfwMakeContextCurrent(window_);     // 在渲染线程中
-    mjr_makeContext(model_, &con_, ...);  // 初始化 OpenGL
-
-    while (...) {
-        mjv_updateScene(...);
-        mjr_render(...);
-    }
-}
-```
-
-### 问题6: 变量作用域错误
-
-**问题**: 使用未定义的局部变量 `q_actual` 而非成员变量 `q_actual_`
-
-**位置**: torque_controller_node.cpp:508
-
-**解决**: 使用 `q_actual_` 并加锁
-```cpp
-{
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    computeGravityTorque(q_actual_, tau_gravity);
-}
+┌─────────────────┐
+│  MoveIt 规划器  │
+└────────┬────────┘
+         │ Action: /ARM_controller/follow_joint_trajectory
+         ↓
+┌─────────────────────────────────────────────────┐
+│    Torque Controller Node (200Hz)              │
+│  ┌─────────────┐    ┌──────────────┐          │
+│  │ 动力学解算   │ →  │  PD 控制     │ → τ_total│
+│  │ τ_ff=M·q̈+C+G│    │ τ_fb=Kp·e+Kd·ė│          │
+│  └─────────────┘    └──────────────┘          │
+└────────┬────────────────────────────────────────┘
+         │ /effort_controller/commands
+         ↓
+┌─────────────────────────────────────────────────┐
+│    MuJoCo Interface Node (200Hz)                │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
+│  │ 力矩执行  │→ │ 物理仿真  │→ │ 3D 可视化    │ │
+│  │ ctrl[6]  │  │ mj_step  │  │ GLFW/OpenGL  │ │
+│  └──────────┘  └──────────┘  └──────────────┘ │
+└────────┬────────────────────────────────────────┘
+         │ /joint_states
+         ↓ (闭环反馈)
+    [回到 Torque Controller]
 ```
 
 ---
 
-## 🔥 当前问题
+## 🎯 控制律框图
 
-### 主要问题: 控制效果差
+### 状态机
 
-**现象**: 机械臂运动不稳定、抖动、跟踪误差大
-
-**可能原因**:
-1. **PD 增益未调优** - 当前增益可能不匹配实际系统
-2. **动力学模型误差** - URDF 惯性参数可能不准确
-3. **传感器噪声** - /joint_states 数据可能有噪声
-4. **控制频率** - 200Hz 可能不够高
-5. **MuJoCo 仿真参数** - timestep, solver 参数需优化
-
-**调试方向**:
-1. 查看力矩命令波形（是否剧烈振荡）
-2. 查看位置跟踪误差大小
-3. 单关节测试（隔离问题）
-4. 尝试调整 PD 增益
-5. 检查 MuJoCo 仿真 timestep (当前 0.005s)
-
----
-
-## 🛠️ 调试工具
-
-### 查看系统状态
-
-```bash
-# 查看话题
-ros2 topic list
-
-# 监控力矩命令
-ros2 topic echo /effort_controller/commands
-
-# 监控关节状态
-ros2 topic echo /joint_states
-
-# 查看控制器
-ros2 control list_controllers
-
-# 查看 Action Server
-ros2 action list
+```
+    ┌─────────────┐
+    │  系统启动    │
+    └──────┬──────┘
+           │ 收到首个关节状态
+           ↓
+    ┌─────────────────────┐
+    │  保存启动姿态        │ q_target_ = q_actual_
+    │  has_target_ = true │
+    └──────┬──────────────┘
+           │
+           ↓
+    ┌──────────────────────────────┐
+    │   保持模式                    │ is_executing_ = false
+    │   • τ = G(q) + PD(q_target_) │
+    │   • 维持启动姿态/规划终点     │
+    └──────┬───────────────────────┘
+           │ 收到 MoveIt 轨迹
+           ↓
+    ┌──────────────────────────────┐
+    │   执行模式                    │ is_executing_ = true
+    │   • 更新 q_target_ = 终点    │
+    │   • τ = τ_ff + PD(q_d - q)   │
+    │   • 轨迹插值 & 跟踪          │
+    └──────┬───────────────────────┘
+           │ t ≥ t_end
+           ↓
+    [返回保持模式] → [收到新轨迹] → [立刻抢占切换]
 ```
 
-### 可视化数据
+### 控制律详细
 
-```bash
-# 使用 PlotJuggler 绘制实时数据
-ros2 run plotjuggler plotjuggler
+**保持模式** (`!is_executing_`):
+```
+输入: q_actual_, q_dot_actual_, q_target_
 
-# 建议绘制的信号：
-# - /joint_states/position[0-5]
-# - /effort_controller/commands/data[0-5]
-# - 跟踪误差 = desired - actual
+重力补偿: τ_g = G(q_actual_)
+
+PD 控制:   e_p = q_target_ - q_actual_
+          e_v = 0 - q_dot_actual_
+          τ_pd = Kp·e_p + Kd·e_v
+
+输出: τ_total = τ_g + τ_pd
 ```
 
-### 调参建议
-
-**保守增益** (稳定但响应慢):
-```yaml
-Kp: [50, 50, 50, 30, 20, 10]
-Kd: [5, 5, 5, 3, 2, 1]
+**执行模式** (`is_executing_`):
 ```
+输入: 轨迹, t_now, q_actual_, q_dot_actual_
 
-**激进增益** (响应快但可能振荡):
-```yaml
-Kp: [500, 600, 500, 300, 200, 150]
-Kd: [50, 60, 50, 30, 20, 15]
+插值:     q_d, qd_d, qdd_d = interpolate(t_now)
+
+前馈:     τ_ff = G(q_actual_)  [简化版]
+         [完整版: τ_ff = M(q_d)·qdd_d + C(q_d,qd_d) + G(q_d)]
+
+PD 反馈:  e_p = q_d - q_actual_
+         e_v = qd_d - q_dot_actual_
+         τ_fb = Kp·e_p + Kd·e_v
+
+输出: τ_total = τ_ff + τ_fb
 ```
 
 ---
 
-## 📊 关键配置文件
+## ⚙️ 核心参数
 
-| 文件 | 作用 | 关键参数 |
+### PD 增益 (torque_controller_node.cpp:35-47)
+```cpp
+// 位置增益
+Kp: [600, 1000, 550, 150, 100, 20]   // N·m/rad
+
+// 速度增益 (当前全部设为 0，因为 D 项异常)
+Kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   // N·m·s/rad
+```
+
+**⚠️ 当前问题**:
+- 第一关节 D 项在轨迹完成时计算出 500+ N·m（异常大）
+- 临时方案：将所有 Kd 设为 0
+- 仅使用 P 控制 + 完整动力学前馈，效果良好 ✅
+
+### 控制频率
+- 力矩控制器: **200 Hz**
+- MuJoCo 仿真: **200 Hz**
+- 渲染线程: **60 Hz**
+
+### 执行器限制
+- 最大力矩: **±20 N·m** (MuJoCo 配置)
+
+---
+
+## 🔧 关键代码位置
+
+| 功能 | 文件 | 行数范围 |
 |------|------|----------|
-| `ros2_controllers.yaml` | ros2_control 配置 | `update_rate: 200` |
-| `joint_limits.yaml` | 关节限位 | `min/max_position: ±3.2` |
-| `ARV_V1_MODEL.urdf` | 机器人模型 | `<inertial>`, `<joint>` |
-| `dynamics_computer.cpp` | 动力学计算 | KDL 调用 |
-| `torque_controller_node.cpp` | 控制器核心 | PD 增益，控制律 |
-| `mujoco_interface_node.cpp` | MuJoCo 仿真 | 执行器配置 |
-| `mujoco_demo.launch.py` | 启动文件 | 无 joint_state_broadcaster |
-| `start_mujoco_system.sh` | 一键启动脚本 | 节点启动顺序 |
+| 状态机变量 | torque_controller_node.cpp | 100-115 |
+| PD 增益初始化 | torque_controller_node.cpp | 35-47 |
+| 保存启动姿态 | torque_controller_node.cpp | 270-284 |
+| 保存规划终点 | torque_controller_node.cpp | 220-236 |
+| 保持模式控制 | torque_controller_node.cpp | 490-545 |
+| 执行模式控制 | torque_controller_node.cpp | 547-669 |
+| 动力学计算 | dynamics_computer.cpp | 11-52 |
 
 ---
 
-## 📝 技术笔记
+## ✅ 已解决的关键问题
 
-### 为什么 joint_1 的重力项接近 0？
+### 1. 死锁导致控制停止
+**问题**: `controlLoop()` 嵌套加锁 → 永久阻塞
+**解决**: 删除嵌套锁，外层加锁一次即可
 
-joint_1 是基座旋转关节（绕 Z 轴），重力方向 (0, 0, -9.81) 与旋转轴平行，因此力臂为 0，重力力矩 ≈ 0。
+### 2. 启动时机械臂漂移
+**问题**: 启动后无目标位置 → PD 无效 → 重力漂移
+**解决**: 首次收到状态时保存为 `q_target_`，立刻启用 PD
 
-### MuJoCo vs Mock vs Gazebo
+### 3. 轨迹完成后掉落
+**问题**: 规划终点未保存 → 完成后 PD 目标错误
+**解决**: 在 `handleAccepted()` 保存轨迹终点
 
-| 模式 | 物理仿真 | 可视化 | 状态 |
-|------|---------|--------|------|
-| Mock | ❌ | RViz | ✅ 可用 |
-| MuJoCo | ✅ | 3D 窗口 | ✅ 当前使用 |
-| Gazebo | ✅ | 3D 窗口 | ❌ ROS2 Jazzy Bug |
+### 4. RViz 机械臂闪烁
+**问题**: 两个节点同时发布 `/joint_states`
+**解决**: `mujoco_demo.launch.py` 禁用 `joint_state_broadcaster`
 
-**选择 MuJoCo 的原因**:
-- Gazebo Harmonic + ROS2 Jazzy 有系统级 Bug
-- MuJoCo 轻量快速，适合快速迭代调参
-- Python 安装方便 (pip install mujoco)
+### 5. MuJoCo 窗口黑屏
+**问题**: OpenGL 上下文在错误线程创建
+**解决**: 在渲染线程中 `glfwMakeContextCurrent()` + `mjr_makeContext()`
 
-### 控制频率选择
+### 6. 执行模式控制律错误
+**问题**: 前馈只用重力补偿，PD 期望位置用了实际位置
+**解决**: 
+- 前馈改用完整动力学：`computeFeedforwardTorque(q_d, qd_d, qdd_d, tau_ff)`
+- PD 使用正确期望值：`computeFeedbackTorque(q_d, qd_d, q_actual, qd_actual, tau_fb)`
 
-| 频率 | 适用场景 | 计算负载 |
-|------|---------|---------|
-| 100Hz | 慢速运动 | 低 |
-| 200Hz | 标准控制（当前） | 中 |
-| 1000Hz | 高速/高精度 | 高 |
-
-当前选择 200Hz：平衡性能和计算量。
+### 7. 轨迹完成时缺少 PD 控制
+**问题**: 轨迹完成瞬间只发送重力补偿，没有 PD
+**解决**: 轨迹完成时也计算 PD 控制，使用 `q_target_` 作为期望位置
 
 ---
 
-## 🎯 下一步工作
+## 🚧 待优化项
 
-### 优先级1: 改善控制效果 🔥
+### 🔥 高优先级
 
-1. **系统辨识**
-   - 记录单关节阶跃响应
-   - 分析系统特性（阻尼、惯性）
-   - 调整 PD 增益
+1. **D 项异常问题诊断** ⚠️
+   
+   **现象**: 
+   - 第一关节 D 项在轨迹完成时达到 500+ N·m
+   - 临时方案：所有 Kd 设为 0（仅 P 控制 + 动力学前馈）
+   - 当前效果：轨迹跟踪良好 ✅
+   
+   **可能原因**:
+   - 速度误差异常大（qd_d - qd_actual ≈ 166 rad/s？）
+   - 轨迹完成瞬间的速度跳变
+   - MuJoCo 速度数据噪声或数值积分误差
+   - Joint 1 转动惯量大，速度累积效应
+   
+   **调试方法**:
+   ```cpp
+   // 在轨迹完成时添加日志
+   RCLCPP_WARN("实际速度: qd=[%.3f, %.3f, ...]", qd_actual_copy(0), ...);
+   RCLCPP_WARN("D 项力矩: τ_d=[%.2f, %.2f, ...]", tau_pd(0), ...);
+   ```
+   
+   **解决方案**:
+   - [ ] 方案 A: 添加速度死区（小速度误差不产生 D 项）
+   - [ ] 方案 B: 对速度信号进行滤波（低通滤波器）
+   - [ ] 方案 C: 限制 D 项最大输出
+   - [x] 方案 D: 调小 Kd 增益（临时：设为 0）
 
-2. **数据分析**
-   - 使用 PlotJuggler 绘制波形
-   - 分析力矩命令是否合理
-   - 检查跟踪误差模式
+2. **速度测量质量改进**
+   - 检查 MuJoCo 速度输出是否有噪声
+   - 考虑对 `/joint_states` 的速度数据进行滤波
+   - 验证速度数值范围是否合理
 
-3. **参数优化**
-   - 从单关节开始调参
-   - 逐步增加多关节联动
-   - 记录最优参数
+### ⚙️ 中优先级
 
-### 优先级2: MuJoCo 仿真优化
+3. **力矩限幅**
+   ```cpp
+   const double MAX_TORQUE[6] = {20, 20, 20, 20, 20, 20};
+   for (size_t i = 0; i < 6; i++) {
+       tau_total(i) = std::clamp(tau_total(i), -MAX_TORQUE[i], MAX_TORQUE[i]);
+   }
+   ```
 
-1. **仿真精度**
-   - 调整 timestep (0.005 → 0.002?)
-   - 配置 solver 参数
-   - 添加摩擦和阻尼
-
-2. **可视化改进**
-   - 添加坐标轴显示
-   - 实时显示关节角度
-   - 力矩可视化
-
-### 优先级3: 系统稳定性
-
-1. **异常处理**
-   - 力矩限幅验证
-   - 关节限位保护
-   - 节点崩溃恢复
-
-2. **性能监控**
-   - 控制循环延迟统计
+4. **性能监控**
+   - 控制循环耗时统计
    - CPU 占用率监控
-   - 内存泄漏检查
+   - 频率偏差检测
+
+### 📊 已完成的优化
+
+- [x] 完整动力学前馈（已实现）
+- [x] 轨迹抢占机制（已实现）
+- [x] 轨迹完成时的 PD 控制（已实现）
+- [x] 启动姿态保存（已实现）
+- [x] 规划终点保持（已实现）
+
 
 ---
 
-## 🚀 快速启动
+## � 待优化项
+
+### 高优先级
+
+1. **完整动力学前馈** (当前仅重力补偿)
+   ```cpp
+   // 当前: torque_controller_node.cpp:595
+   dynamic_computer_->computeGravityTorque(q_actual, tau_ff);
+   
+   // 改进:
+   dynamic_computer_->computeFeedforwardTorque(q_d, qd_d, qdd_d, tau_ff);
+   ```
+
+2. **轨迹抢占机制**
+   - 修改 `handleGoal()`: 删除拒绝新轨迹的逻辑
+   - 修改 `handleAccepted()`: 取消旧轨迹，立刻切换
+
+3. **PD 参数调优**
+   - 单关节阶跃响应测试
+   - 分析超调、稳态误差
+   - 使用 PlotJuggler 绘制波形
+
+### 中优先级
+
+4. **力矩限幅**
+   ```cpp
+   const double MAX_TORQUE[6] = {20, 20, 20, 20, 20, 20};
+   for (size_t i = 0; i < 6; i++) {
+       tau_total(i) = std::clamp(tau_total(i), -MAX_TORQUE[i], MAX_TORQUE[i]);
+   }
+   ```
+
+5. **性能监控**
+   - 控制循环耗时统计
+   - CPU 占用率监控
+   - 频率偏差检测
+
+---
+
+## �️ 快速启动
 
 ### 编译
-
 ```bash
 cd ~/ros2_ws
 colcon build --packages-select ARV_V1_MOVEIT
 source install/setup.bash
 ```
 
-### 启动系统
-
+### 启动
 ```bash
-# 方式1: 使用启动脚本（推荐）
+# 一键启动（推荐）
 bash src/ARV_V1_MOVEIT/bash/start_mujoco_system.sh
 
-# 方式2: 手动启动
-# 终端1: MuJoCo 接口
+# 或手动启动三个终端：
+# 1. MuJoCo 仿真
 ros2 run ARV_V1_MOVEIT mujoco_interface_node
 
-# 终端2: 力矩控制器
+# 2. 力矩控制器
 ros2 run ARV_V1_MOVEIT torque_controller_node
 
-# 终端3: MoveIt + RViz
+# 3. MoveIt + RViz
 ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py
 ```
 
 ### 测试
-
 ```bash
-# 1. 检查节点
-ros2 node list
+# 检查节点
+ros2 node list | grep -E "(torque|mujoco)"
 
-# 2. 检查 Action Server
-ros2 action list
+# 监控力矩输出
+ros2 topic echo /effort_controller/commands
 
-# 3. 在 RViz 中规划并执行轨迹
-# Motion Planning → Planning → Plan
-# → Execute
+# 监控关节状态
+ros2 topic hz /joint_states
+
+# 在 RViz 中规划并执行
+# Motion Planning → Plan → Execute
 ```
 
 ---
 
-**最后更新**: 2025-10-29
-**当前状态**: MuJoCo 仿真工作 ✅ | 控制效果需优化 ⚠️
-**下一步**: 系统辨识 + PD 参数调优
+## 📚 技术笔记
+
+### 为什么 joint_1 重力项接近 0？
+joint_1 绕 Z 轴旋转，重力 (0,0,-9.81) 平行于旋转轴 → 力臂=0 → τ_g≈0
+
+### 控制频率选择
+- **100Hz**: 慢速运动，计算负载低
+- **200Hz**: 标准控制（当前），平衡性能
+- **1000Hz**: 高速/高精度，计算负载高
+
+### MuJoCo vs Gazebo
+| 模式 | 物理仿真 | 可视化 | 状态 |
+|------|---------|--------|------|
+| MuJoCo | ✅ | 3D 窗口 | ✅ 当前 |
+| Gazebo | ✅ | 3D 窗口 | ❌ ROS2 Jazzy Bug |
+
+**选择原因**: Gazebo Harmonic + ROS2 Jazzy 有系统级 Bug，MuJoCo 轻量快速
+
+---
+
+**最后更新**: 2025-10-31  
+**状态**: 轨迹跟踪效果良好 ✅ | D 项异常需诊断 ⚠️  
+**当前配置**: P 控制 + 完整动力学前馈（Kd 全部为 0）  
+**下一步**: D 项问题诊断 → 速度滤波 → 恢复 D 控制

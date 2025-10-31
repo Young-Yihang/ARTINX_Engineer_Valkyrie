@@ -24,7 +24,9 @@ public: // 构造函数log
                                      is_executing_(false),
                                      q_actual_(6),
                                      q_dot_actual_(6),
+                                     q_target_(6),
                                      state_received_(false),
+                                     has_target_(false),
                                      Kp_(6),
                                      Kd_(6),
                                      control_frequency_(200.0)
@@ -33,19 +35,19 @@ public: // 构造函数log
 
         // ========== 初始化 PD 增益 (新增) ==========
         // 位置增益（根据关节大小调整）
-        Kp_(0) = 300.0; // joint_1: 大关节，需要较大增益
-        Kp_(1) = 400.0; // joint_2: 抬臂关节，负载大
-        Kp_(2) = 350.0; // joint_3: 肘关节
-        Kp_(3) = 150.0; // joint_4: 小关节
-        Kp_(4) = 100.0; // joint_5: 更小
-        Kp_(5) = 80.0;  // joint_6: 末端，增益最小
+        Kp_(0) = 10000.0; // joint_1: 大关节，需要较大增益
+        Kp_(1) = 1500.0; // joint_2: 抬臂关节，负载大
+        Kp_(2) = 1550.0; // joint_3: 肘关节
+        Kp_(3) = 350.0;  // joint_4: 小关节
+        Kp_(4) = 100.0;  // joint_5: 更小
+        Kp_(5) = 20.0;   // joint_6: 末端，增益最小
 
         // 速度增益（通常是 Kp 的 1/10 ~ 1/5）
-        Kd_(0) = 3.0;
-        Kd_(1) = 4.0;
-        Kd_(2) = 3.0;
-        Kd_(3) = 1.0;
-        Kd_(4) = 1.0;
+        Kd_(0) = 0.0;
+        Kd_(1) = 0.0;
+        Kd_(2) = 0.0;
+        Kd_(3) = 0.0;
+        Kd_(4) = 0.0;
         Kd_(5) = 0.0;
 
         // ========== 初始化动力学求解器 ==========
@@ -106,8 +108,10 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
     KDL::JntArray q_actual_;     // 当前关节位置 [6]
     KDL::JntArray q_dot_actual_; // 当前关节速度 [6]
+    KDL::JntArray q_target_;     // 目标关节位置（规划终点） [6]
     std::mutex state_mutex_;     // 保护共享数据
     bool state_received_;        // 是否收到过状态
+    bool has_target_;            // 是否有目标位置
 
     KDL::Chain kdl_chain_;                               // 运动链实例
     std::unique_ptr<DynamicsComputer> dynamic_computer_; // 动力学解算器实例
@@ -159,18 +163,17 @@ rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
 
     if (is_executing_)
     {
-        RCLCPP_WARN(this->get_logger(), "已有轨迹在执行，拒绝新目标");
-        return rclcpp_action::GoalResponse::REJECT;
+        RCLCPP_WARN(this->get_logger(), "⚠️ 检测到新轨迹，将抢占当前执行的轨迹");
+        // 不再 REJECT，而是继续接受
     }
 
-    // 简单验证：至少有一个点
     if (goal->trajectory.points.empty())
     {
         RCLCPP_ERROR(this->get_logger(), "❌ 轨迹为空，拒绝目标");
         return rclcpp_action::GoalResponse::REJECT;
     }
 
-    RCLCPP_INFO(this->get_logger(), "收到目标，准备存入数组");
+    RCLCPP_INFO(this->get_logger(), "✅ 接受新目标");
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
@@ -186,6 +189,16 @@ void TorqueControllerActionServer::handleAccepted(
     const std::shared_ptr<GoalHandleFJT> goal_handle)
 {
     RCLCPP_INFO(this->get_logger(), "🎯 目标已接受，准备执行");
+
+    if (is_executing_ && current_goal_handle_)
+    {
+        RCLCPP_WARN(this->get_logger(), "⚠️ 取消旧轨迹，切换到新轨迹");
+
+        // 通知旧轨迹被抢占
+        auto old_result = std::make_shared<FollowJointTrajectory::Result>();
+        old_result->error_code = FollowJointTrajectory::Result::PATH_TOLERANCE_VIOLATED; // 或其他错误码
+        current_goal_handle_->abort(old_result);
+    }
 
     // 检查是否收到关节状态
     if (!state_received_)
@@ -209,18 +222,23 @@ void TorqueControllerActionServer::handleAccepted(
     const auto &last_point = current_trajectory_.points.back();
     double total_duration = last_point.time_from_start.sec + last_point.time_from_start.nanosec * 1e-9;
 
+    // ========== 新增：保存规划终点位置 ==========
+    if (last_point.positions.size() == 6)
+    {
+        for (size_t i = 0; i < 6; i++)
+        {
+            q_target_(i) = last_point.positions[i];
+        }
+        has_target_ = true;
+        RCLCPP_INFO(this->get_logger(), "📍 规划终点: q_target=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+                    q_target_(0), q_target_(1), q_target_(2),
+                    q_target_(3), q_target_(4), q_target_(5));
+    }
+
     RCLCPP_INFO(this->get_logger(), "📦 轨迹已缓存:");
     RCLCPP_INFO(this->get_logger(), "   - 关节数: %zu", current_trajectory_.joint_names.size());
     RCLCPP_INFO(this->get_logger(), "   - 轨迹点数: %zu", current_trajectory_.points.size());
     RCLCPP_INFO(this->get_logger(), "   - 总时长: %.3f 秒", total_duration);
-
-    // 计算定时器周期（单位：毫秒）
-    auto period = std::chrono::duration<double, std::milli>(1000.0 / control_frequency_);
-
-    // 创建定时器
-    control_timer_ = this->create_wall_timer(
-        period,
-        std::bind(&TorqueControllerActionServer::controlLoop, this));
 }
 
 void TorqueControllerActionServer::jointStateCallback(
@@ -228,13 +246,6 @@ void TorqueControllerActionServer::jointStateCallback(
 {
     // 线程安全：加锁
     std::lock_guard<std::mutex> lock(state_mutex_);
-
-    // 首次接收数据
-    if (!state_received_)
-    {
-        RCLCPP_INFO(this->get_logger(), "✅ 首次接收关节状态数据");
-        state_received_ = true;
-    }
 
     // 验证数据
     if (msg->position.size() != 6 || msg->velocity.size() != 6)
@@ -253,6 +264,24 @@ void TorqueControllerActionServer::jointStateCallback(
     {
         q_actual_(i) = msg->position[i];
         q_dot_actual_(i) = msg->velocity[i];
+    }
+
+    // 首次接收数据：保存启动姿态作为初始目标
+    if (!state_received_)
+    {
+        RCLCPP_INFO(this->get_logger(), "✅ 首次接收关节状态数据");
+        state_received_ = true;
+
+        // 保存启动姿态作为初始目标位置
+        if (!has_target_)
+        {
+            q_target_ = q_actual_;
+            has_target_ = true;
+            RCLCPP_INFO(this->get_logger(), "📍 保存启动姿态作为初始目标:");
+            RCLCPP_INFO(this->get_logger(), "   q_target=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+                        q_target_(0), q_target_(1), q_target_(2),
+                        q_target_(3), q_target_(4), q_target_(5));
+        }
     }
 
     // 调试输出（限流）
@@ -468,19 +497,39 @@ void TorqueControllerActionServer::controlLoop()
             return; // 还没收到状态，无法计算
         }
 
-        // 计算重力补偿，带入PD控制
+        // 计算重力补偿
         KDL::JntArray tau_gravity(6);
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
-        }
+        dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
+
+        // ========== 修改：PD 控制目标位置 ==========
         KDL::JntArray tau_pd(6);
+        if (has_target_)
         {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            computeFeedbackTorque(q_actual_, KDL::JntArray(6), q_actual_, KDL::JntArray(6), tau_pd);
+            // ✅ 有规划终点：期望位置 = 规划终点，期望速度 = 0
+            computeFeedbackTorque(q_target_, KDL::JntArray(6), q_actual_, q_dot_actual_, tau_pd);
+
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                5000,
+                "🔧 保持模式：保持规划终点 | τ_g=[%.2f, %.2f, %.2f, ...] | τ_pd=[%.2f, %.2f, %.2f, ...]",
+                tau_gravity(0), tau_gravity(1), tau_gravity(2),
+                tau_pd(0), tau_pd(1), tau_pd(2));
+        }
+        else
+        {
+            // ❌ 无规划终点：期望位置 = 当前位置，期望速度 = 0（仅重力补偿）
+            computeFeedbackTorque(q_actual_, KDL::JntArray(6), q_actual_, q_dot_actual_, tau_pd);
+
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                5000,
+                "🔧 保持模式：仅重力补偿（无规划终点）| τ_g=[%.2f, %.2f, %.2f, ...]",
+                tau_gravity(0), tau_gravity(1), tau_gravity(2));
         }
 
-        // 发布重力补偿力矩
+        // 发布力矩：重力补偿 + PD 控制
         std_msgs::msg::Float64MultiArray torque_msg;
         torque_msg.data.resize(6);
         for (size_t i = 0; i < 6; i++)
@@ -488,15 +537,6 @@ void TorqueControllerActionServer::controlLoop()
             torque_msg.data[i] = tau_gravity(i) + tau_pd(i);
         }
         torque_pub_->publish(torque_msg);
-
-        // 调试输出
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            5000,
-            "🔧 保持模式：发送重力补偿 τ_g=[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
-            tau_gravity(0), tau_gravity(1), tau_gravity(2),
-            tau_gravity(3), tau_gravity(4), tau_gravity(5));
 
         return;
     }
@@ -512,34 +552,52 @@ void TorqueControllerActionServer::controlLoop()
     if (t_now >= total_duration) // 检查是否完成
     {
         RCLCPP_INFO(this->get_logger(), "✅ 轨迹执行完成！");
-
-        // 停止定时器
-        control_timer_->cancel();
-
-        // 发布重力补偿力矩（保持最终位置，而不是零力矩）
-        KDL::JntArray tau_gravity(6);
+        KDL::JntArray q_actual_copy(6), qd_actual_copy(6);
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
+            q_actual_copy = q_actual_;
+            qd_actual_copy = q_dot_actual_;
         }
+
+        // 计算重力补偿
+        KDL::JntArray tau_gravity(6);
+        dynamic_computer_->computeGravityTorque(q_actual_copy, tau_gravity);
+
+        KDL::JntArray tau_pd(6);
+        if (has_target_)
+        {
+            // 期望位置 = 规划终点，期望速度 = 0
+            computeFeedbackTorque(q_target_, KDL::JntArray(6), q_actual_copy, qd_actual_copy, tau_pd);
+        }
+        else
+        {
+            // 如果没有目标，PD 输出为 0
+            for (size_t i = 0; i < 6; i++)
+            {
+                tau_pd(i) = 0.0;
+            }
+        }
+
+        // 发布力矩：重力补偿 + PD 控制
         std_msgs::msg::Float64MultiArray hold_torque;
         hold_torque.data.resize(6);
         for (size_t i = 0; i < 6; i++)
         {
-            hold_torque.data[i] = tau_gravity(i);
+            hold_torque.data[i] = tau_gravity(i) + tau_pd(i);
         }
         torque_pub_->publish(hold_torque);
 
-        RCLCPP_INFO(this->get_logger(), "✅ 轨迹执行完成，保持最终位置（重力补偿: τ_g=[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]）",
-                    tau_gravity(0), tau_gravity(1), tau_gravity(2),
-                    tau_gravity(3), tau_gravity(4), tau_gravity(5));
+        RCLCPP_INFO(this->get_logger(), "✅ 轨迹执行完成，切换到保持模式（目标位置: q_target）");
+        RCLCPP_INFO(this->get_logger(), "   τ_total=[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
+                    hold_torque.data[0], hold_torque.data[1], hold_torque.data[2],
+                    hold_torque.data[3], hold_torque.data[4], hold_torque.data[5]);
 
         // 返回成功结果
         auto result = std::make_shared<FollowJointTrajectory::Result>();
         result->error_code = FollowJointTrajectory::Result::SUCCESSFUL;
         current_goal_handle_->succeed(result);
 
-        // 清理状态
+        // 清理状态（但保留 q_target_ 和 has_target_）
         is_executing_ = false;
         current_goal_handle_.reset();
         return;
@@ -561,11 +619,10 @@ void TorqueControllerActionServer::controlLoop()
         qd_actual = q_dot_actual_;
     }
 
-    KDL::JntArray tau_ff(6);
-    dynamic_computer_->computeFeedforwardTorque(q_d, qd_d, qdd_d, tau_ff); // 计算前馈
-
+    KDL::JntArray tau_ff(6); // PD的话需要输入期望和实际，前馈只需要实际
+    dynamic_computer_->computeFeedforwardTorque(q_actual, qd_actual, qdd_d, tau_ff);
     KDL::JntArray tau_fb(6);
-    computeFeedbackTorque(q_d, qd_d, q_actual, qd_actual, tau_fb); // 计算反馈
+    computeFeedbackTorque(q_d, qd_d, q_actual, qd_actual, tau_fb); // 计算PD反馈力矩
 
     KDL::JntArray tau_total(6);
     for (size_t i = 0; i < 6; i++)
@@ -615,9 +672,9 @@ void TorqueControllerActionServer::controlLoop()
         this->get_logger(),
         *this->get_clock(),
         1000, // 每秒打印一次
-        "⏱️  t=%.3f/%.3f | τ=[%.1f, %.1f, %.1f, ...] | err_p=[%.4f, %.4f, %.4f, ...]",
+        "⏱️  t=%.3f/%.3f | J1: τ_ff=%.1f, τ_fb=%.1f, τ_total=%.1f | err_p=[%.4f, %.4f, %.4f, ...]",
         t_now, total_duration,
-        tau_total(0), tau_total(1), tau_total(2),
+        tau_ff(0), tau_fb(0), tau_total(0),
         feedback->error.positions[0], feedback->error.positions[1], feedback->error.positions[2]);
 }
 

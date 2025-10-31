@@ -15,7 +15,7 @@
 
   <worldbody>
     <geom pos="0 0 0.5" quat="1 0 0 0" type="mesh" rgba="0.752941 0.752941 0.752941 1" mesh="base_link"/>
-    <body name="link1_double8009" pos="0 0 0.5" quat="0.707105 0.707108 0 0">
+    <body name="link1_double8009" pos="0 0 0.5">
       <inertial pos="-0.0155 -0.0261644 -0.00790164" quat="-0.0499622 0.705182 0.048991 0.705565" mass="1.22526" diaginertia="0.00217005 0.00132596 0.0012599"/>
       <joint name="joint_1" pos="0 0 0" axis="0 1 0" range="-3.2 3.2" actuatorfrcrange="-20 20" damping="0.1" frictionloss="0.1"/>
       <geom pos="0.03215 0 0" quat="1 0 0 0" type="mesh" rgba="0.752941 0.752941 0.752941 1" mesh="link1_double8009"/>

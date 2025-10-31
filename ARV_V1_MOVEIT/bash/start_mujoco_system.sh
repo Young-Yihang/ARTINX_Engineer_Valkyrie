@@ -139,6 +139,13 @@ main() {
     log_info "步骤 4/5: 启动所有节点"
     echo ""
 
+
+    # 节点3：MoveIt + RViz
+    start_node \
+        "3. MoveIt + RViz" \
+        "ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py" \
+        0
+        
     # 节点1：力矩控制器（先启动，确保重力补偿就绪）
     start_node \
         "1. Torque Controller" \
@@ -154,12 +161,6 @@ main() {
         0
 
     sleep 2  # 等待 MuJoCo 节点启动
-
-    # 节点3：MoveIt + RViz
-    start_node \
-        "3. MoveIt + RViz" \
-        "ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py" \
-        0
 
     echo ""
     log_success "所有节点已启动！"
