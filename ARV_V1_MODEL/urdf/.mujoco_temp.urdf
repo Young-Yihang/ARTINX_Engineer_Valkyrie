@@ -100,7 +100,7 @@
     <child
       link="link1_double8009" />
     <axis
-      xyz="0 1 0" />
+      xyz="0 0 1" />
     <limit
       lower="-3.2"
       upper="3.2"
