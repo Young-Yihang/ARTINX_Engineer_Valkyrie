@@ -49,21 +49,21 @@
     <inertial>
       <origin
         xyz="-0.0154999931131982 -0.0261644185287386 -0.00790164285412044"
-        rpy="0 0 0" />
+        rpy="1.5708 0 0" />
       <mass
         value="1.22525961510696" />
       <inertia
-        ixx="0.00126118311285525"
-        ixy="-9.13199961592521E-06"
-        ixz="-4.1718719896748E-07"
-        iyy="0.00132467695230876"
-        iyz="-1.19448129551972E-06"
-        izz="0.00217005077700242" />
+        ixx="0.001261183113"
+        ixy="0.000000417221"
+        ixz="-0.000009131998"
+        iyy="0.002170050768"
+        iyz="0.000001197587"
+        izz="0.001324676961" />
     </inertial>
     <visual>
       <origin
         xyz="0.03215 0 0"
-        rpy="0 0 0" />
+        rpy="1.5708 0 0" />
       <geometry>
         <mesh
           filename="package://ARV_V1_MODEL/meshes/link1_double8009.STL" />
@@ -77,7 +77,7 @@
     <collision>
       <origin
         xyz="0.03215 0 0"
-        rpy="0 0 0" />
+        rpy="1.5708 0 0" />
       <geometry>
         <mesh
           filename="package://ARV_V1_MODEL/meshes/link1_double8009.STL" />
@@ -155,7 +155,7 @@
     type="revolute">
     <origin
       xyz="0 0 0"
-      rpy="0 0 0" />
+      rpy="1.5708 0 0" />
     <parent
       link="link1_double8009" />
     <child
