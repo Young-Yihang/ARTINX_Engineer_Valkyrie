@@ -32,23 +32,51 @@ public: // 构造函数log
                                      control_frequency_(200.0)
     {
         RCLCPP_INFO(this->get_logger(), "🚀 力矩控制器节点启动");
+        // ========== 参数声明：PD 增益（可动态调节）==========
 
-        // ========== 初始化 PD 增益 (新增) ==========
-        // 位置增益（根据关节大小调整）
-        Kp_(0) = 10000.0; // joint_1: 大关节，需要较大增益
-        Kp_(1) = 1500.0; // joint_2: 抬臂关节，负载大
-        Kp_(2) = 1550.0; // joint_3: 肘关节
-        Kp_(3) = 350.0;  // joint_4: 小关节
-        Kp_(4) = 100.0;  // joint_5: 更小
-        Kp_(5) = 20.0;   // joint_6: 末端，增益最小
+        // 声明 Kp 参数（每个关节独立）
+        this->declare_parameter("Kp.joint_1", 10000.0);
+        this->declare_parameter("Kp.joint_2", 1500.0);
+        this->declare_parameter("Kp.joint_3", 1550.0);
+        this->declare_parameter("Kp.joint_4", 350.0);
+        this->declare_parameter("Kp.joint_5", 100.0);
+        this->declare_parameter("Kp.joint_6", 20.0);
 
-        // 速度增益（通常是 Kp 的 1/10 ~ 1/5）
-        Kd_(0) = 0.0;
-        Kd_(1) = 0.0;
-        Kd_(2) = 0.0;
-        Kd_(3) = 0.0;
-        Kd_(4) = 0.0;
-        Kd_(5) = 0.0;
+        // 声明 Kd 参数
+        this->declare_parameter("Kd.joint_1", 0.0);
+        this->declare_parameter("Kd.joint_2", 0.0);
+        this->declare_parameter("Kd.joint_3", 0.0);
+        this->declare_parameter("Kd.joint_4", 0.0);
+        this->declare_parameter("Kd.joint_5", 0.0);
+        this->declare_parameter("Kd.joint_6", 0.0);
+
+        // 读取初始值到成员变量
+        Kp_(0) = this->get_parameter("Kp.joint_1").as_double();
+        Kp_(1) = this->get_parameter("Kp.joint_2").as_double();
+        Kp_(2) = this->get_parameter("Kp.joint_3").as_double();
+        Kp_(3) = this->get_parameter("Kp.joint_4").as_double();
+        Kp_(4) = this->get_parameter("Kp.joint_5").as_double();
+        Kp_(5) = this->get_parameter("Kp.joint_6").as_double();
+
+        Kd_(0) = this->get_parameter("Kd.joint_1").as_double();
+        Kd_(1) = this->get_parameter("Kd.joint_2").as_double();
+        Kd_(2) = this->get_parameter("Kd.joint_3").as_double();
+        Kd_(3) = this->get_parameter("Kd.joint_4").as_double();
+        Kd_(4) = this->get_parameter("Kd.joint_5").as_double();
+        Kd_(5) = this->get_parameter("Kd.joint_6").as_double();
+
+        RCLCPP_INFO(this->get_logger(), "✅ PD 增益已初始化:");
+        RCLCPP_INFO(this->get_logger(), "   Kp=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
+                    Kp_(0), Kp_(1), Kp_(2), Kp_(3), Kp_(4), Kp_(5));
+        RCLCPP_INFO(this->get_logger(), "   Kd=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
+                    Kd_(0), Kd_(1), Kd_(2), Kd_(3), Kd_(4), Kd_(5));
+
+        // 注册参数变化回调
+        param_callback_handle_ = this->add_on_set_parameters_callback(
+            std::bind(&TorqueControllerActionServer::parametersCallback,
+                      this, std::placeholders::_1));
+
+        RCLCPP_INFO(this->get_logger(), "🔧 参数动态调节已启用（可通过 ros2 param set 命令修改）");
 
         // ========== 初始化动力学求解器 ==========
         if (!initializeDynamics())
@@ -150,6 +178,13 @@ private:
                                KDL::JntArray &tau_fb);         // 输出：反馈力矩
 
     void controlLoop(); // 核心控制循环
+
+    // ========== 新增：参数动态调节 ==========
+    rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
+
+    // 参数变化回调函数
+    rcl_interfaces::msg::SetParametersResult parametersCallback(
+        const std::vector<rclcpp::Parameter> &parameters);
 };
 
 rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
@@ -619,8 +654,8 @@ void TorqueControllerActionServer::controlLoop()
         qd_actual = q_dot_actual_;
     }
 
-    KDL::JntArray tau_ff(6); // PD的话需要输入期望和实际，前馈只需要实际
-    dynamic_computer_->computeFeedforwardTorque(q_actual, qd_actual, qdd_d, tau_ff);
+    KDL::JntArray tau_ff(6); // PD的话需要输入期望和实际，前馈只需要期望
+    dynamic_computer_->computeFeedforwardTorque(q_d, qd_d, qdd_d, tau_ff);
     KDL::JntArray tau_fb(6);
     computeFeedbackTorque(q_d, qd_d, q_actual, qd_actual, tau_fb); // 计算PD反馈力矩
 
@@ -677,6 +712,77 @@ void TorqueControllerActionServer::controlLoop()
         tau_ff(0), tau_fb(0), tau_total(0),
         feedback->error.positions[0], feedback->error.positions[1], feedback->error.positions[2]);
 }
+
+// ========== 参数变化回调函数实现 ==========
+rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parametersCallback(
+    const std::vector<rclcpp::Parameter> &parameters)
+{
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    result.reason = "参数更新成功";
+
+    for (const auto &param : parameters)
+    {
+        const std::string &name = param.get_name();
+
+        // 检查是否是 Kp 参数
+        if (name.find("Kp.joint_") == 0)
+        {
+            // 提取关节编号："Kp.joint_1" -> 1
+            std::string joint_num_str = name.substr(9); // "joint_1" -> "1"
+            int joint_idx = std::stoi(joint_num_str) - 1; // 索引从 0 开始
+
+            if (joint_idx >= 0 && joint_idx < 6)
+            {
+                double new_value = param.as_double();
+                
+                // 合法性检查
+                if (new_value < 0.0)
+                {
+                    result.successful = false;
+                    result.reason = "Kp 值不能为负数";
+                    RCLCPP_ERROR(this->get_logger(), "❌ 拒绝无效参数: %s = %.2f", name.c_str(), new_value);
+                    return result;
+                }
+
+                // 更新增益
+                Kp_(joint_idx) = new_value;
+                
+                RCLCPP_INFO(this->get_logger(), 
+                    "🔧 Kp[joint_%d] 已更新: %.2f", joint_idx + 1, new_value);
+            }
+        }
+        // 检查是否是 Kd 参数
+        else if (name.find("Kd.joint_") == 0)
+        {
+            std::string joint_num_str = name.substr(9);
+            int joint_idx = std::stoi(joint_num_str) - 1;
+
+            if (joint_idx >= 0 && joint_idx < 6)
+            {
+                double new_value = param.as_double();
+                
+                // 合法性检查
+                if (new_value < 0.0)
+                {
+                    result.successful = false;
+                    result.reason = "Kd 值不能为负数";
+                    RCLCPP_ERROR(this->get_logger(), "❌ 拒绝无效参数: %s = %.2f", name.c_str(), new_value);
+                    return result;
+                }
+
+                // 更新增益
+                Kd_(joint_idx) = new_value;
+                
+                RCLCPP_INFO(this->get_logger(), 
+                    "🔧 Kd[joint_%d] 已更新: %.2f", joint_idx + 1, new_value);
+            }
+        }
+    }
+
+    return result;
+}
+
 
 int main(int argc, char **argv)
 {
