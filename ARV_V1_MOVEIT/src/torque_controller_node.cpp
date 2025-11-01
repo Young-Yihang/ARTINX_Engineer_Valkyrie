@@ -35,7 +35,7 @@ public: // 构造函数log
         // ========== 参数声明：PD 增益（可动态调节）==========
 
         // 声明 Kp 参数（每个关节独立）
-        this->declare_parameter("Kp.joint_1", 10000.0);
+        this->declare_parameter("Kp.joint_1", 1000.0);
         this->declare_parameter("Kp.joint_2", 1500.0);
         this->declare_parameter("Kp.joint_3", 1550.0);
         this->declare_parameter("Kp.joint_4", 350.0);
@@ -191,10 +191,9 @@ rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
     const rclcpp_action::GoalUUID &uuid,
     std::shared_ptr<const FollowJointTrajectory::Goal> goal)
 {
-    (void)uuid; // 未使用的参数
+    (void)uuid;
 
-    RCLCPP_INFO(this->get_logger(), "!!!!收到新轨迹目标!!!!!");
-    RCLCPP_INFO(this->get_logger(), "   轨迹点数: %zu", goal->trajectory.points.size());
+    RCLCPP_INFO(this->get_logger(), "🎯 收到新轨迹 (%zu点)", goal->trajectory.points.size());
 
     if (is_executing_)
     {
@@ -270,10 +269,8 @@ void TorqueControllerActionServer::handleAccepted(
                     q_target_(3), q_target_(4), q_target_(5));
     }
 
-    RCLCPP_INFO(this->get_logger(), "📦 轨迹已缓存:");
-    RCLCPP_INFO(this->get_logger(), "   - 关节数: %zu", current_trajectory_.joint_names.size());
-    RCLCPP_INFO(this->get_logger(), "   - 轨迹点数: %zu", current_trajectory_.points.size());
-    RCLCPP_INFO(this->get_logger(), "   - 总时长: %.3f 秒", total_duration);
+    RCLCPP_INFO(this->get_logger(), "📦 轨迹已缓存 (%zu点, %.3fs)", 
+                current_trajectory_.points.size(), total_duration);
 }
 
 void TorqueControllerActionServer::jointStateCallback(
@@ -318,15 +315,6 @@ void TorqueControllerActionServer::jointStateCallback(
                         q_target_(3), q_target_(4), q_target_(5));
         }
     }
-
-    // 调试输出（限流）
-    RCLCPP_INFO_THROTTLE(
-        this->get_logger(),
-        *this->get_clock(),
-        5000, // 每 5 秒打印一次
-        "📊 关节状态: q=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-        q_actual_(0), q_actual_(1), q_actual_(2),
-        q_actual_(3), q_actual_(4), q_actual_(5));
 }
 
 bool TorqueControllerActionServer::initializeDynamics()
@@ -540,28 +528,11 @@ void TorqueControllerActionServer::controlLoop()
         KDL::JntArray tau_pd(6);
         if (has_target_)
         {
-            // ✅ 有规划终点：期望位置 = 规划终点，期望速度 = 0
             computeFeedbackTorque(q_target_, KDL::JntArray(6), q_actual_, q_dot_actual_, tau_pd);
-
-            RCLCPP_INFO_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                5000,
-                "🔧 保持模式：保持规划终点 | τ_g=[%.2f, %.2f, %.2f, ...] | τ_pd=[%.2f, %.2f, %.2f, ...]",
-                tau_gravity(0), tau_gravity(1), tau_gravity(2),
-                tau_pd(0), tau_pd(1), tau_pd(2));
         }
         else
         {
-            // ❌ 无规划终点：期望位置 = 当前位置，期望速度 = 0（仅重力补偿）
             computeFeedbackTorque(q_actual_, KDL::JntArray(6), q_actual_, q_dot_actual_, tau_pd);
-
-            RCLCPP_INFO_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                5000,
-                "🔧 保持模式：仅重力补偿（无规划终点）| τ_g=[%.2f, %.2f, %.2f, ...]",
-                tau_gravity(0), tau_gravity(1), tau_gravity(2));
         }
 
         // 发布力矩：重力补偿 + PD 控制
@@ -702,15 +673,6 @@ void TorqueControllerActionServer::controlLoop()
     }
 
     current_goal_handle_->publish_feedback(feedback);
-
-    RCLCPP_INFO_THROTTLE(
-        this->get_logger(),
-        *this->get_clock(),
-        1000, // 每秒打印一次
-        "⏱️  t=%.3f/%.3f | J1: τ_ff=%.1f, τ_fb=%.1f, τ_total=%.1f | err_p=[%.4f, %.4f, %.4f, ...]",
-        t_now, total_duration,
-        tau_ff(0), tau_fb(0), tau_total(0),
-        feedback->error.positions[0], feedback->error.positions[1], feedback->error.positions[2]);
 }
 
 // ========== 参数变化回调函数实现 ==========

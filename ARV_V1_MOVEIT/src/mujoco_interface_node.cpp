@@ -214,6 +214,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
         "\n  <mujoco>\n"
         "    <compiler meshdir=\"/home/huan/ros2_ws/src/ARV_V1_MODEL/meshes\" strippath=\"false\"/>\n"
         "    <option timestep=\"0.005\"/>\n"
+        "    <size nconmax=\"0\" njmax=\"0\"/>  <!-- 禁用所有接触碰撞 -->\n"
         "  </mujoco>\n";
 
     size_t robot_pos = urdf_string.find("<robot");
@@ -231,7 +232,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
     }
 
     urdf_string.insert(bracket_pos + 1, mujoco_compiler);
-    RCLCPP_INFO(this->get_logger(), "✓ 已插入MuJoCo编译器设置");
+    RCLCPP_INFO(this->get_logger(), "✓ 已插入MuJoCo编译器设置（禁用碰撞检测）");
 
     // URDF 中不插入 actuator，稍后通过 MJCF 添加
 
@@ -337,6 +338,37 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
         return false;
     }
 
+    // ========== 步骤7.5: 禁用所有geom的碰撞（设置contype=0 conaffinity=0） ==========
+    size_t geom_pos = 0;
+    int geom_count = 0;
+    
+    while ((geom_pos = mjcf_string.find("<geom", geom_pos)) != std::string::npos)
+    {
+        // 找到geom标签的结束位置
+        size_t geom_end = mjcf_string.find("/>", geom_pos);
+        if (geom_end == std::string::npos)
+        {
+            geom_end = mjcf_string.find(">", geom_pos);
+        }
+        
+        if (geom_end != std::string::npos)
+        {
+            // 检查是否已经有contype/conaffinity属性
+            std::string geom_tag = mjcf_string.substr(geom_pos, geom_end - geom_pos);
+            
+            if (geom_tag.find("contype") == std::string::npos)
+            {
+                // 在geom标签结束前插入碰撞禁用属性
+                mjcf_string.insert(geom_end, " contype=\"0\" conaffinity=\"0\"");
+                geom_count++;
+            }
+        }
+        
+        geom_pos = geom_end + 1;
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "✓ 已禁用 %d 个geom的碰撞检测", geom_count);
+    
     // 保存修改后的MJCF
     std::string final_mjcf_path = "/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/.mujoco_final.xml";
     std::ofstream final_mjcf_file(final_mjcf_path);
@@ -453,13 +485,6 @@ void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray:
     {
         data_->ctrl[i] = msg->data[i];
     }
-    RCLCPP_INFO_THROTTLE(
-        this->get_logger(),
-        *this->get_clock(),
-        5000, // 每5秒打印一次
-        "🎮 收到力矩命令: τ=[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
-        data_->ctrl[0], data_->ctrl[1], data_->ctrl[2],
-        data_->ctrl[3], data_->ctrl[4], data_->ctrl[5]);
 }
 
 void MuJoCoInterfaceNode::simulationStep()
@@ -467,15 +492,12 @@ void MuJoCoInterfaceNode::simulationStep()
     // ========== 安全检查：等待首次力矩命令 ==========
     if (!received_first_command_)
     {
-        // 还没收到力矩命令，不执行仿真步进
-        // 这样可以防止机械臂在启动时因重力下落
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
-            2000,  // 每2秒提示一次
+            2000,
             "⏸️  等待力矩控制器发送命令...");
 
-        // 仍然发布当前状态（初始位姿）
         publishJointStates();
         return;
     }
@@ -492,7 +514,6 @@ void MuJoCoInterfaceNode::simulationStep()
 
 void MuJoCoInterfaceNode::publishJointStates()
 {
-    // 开始发布关节反馈！
     auto msg = sensor_msgs::msg::JointState();
 
     msg.header.stamp = this->now();
@@ -506,19 +527,9 @@ void MuJoCoInterfaceNode::publishJointStates()
 
     for (int i = 0; i < 6; i++)
     {
-        msg.velocity.push_back(data_->qvel[i]); // 填写关节速度字段
+        msg.velocity.push_back(data_->qvel[i]);
     }
 
-    // 每5秒打印一次（避免刷屏）
-    RCLCPP_INFO_THROTTLE(
-        this->get_logger(),
-        *this->get_clock(),
-        5000, // 毫秒
-        "📊 关节状态: q=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-        data_->qpos[0], data_->qpos[1], data_->qpos[2],
-        data_->qpos[3], data_->qpos[4], data_->qpos[5]);
-
-    // 反馈力矩不用于控制律，不填写了
     joint_state_pub_->publish(msg);
 }
 

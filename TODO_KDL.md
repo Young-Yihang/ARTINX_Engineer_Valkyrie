@@ -1,6 +1,6 @@
 # ARV V1 力矩控制系统 - 核心要点
 
-> **更新**: 2025-10-31 | **状态**: 轨迹跟踪效果良好 ✅ | D 项调优中 ⚙️
+> **更新**: 2025-11-02 | **状态**: 轨迹跟踪效果良好 ✅ | Joint1 碰撞问题已解决 🔧
 
 ---
 
@@ -107,16 +107,11 @@ PD 反馈:  e_p = q_d - q_actual_
 ### PD 增益 (torque_controller_node.cpp:35-47)
 ```cpp
 // 位置增益
-Kp: [600, 1000, 550, 150, 100, 20]   // N·m/rad
+Kp: [1000, 1500, 1550, 350, 100, 20]   // N·m/rad
 
-// 速度增益 (当前全部设为 0，因为 D 项异常)
-Kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   // N·m·s/rad
+// 速度增益 (当前全部设为 0)
+Kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]      // N·m·s/rad
 ```
-
-**⚠️ 当前问题**:
-- 第一关节 D 项在轨迹完成时计算出 500+ N·m（异常大）
-- 临时方案：将所有 Kd 设为 0
-- 仅使用 P 控制 + 完整动力学前馈，效果良好 ✅
 
 ### 控制频率
 - 力矩控制器: **200 Hz**
@@ -132,6 +127,7 @@ Kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   // N·m·s/rad
 
 | 功能 | 文件 | 行数范围 |
 |------|------|----------|
+| 碰撞禁用配置 | mujoco_interface_node.cpp | 195-210 |
 | 状态机变量 | torque_controller_node.cpp | 100-115 |
 | PD 增益初始化 | torque_controller_node.cpp | 35-47 |
 | 保存启动姿态 | torque_controller_node.cpp | 270-284 |
@@ -144,7 +140,64 @@ Kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   // N·m·s/rad
 
 ## ✅ 已解决的关键问题
 
-### 1. 死锁导致控制停止
+### 1. Joint1 运动极慢问题 🔥 【2025-11-02 新解决】
+
+**现象**: 
+- Joint1 速度恒定 ~0.06 rad/s
+- 控制器输出数千 N·m 力矩无效
+
+**根本原因**: MuJoCo 碰撞约束力抵消执行器力矩
+
+```
+力矩平衡分析：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+qfrc_actuator   = -20.0 N·m  (执行器)
+qfrc_constraint = +19.5 N·m  (约束力)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+τ_net           ≈   0.0 N·m  (净力矩)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+结果: qacc ≈ 0 → 速度几乎不变
+```
+
+**碰撞源**:
+1. Link1 与 world（地面）碰撞
+2. Link4 与 Link6 自碰撞
+
+**解决方案**:
+```cpp
+// mujoco_interface_node.cpp (line 195-210)
+
+// 方案1: 禁用所有接触约束
+"<size nconmax=\"0\" njmax=\"0\"/>"
+
+// 方案2: 为每个几何体禁用碰撞（已实现）
+for (all <geom> tags) {
+    add: contype="0" conaffinity="0"
+}
+```
+
+**诊断方法**:
+```cpp
+// 监控约束统计
+RCLCPP_INFO("nefc=%d, ncon=%d", data_->nefc, data_->ncon);
+RCLCPP_INFO("qfrc_constraint=%.3f", data_->qfrc_constraint[0]);
+
+// 检查接触详情
+for (int i = 0; i < data_->ncon; i++) {
+    mjContact* con = &data_->contact[i];
+    const char* geom1_name = mj_id2name(model_, mjOBJ_GEOM, con->geom1);
+    const char* geom2_name = mj_id2name(model_, mjOBJ_GEOM, con->geom2);
+    int body1 = model_->geom_bodyid[con->geom1];
+    int body2 = model_->geom_bodyid[con->geom2];
+    const char* body1_name = mj_id2name(model_, mjOBJ_BODY, body1);
+    const char* body2_name = mj_id2name(model_, mjOBJ_BODY, body2);
+    
+    RCLCPP_INFO("接触 [%d]: %s(%s) <-> %s(%s), dist=%.6f", 
+                i, geom1_name, body1_name, geom2_name, body2_name, con->dist);
+}
+```
+
+### 2. 死锁导致控制停止
 **问题**: `controlLoop()` 嵌套加锁 → 永久阻塞
 **解决**: 删除嵌套锁，外层加锁一次即可
 
@@ -228,6 +281,7 @@ Kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   // N·m·s/rad
 
 ### 📊 已完成的优化
 
+- [x] Joint1 碰撞问题解决（2025-11-02）✨
 - [x] 完整动力学前馈（已实现）
 - [x] 轨迹抢占机制（已实现）
 - [x] 轨迹完成时的 PD 控制（已实现）
@@ -323,6 +377,15 @@ ros2 topic hz /joint_states
 ### 为什么 joint_1 重力项接近 0？
 joint_1 绕 Z 轴旋转，重力 (0,0,-9.81) 平行于旋转轴 → 力臂=0 → τ_g≈0
 
+### MuJoCo 碰撞配置
+```xml
+<!-- 方案1: 禁用所有接触 -->
+<size nconmax="0" njmax="0"/>
+
+<!-- 方案2: 禁用单个几何体碰撞（当前使用）-->
+<geom ... contype="0" conaffinity="0"/>
+```
+
 ### 控制频率选择
 - **100Hz**: 慢速运动，计算负载低
 - **200Hz**: 标准控制（当前），平衡性能
@@ -338,7 +401,7 @@ joint_1 绕 Z 轴旋转，重力 (0,0,-9.81) 平行于旋转轴 → 力臂=0 →
 
 ---
 
-**最后更新**: 2025-10-31  
-**状态**: 轨迹跟踪效果良好 ✅ | D 项异常需诊断 ⚠️  
+**最后更新**: 2025-11-02  
+**状态**: 系统稳定运行 ✅ | Joint1 碰撞问题已解决 🔧  
 **当前配置**: P 控制 + 完整动力学前馈（Kd 全部为 0）  
-**下一步**: D 项问题诊断 → 速度滤波 → 恢复 D 控制
+**下一步**: D 项调优 → 速度滤波 → 性能优化

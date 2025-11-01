@@ -3,6 +3,8 @@
 
   <option timestep="0.005"/>
 
+  <size njmax="0" nconmax="0"/>
+
   <asset>
     <mesh name="base_link" content_type="model/stl" file="base_link.STL"/>
     <mesh name="link1_double8009" content_type="model/stl" file="link1_double8009.STL"/>
@@ -16,7 +18,7 @@
   <worldbody>
     <geom pos="0 0 0.5" quat="1 0 0 0" type="mesh" rgba="0.752941 0.752941 0.752941 1" mesh="base_link"/>
     <body name="link1_double8009" pos="0 0 0.5">
-      <inertial pos="-0.0155 -0.0261644 -0.00790164" quat="0.533551 0.464269 0.463309 0.533968" mass="1.22526" diaginertia="0.00217005 0.00132596 0.0012599"/>
+      <inertial pos="-0.0155 0.0079001 -0.0262" quat="0.533551 0.464269 0.463309 0.533968" mass="1.22526" diaginertia="0.00217005 0.00132596 0.0012599"/>
       <joint name="joint_1" pos="0 0 0" axis="0 0 1" range="-3.2 3.2" actuatorfrcrange="-20 20" damping="0.1" frictionloss="0.1"/>
       <geom pos="0.03215 0 0" quat="0.707105 0.707108 0 0" type="mesh" rgba="0.752941 0.752941 0.752941 1" mesh="link1_double8009"/>
       <body name="link2_arm1" quat="0.707105 0.707108 0 0">
