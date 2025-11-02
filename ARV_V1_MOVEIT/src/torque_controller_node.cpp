@@ -49,10 +49,10 @@ public: // 构造函数log
         // 声明 Kp 参数（每个关节独立）
         this->declare_parameter("Kp.joint_1", 1000.0);
         this->declare_parameter("Kp.joint_2", 1500.0);
-        this->declare_parameter("Kp.joint_3", 1550.0);
-        this->declare_parameter("Kp.joint_4", 350.0);
-        this->declare_parameter("Kp.joint_5", 100.0);
-        this->declare_parameter("Kp.joint_6", 20.0);
+        this->declare_parameter("Kp.joint_3", 1050.0);
+        this->declare_parameter("Kp.joint_4", 150.0);
+        this->declare_parameter("Kp.joint_5", 20.0);
+        this->declare_parameter("Kp.joint_6", 5.0);
 
         // 声明 Kd 参数
         this->declare_parameter("Kd.joint_1", 0.0);
