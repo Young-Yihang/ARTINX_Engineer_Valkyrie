@@ -344,9 +344,10 @@ void TorqueControllerActionServer::jointStateCallback(
     }
 
     // ========== 卡尔曼滤波处理 ==========
+    // 注意：卡尔曼滤波器只用于速度滤波，位置保持原始测量值（编码器精度高）
     if (kalman_filter_enabled_)
     {
-        // 启用滤波：使用卡尔曼滤波器
+        // 启用滤波：使用卡尔曼滤波器过滤速度
         for (size_t i = 0; i < 6; i++)
         {
             // 首次接收：初始化滤波器
@@ -361,8 +362,8 @@ void TorqueControllerActionServer::jointStateCallback(
                 joint_filters_[i].update(msg->position[i], msg->velocity[i]);
             }
 
-            // 获取滤波后的状态
-            q_actual_(i) = joint_filters_[i].getPosition();
+            // ⚠️ 关键修改：只使用滤波后的速度，位置保持原始值
+            // q_actual_(i) 已经在上面设置为 msg->position[i]，保持不变
             q_dot_filtered_(i) = joint_filters_[i].getVelocity();
         }
     }
@@ -372,7 +373,7 @@ void TorqueControllerActionServer::jointStateCallback(
         for (size_t i = 0; i < 6; i++)
         {
             q_dot_filtered_(i) = q_dot_actual_(i); // 直接使用原始速度
-            // q_actual_ 已在上面赋值，保持不变
+            // q_actual_ 已在上面赋值为原始位置，保持不变
         }
     }
 
