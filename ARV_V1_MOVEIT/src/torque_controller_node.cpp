@@ -13,6 +13,7 @@
 #include <kdl_parser/kdl_parser.hpp>
 #include <urdf/model.h>
 #include "dynamics_computer.hpp"
+#include "kalman_filter.hpp"
 
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GoalHandleFJT = rclcpp_action::ServerGoalHandle<FollowJointTrajectory>;
@@ -29,7 +30,17 @@ public: // 构造函数log
                                      has_target_(false),
                                      Kp_(6),
                                      Kd_(6),
-                                     control_frequency_(200.0)
+                                     control_frequency_(200.0),
+                                     joint_filters_{
+                                         KalmanFilter1D(1.0 / 200.0), // Joint 1
+                                         KalmanFilter1D(1.0 / 200.0), // Joint 2
+                                         KalmanFilter1D(1.0 / 200.0), // Joint 3
+                                         KalmanFilter1D(1.0 / 200.0), // Joint 4
+                                         KalmanFilter1D(1.0 / 200.0), // Joint 5
+                                         KalmanFilter1D(1.0 / 200.0)  // Joint 6
+                                     },
+                                     q_dot_filtered_(6)
+
     {
         RCLCPP_INFO(this->get_logger(), "🚀 力矩控制器节点启动");
         // ========== 参数声明：PD 增益（可动态调节）==========
@@ -77,6 +88,28 @@ public: // 构造函数log
                       this, std::placeholders::_1));
 
         RCLCPP_INFO(this->get_logger(), "🔧 参数动态调节已启用（可通过 ros2 param set 命令修改）");
+
+        // ========== 新增：声明卡尔曼滤波器参数（必须在读取之前声明）==========
+        this->declare_parameter("kalman.Q_pos", 1e-5); // 过程噪声：位置
+        this->declare_parameter("kalman.Q_vel", 1e-3); // 过程噪声：速度
+        this->declare_parameter("kalman.R_pos", 1e-6); // 测量噪声：位置
+        this->declare_parameter("kalman.R_vel", 1e-2); // 测量噪声：速度
+
+        // 读取参数并设置滤波器
+        double Q_pos = this->get_parameter("kalman.Q_pos").as_double();
+        double Q_vel = this->get_parameter("kalman.Q_vel").as_double();
+        double R_pos = this->get_parameter("kalman.R_pos").as_double();
+        double R_vel = this->get_parameter("kalman.R_vel").as_double();
+
+        for (auto &filter : joint_filters_)
+        {
+            filter.setProcessNoise(Q_pos, Q_vel);
+            filter.setMeasurementNoise(R_pos, R_vel);
+        }
+
+        RCLCPP_INFO(this->get_logger(), "✅ 卡尔曼滤波器已初始化:");
+        RCLCPP_INFO(this->get_logger(), "   Q_pos=%.1e, Q_vel=%.1e", Q_pos, Q_vel);
+        RCLCPP_INFO(this->get_logger(), "   R_pos=%.1e, R_vel=%.1e", R_pos, R_vel);
 
         // ========== 初始化动力学求解器 ==========
         if (!initializeDynamics())
@@ -146,6 +179,9 @@ private:
 
     KDL::JntArray Kp_; // P of position
     KDL::JntArray Kd_; // D of position
+
+    std::array<KalmanFilter1D, 6> joint_filters_;
+    KDL::JntArray q_dot_filtered_;
 
     rclcpp::TimerBase::SharedPtr control_timer_;                                // 控制循环定时器
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_; // 力矩发布者
@@ -269,7 +305,7 @@ void TorqueControllerActionServer::handleAccepted(
                     q_target_(3), q_target_(4), q_target_(5));
     }
 
-    RCLCPP_INFO(this->get_logger(), "📦 轨迹已缓存 (%zu点, %.3fs)", 
+    RCLCPP_INFO(this->get_logger(), "📦 轨迹已缓存 (%zu点, %.3fs)",
                 current_trajectory_.points.size(), total_duration);
 }
 
@@ -296,6 +332,25 @@ void TorqueControllerActionServer::jointStateCallback(
     {
         q_actual_(i) = msg->position[i];
         q_dot_actual_(i) = msg->velocity[i];
+    }
+
+    for (size_t i = 0; i < 6; i++)
+    {
+        // 首次接收：初始化滤波器
+        if (!state_received_)
+        {
+            joint_filters_[i].initialize(msg->position[i], msg->velocity[i]);
+        }
+        else
+        {
+            // 后续：预测-更新循环
+            joint_filters_[i].predict();
+            joint_filters_[i].update(msg->position[i], msg->velocity[i]);
+        }
+
+        // 获取滤波后的状态
+        q_actual_(i) = joint_filters_[i].getPosition();
+        q_dot_filtered_(i) = joint_filters_[i].getVelocity();
     }
 
     // 首次接收数据：保存启动姿态作为初始目标
@@ -524,15 +579,15 @@ void TorqueControllerActionServer::controlLoop()
         KDL::JntArray tau_gravity(6);
         dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
 
-        // ========== 修改：PD 控制目标位置 ==========
+        // ========== 修改：PD 控制目标位置 ========== //添加滤波速度
         KDL::JntArray tau_pd(6);
         if (has_target_)
         {
-            computeFeedbackTorque(q_target_, KDL::JntArray(6), q_actual_, q_dot_actual_, tau_pd);
+            computeFeedbackTorque(q_target_, KDL::JntArray(6), q_actual_, q_dot_filtered_, tau_pd);
         }
         else
         {
-            computeFeedbackTorque(q_actual_, KDL::JntArray(6), q_actual_, q_dot_actual_, tau_pd);
+            computeFeedbackTorque(q_actual_, KDL::JntArray(6), q_actual_, q_dot_filtered_, tau_pd);
         }
 
         // 发布力矩：重力补偿 + PD 控制
@@ -558,11 +613,11 @@ void TorqueControllerActionServer::controlLoop()
     if (t_now >= total_duration) // 检查是否完成
     {
         RCLCPP_INFO(this->get_logger(), "✅ 轨迹执行完成！");
-        KDL::JntArray q_actual_copy(6), qd_actual_copy(6);
+        KDL::JntArray q_actual_copy(6), qd_filtered_copy(6);
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             q_actual_copy = q_actual_;
-            qd_actual_copy = q_dot_actual_;
+            qd_filtered_copy = q_dot_filtered_;  // 从成员变量拷贝滤波后的速度
         }
 
         // 计算重力补偿
@@ -573,7 +628,7 @@ void TorqueControllerActionServer::controlLoop()
         if (has_target_)
         {
             // 期望位置 = 规划终点，期望速度 = 0
-            computeFeedbackTorque(q_target_, KDL::JntArray(6), q_actual_copy, qd_actual_copy, tau_pd);
+            computeFeedbackTorque(q_target_, KDL::JntArray(6), q_actual_copy, qd_filtered_copy, tau_pd);
         }
         else
         {
@@ -618,17 +673,17 @@ void TorqueControllerActionServer::controlLoop()
     }
 
     // 获取实际状态（线程安全）
-    KDL::JntArray q_actual(6), qd_actual(6);
+    KDL::JntArray q_actual(6), qd_filtered(6);
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         q_actual = q_actual_;
-        qd_actual = q_dot_actual_;
+        qd_filtered = q_dot_filtered_; // 从成员变量拷贝滤波后的速度
     }
 
     KDL::JntArray tau_ff(6); // PD的话需要输入期望和实际，前馈只需要期望
     dynamic_computer_->computeFeedforwardTorque(q_d, qd_d, qdd_d, tau_ff);
     KDL::JntArray tau_fb(6);
-    computeFeedbackTorque(q_d, qd_d, q_actual, qd_actual, tau_fb); // 计算PD反馈力矩
+    computeFeedbackTorque(q_d, qd_d, q_actual, qd_filtered, tau_fb); // 计算PD反馈力矩，使用滤波后的速度
 
     KDL::JntArray tau_total(6);
     for (size_t i = 0; i < 6; i++)
@@ -653,7 +708,7 @@ void TorqueControllerActionServer::controlLoop()
     for (size_t i = 0; i < 6; i++)
     {
         feedback->actual.positions[i] = q_actual(i);
-        feedback->actual.velocities[i] = qd_actual(i); // 更新q-当前
+        feedback->actual.velocities[i] = qd_filtered(i); // 反馈使用滤波后的速度
     }
 
     feedback->desired.positions.resize(6);
@@ -669,7 +724,7 @@ void TorqueControllerActionServer::controlLoop()
     for (size_t i = 0; i < 6; i++)
     {
         feedback->error.positions[i] = q_d(i) - q_actual(i);
-        feedback->error.velocities[i] = qd_d(i) - qd_actual(i); // error
+        feedback->error.velocities[i] = qd_d(i) - qd_filtered(i); // 速度误差基于滤波后的速度
     }
 
     current_goal_handle_->publish_feedback(feedback);
@@ -691,13 +746,13 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
         if (name.find("Kp.joint_") == 0)
         {
             // 提取关节编号："Kp.joint_1" -> 1
-            std::string joint_num_str = name.substr(9); // "joint_1" -> "1"
+            std::string joint_num_str = name.substr(9);   // "joint_1" -> "1"
             int joint_idx = std::stoi(joint_num_str) - 1; // 索引从 0 开始
 
             if (joint_idx >= 0 && joint_idx < 6)
             {
                 double new_value = param.as_double();
-                
+
                 // 合法性检查
                 if (new_value < 0.0)
                 {
@@ -709,9 +764,9 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
 
                 // 更新增益
                 Kp_(joint_idx) = new_value;
-                
-                RCLCPP_INFO(this->get_logger(), 
-                    "🔧 Kp[joint_%d] 已更新: %.2f", joint_idx + 1, new_value);
+
+                RCLCPP_INFO(this->get_logger(),
+                            "🔧 Kp[joint_%d] 已更新: %.2f", joint_idx + 1, new_value);
             }
         }
         // 检查是否是 Kd 参数
@@ -723,7 +778,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
             if (joint_idx >= 0 && joint_idx < 6)
             {
                 double new_value = param.as_double();
-                
+
                 // 合法性检查
                 if (new_value < 0.0)
                 {
@@ -735,16 +790,43 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
 
                 // 更新增益
                 Kd_(joint_idx) = new_value;
-                
-                RCLCPP_INFO(this->get_logger(), 
-                    "🔧 Kd[joint_%d] 已更新: %.2f", joint_idx + 1, new_value);
+
+                RCLCPP_INFO(this->get_logger(),
+                            "🔧 Kd[joint_%d] 已更新: %.2f", joint_idx + 1, new_value);
             }
+        }
+
+        // ========== 新增：卡尔曼滤波器参数 ==========
+        if (name == "kalman.Q_pos" || name == "kalman.Q_vel")
+        {
+            double Q_pos = this->get_parameter("kalman.Q_pos").as_double();
+            double Q_vel = this->get_parameter("kalman.Q_vel").as_double();
+
+            for (auto &filter : joint_filters_)
+            {
+                filter.setProcessNoise(Q_pos, Q_vel);
+            }
+
+            RCLCPP_INFO(this->get_logger(), "🔧 过程噪声已更新: Q_pos=%.1e, Q_vel=%.1e",
+                        Q_pos, Q_vel);
+        }
+        else if (name == "kalman.R_pos" || name == "kalman.R_vel")
+        {
+            double R_pos = this->get_parameter("kalman.R_pos").as_double();
+            double R_vel = this->get_parameter("kalman.R_vel").as_double();
+
+            for (auto &filter : joint_filters_)
+            {
+                filter.setMeasurementNoise(R_pos, R_vel);
+            }
+
+            RCLCPP_INFO(this->get_logger(), "🔧 测量噪声已更新: R_pos=%.1e, R_vel=%.1e",
+                        R_pos, R_vel);
         }
     }
 
     return result;
 }
-
 
 int main(int argc, char **argv)
 {

@@ -40,6 +40,7 @@ add_library(dynamics_computer
 ament_target_dependencies(dynamics_computer
   kdl_parser
   orocos_kdl
+  Eigen3
 )
 
 # 工具类的头文件路径
@@ -48,6 +49,23 @@ target_include_directories(dynamics_computer PUBLIC
   $<INSTALL_INTERFACE:include>
   ${orocos_kdl_INCLUDE_DIRS}
   ${kdl_parser_INCLUDE_DIRS}
+)
+
+# ============= 2.5 创建卡尔曼滤波器库 =============
+add_library(kalman_filter
+  src/kalman_filter.cpp
+)
+
+# 卡尔曼滤波器的依赖
+target_link_libraries(kalman_filter
+  Eigen3::Eigen
+)
+
+# 卡尔曼滤波器的头文件路径
+target_include_directories(kalman_filter PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<INSTALL_INTERFACE:include>
+  ${EIGEN3_INCLUDE_DIRS}
 )
 
 # ============= 3. 创建可执行文件 =============
@@ -95,9 +113,10 @@ add_executable(torque_controller_node
   src/torque_controller_node.cpp
 )
 
-# 链接库（包含工具类）
+# 链接库（包含工具类和卡尔曼滤波器）
 target_link_libraries(torque_controller_node
-  dynamics_computer  # ← 链接工具类
+  dynamics_computer  # ← 链接动力学工具类
+  kalman_filter      # ← 链接卡尔曼滤波器
   ${rclcpp_LIBRARIES}
   ${rclcpp_action_LIBRARIES}
   ${urdf_LIBRARIES}
@@ -109,6 +128,7 @@ target_link_libraries(torque_controller_node
 # 头文件路径
 target_include_directories(torque_controller_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>  # ← 添加 src 目录以找到 kalman_filter.hpp
   $<INSTALL_INTERFACE:include>
   ${rclcpp_INCLUDE_DIRS}
   ${rclcpp_action_INCLUDE_DIRS}

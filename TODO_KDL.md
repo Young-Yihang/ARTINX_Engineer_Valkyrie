@@ -397,7 +397,7 @@ joint_1 绕 Z 轴旋转，重力 (0,0,-9.81) 平行于旋转轴 → 力臂=0 →
 | MuJoCo | ✅ | 3D 窗口 | ✅ 当前 |
 | Gazebo | ✅ | 3D 窗口 | ❌ ROS2 Jazzy Bug |
 
-**选择原因**: Gazebo Harmonic + ROS2 Jazzy 有系统级 Bug，MuJoCo 轻量快速
+**选择原因**: Gazebo Harmonic + ROS2 Jazzy 有系统级 Repo Bug，MuJoCo 轻量快速
 
 ---
 
