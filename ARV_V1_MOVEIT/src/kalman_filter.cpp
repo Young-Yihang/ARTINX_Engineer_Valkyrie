@@ -70,6 +70,14 @@ double KalmanFilter1D::getVelocity() const { return x_(1); }
 
 Eigen::Matrix2d KalmanFilter1D::getCovariance() const { return P_; }
 
+Eigen::Matrix2d KalmanFilter1D::getKalmanGain() const
+{
+    // 计算卡尔曼增益用于调试
+    Eigen::Matrix2d S = H_ * P_ * H_.transpose() + R_;
+    Eigen::Matrix2d K = P_ * H_.transpose() * S.inverse();
+    return K;
+}
+
 // 设置噪声参数（用于在线调参）
 void KalmanFilter1D::setProcessNoise(double q_pos, double q_vel)
 {

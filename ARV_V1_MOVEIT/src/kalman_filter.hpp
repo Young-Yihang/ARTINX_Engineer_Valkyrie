@@ -34,6 +34,7 @@ public:
     double getVelocity() const;
     // 获取协方差（用于调试）
     Eigen::Matrix2d getCovariance() const;
+    Eigen::Matrix2d getKalmanGain() const;
 
     // 设置噪声参数（用于在线调参）
     void setProcessNoise(double q_pos, double q_vel);

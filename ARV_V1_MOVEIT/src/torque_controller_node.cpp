@@ -39,7 +39,8 @@ public: // 构造函数log
                                          KalmanFilter1D(1.0 / 200.0), // Joint 5
                                          KalmanFilter1D(1.0 / 200.0)  // Joint 6
                                      },
-                                     q_dot_filtered_(6)
+                                     q_dot_filtered_(6),
+                                     kalman_filter_enabled_(false) // 默认启用卡尔曼滤波
 
     {
         RCLCPP_INFO(this->get_logger(), "🚀 力矩控制器节点启动");
@@ -82,18 +83,18 @@ public: // 构造函数log
         RCLCPP_INFO(this->get_logger(), "   Kd=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
                     Kd_(0), Kd_(1), Kd_(2), Kd_(3), Kd_(4), Kd_(5));
 
-        // 注册参数变化回调
-        param_callback_handle_ = this->add_on_set_parameters_callback(
-            std::bind(&TorqueControllerActionServer::parametersCallback,
-                      this, std::placeholders::_1));
+        // ========== 卡尔曼滤波器开关参数 ==========
+        this->declare_parameter("kalman.enabled", true); // 默认启用
+        kalman_filter_enabled_ = this->get_parameter("kalman.enabled").as_bool();
 
-        RCLCPP_INFO(this->get_logger(), "🔧 参数动态调节已启用（可通过 ros2 param set 命令修改）");
+        RCLCPP_INFO(this->get_logger(), "🎚️  卡尔曼滤波器状态: %s",
+                    kalman_filter_enabled_ ? "✅ 启用" : "❌ 禁用");
 
         // ========== 新增：声明卡尔曼滤波器参数（必须在读取之前声明）==========
-        this->declare_parameter("kalman.Q_pos", 1e-5); // 过程噪声：位置
-        this->declare_parameter("kalman.Q_vel", 1e-3); // 过程噪声：速度
-        this->declare_parameter("kalman.R_pos", 1e-6); // 测量噪声：位置
-        this->declare_parameter("kalman.R_vel", 1e-2); // 测量噪声：速度
+        this->declare_parameter("kalman.Q_pos", 1e-10);  // 过程噪声：位置
+        this->declare_parameter("kalman.Q_vel", 1e-7);   // 过程噪声：速度
+        this->declare_parameter("kalman.R_pos", 1e-3);   // 测量噪声：位置
+        this->declare_parameter("kalman.R_vel", 2.5e-2); // 测量噪声：速度
 
         // 读取参数并设置滤波器
         double Q_pos = this->get_parameter("kalman.Q_pos").as_double();
@@ -110,6 +111,13 @@ public: // 构造函数log
         RCLCPP_INFO(this->get_logger(), "✅ 卡尔曼滤波器已初始化:");
         RCLCPP_INFO(this->get_logger(), "   Q_pos=%.1e, Q_vel=%.1e", Q_pos, Q_vel);
         RCLCPP_INFO(this->get_logger(), "   R_pos=%.1e, R_vel=%.1e", R_pos, R_vel);
+
+        // ========== 注册参数变化回调（必须在所有参数声明之后）==========
+        param_callback_handle_ = this->add_on_set_parameters_callback(
+            std::bind(&TorqueControllerActionServer::parametersCallback,
+                      this, std::placeholders::_1));
+
+        RCLCPP_INFO(this->get_logger(), "🔧 参数动态调节已启用（可通过 ros2 param set 命令修改）");
 
         // ========== 初始化动力学求解器 ==========
         if (!initializeDynamics())
@@ -182,6 +190,7 @@ private:
 
     std::array<KalmanFilter1D, 6> joint_filters_;
     KDL::JntArray q_dot_filtered_;
+    bool kalman_filter_enabled_; // 卡尔曼滤波开关
 
     rclcpp::TimerBase::SharedPtr control_timer_;                                // 控制循环定时器
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_; // 力矩发布者
@@ -334,23 +343,37 @@ void TorqueControllerActionServer::jointStateCallback(
         q_dot_actual_(i) = msg->velocity[i];
     }
 
-    for (size_t i = 0; i < 6; i++)
+    // ========== 卡尔曼滤波处理 ==========
+    if (kalman_filter_enabled_)
     {
-        // 首次接收：初始化滤波器
-        if (!state_received_)
+        // 启用滤波：使用卡尔曼滤波器
+        for (size_t i = 0; i < 6; i++)
         {
-            joint_filters_[i].initialize(msg->position[i], msg->velocity[i]);
-        }
-        else
-        {
-            // 后续：预测-更新循环
-            joint_filters_[i].predict();
-            joint_filters_[i].update(msg->position[i], msg->velocity[i]);
-        }
+            // 首次接收：初始化滤波器
+            if (!state_received_)
+            {
+                joint_filters_[i].initialize(msg->position[i], msg->velocity[i]);
+            }
+            else
+            {
+                // 后续：预测-更新循环
+                joint_filters_[i].predict();
+                joint_filters_[i].update(msg->position[i], msg->velocity[i]);
+            }
 
-        // 获取滤波后的状态
-        q_actual_(i) = joint_filters_[i].getPosition();
-        q_dot_filtered_(i) = joint_filters_[i].getVelocity();
+            // 获取滤波后的状态
+            q_actual_(i) = joint_filters_[i].getPosition();
+            q_dot_filtered_(i) = joint_filters_[i].getVelocity();
+        }
+    }
+    else
+    {
+        // 禁用滤波：直接使用原始测量值
+        for (size_t i = 0; i < 6; i++)
+        {
+            q_dot_filtered_(i) = q_dot_actual_(i); // 直接使用原始速度
+            // q_actual_ 已在上面赋值，保持不变
+        }
     }
 
     // 首次接收数据：保存启动姿态作为初始目标
@@ -369,6 +392,11 @@ void TorqueControllerActionServer::jointStateCallback(
                         q_target_(0), q_target_(1), q_target_(2),
                         q_target_(3), q_target_(4), q_target_(5));
         }
+        // ========== 调试：打印卡尔曼增益 ==========
+        RCLCPP_INFO(this->get_logger(), "🔍 首次卡尔曼增益（Joint 1）:");
+        auto K = joint_filters_[0].getKalmanGain();
+        RCLCPP_INFO(this->get_logger(), "   K = [%.4f, %.4f]", K(0, 0), K(0, 1));
+        RCLCPP_INFO(this->get_logger(), "       [%.4f, %.4f]", K(1, 0), K(1, 1));
     }
 }
 
@@ -617,7 +645,7 @@ void TorqueControllerActionServer::controlLoop()
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             q_actual_copy = q_actual_;
-            qd_filtered_copy = q_dot_filtered_;  // 从成员变量拷贝滤波后的速度
+            qd_filtered_copy = q_dot_filtered_; // 从成员变量拷贝滤波后的速度
         }
 
         // 计算重力补偿
@@ -797,31 +825,46 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
         }
 
         // ========== 新增：卡尔曼滤波器参数 ==========
-        if (name == "kalman.Q_pos" || name == "kalman.Q_vel")
+        else if (name == "kalman.enabled")
         {
-            double Q_pos = this->get_parameter("kalman.Q_pos").as_double();
-            double Q_vel = this->get_parameter("kalman.Q_vel").as_double();
-
-            for (auto &filter : joint_filters_)
+            // 更新卡尔曼滤波开关
+            kalman_filter_enabled_ = param.as_bool();
+            RCLCPP_INFO(this->get_logger(), "🎚️  卡尔曼滤波器已%s",
+                        kalman_filter_enabled_ ? "✅ 启用" : "❌ 禁用");
+        }
+        else if (name == "kalman.Q_pos" || name == "kalman.Q_vel")
+        {
+            // 安全检查：确保所有相关参数都已声明
+            if (this->has_parameter("kalman.Q_pos") && this->has_parameter("kalman.Q_vel"))
             {
-                filter.setProcessNoise(Q_pos, Q_vel);
-            }
+                double Q_pos = this->get_parameter("kalman.Q_pos").as_double();
+                double Q_vel = this->get_parameter("kalman.Q_vel").as_double();
 
-            RCLCPP_INFO(this->get_logger(), "🔧 过程噪声已更新: Q_pos=%.1e, Q_vel=%.1e",
-                        Q_pos, Q_vel);
+                for (auto &filter : joint_filters_)
+                {
+                    filter.setProcessNoise(Q_pos, Q_vel);
+                }
+
+                RCLCPP_INFO(this->get_logger(), "🔧 过程噪声已更新: Q_pos=%.1e, Q_vel=%.1e",
+                            Q_pos, Q_vel);
+            }
         }
         else if (name == "kalman.R_pos" || name == "kalman.R_vel")
         {
-            double R_pos = this->get_parameter("kalman.R_pos").as_double();
-            double R_vel = this->get_parameter("kalman.R_vel").as_double();
-
-            for (auto &filter : joint_filters_)
+            // 安全检查：确保所有相关参数都已声明
+            if (this->has_parameter("kalman.R_pos") && this->has_parameter("kalman.R_vel"))
             {
-                filter.setMeasurementNoise(R_pos, R_vel);
-            }
+                double R_pos = this->get_parameter("kalman.R_pos").as_double();
+                double R_vel = this->get_parameter("kalman.R_vel").as_double();
 
-            RCLCPP_INFO(this->get_logger(), "🔧 测量噪声已更新: R_pos=%.1e, R_vel=%.1e",
-                        R_pos, R_vel);
+                for (auto &filter : joint_filters_)
+                {
+                    filter.setMeasurementNoise(R_pos, R_vel);
+                }
+
+                RCLCPP_INFO(this->get_logger(), "🔧 测量噪声已更新: R_pos=%.1e, R_vel=%.1e",
+                            R_pos, R_vel);
+            }
         }
     }
 
