@@ -26,16 +26,16 @@ public:
                             urdf_path_("/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf"),
                             received_first_command_(false)
     {
-        RCLCPP_INFO(this->get_logger(), "🚀 MuJoCo接口节点启动");
+        RCLCPP_INFO(this->get_logger(), "[START] MuJoCo interface node starting");
 
         // ========== 步骤1: 加载MuJoCo模型 ==========
         if (!loadMuJoCoModel())
         {
-            RCLCPP_ERROR(this->get_logger(), "❌ MuJoCo模型加载失败");
+            RCLCPP_ERROR(this->get_logger(), "[ERROR] MuJoCo model loading failed");
             throw std::runtime_error("Failed to load MuJoCo model");
         }
-        RCLCPP_INFO(this->get_logger(), "✅ MuJoCo模型加载成功");
-        RCLCPP_INFO(this->get_logger(), "   关节数: %d", model_->nq);
+        RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo model loaded successfully");
+        RCLCPP_INFO(this->get_logger(), "   Number of joints: %d", model_->nq);
 
         // ========== 步骤2: 设置初始位姿 ==========
         setInitialPose();
@@ -46,14 +46,14 @@ public:
             10,
             std::bind(&MuJoCoInterfaceNode::effortCallback, this, std::placeholders::_1));
 
-        RCLCPP_INFO(this->get_logger(), "📡 订阅话题: /effort_controller/commands");
+        RCLCPP_INFO(this->get_logger(), "[OK] Subscription: /effort_controller/commands");
 
         // ========== 步骤4: 创建关节状态发布者 ==========
         joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
             "/joint_states",
             10);
 
-        RCLCPP_INFO(this->get_logger(), "📡 发布话题: /joint_states");
+        RCLCPP_INFO(this->get_logger(), "[OK] Publishing: /joint_states");
 
         // ========== 步骤5: 创建200Hz仿真定时器 ==========
         auto period = std::chrono::duration<double, std::milli>(1000.0 / sim_frequency_);
@@ -61,8 +61,8 @@ public:
             period,
             std::bind(&MuJoCoInterfaceNode::simulationStep, this));
 
-        RCLCPP_INFO(this->get_logger(), "⚙️  仿真频率: %.1f Hz", sim_frequency_);
-        RCLCPP_INFO(this->get_logger(), "✅ MuJoCo接口节点初始化完成");
+        RCLCPP_INFO(this->get_logger(), "[INFO] Simulation frequency: %.1f Hz", sim_frequency_);
+        RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo interface node initialization completed");
 
         // ========== 步骤6: 初始化并启动可视化 ==========
         render_running_ = false;
@@ -70,20 +70,20 @@ public:
 
         if (initializeVisualization())
         {
-            RCLCPP_INFO(this->get_logger(), "✅ 可视化初始化成功");
+            RCLCPP_INFO(this->get_logger(), "[OK] Visualization initialized successfully");
             render_running_ = true;
             render_thread_ = std::thread(&MuJoCoInterfaceNode::renderLoop, this);
-            RCLCPP_INFO(this->get_logger(), "🎨 渲染线程已启动");
+            RCLCPP_INFO(this->get_logger(), "[INFO] Rendering thread started");
         }
         else
         {
-            RCLCPP_WARN(this->get_logger(), "⚠️  可视化初始化失败，仅运行仿真");
+            RCLCPP_WARN(this->get_logger(), "[WARN] Visualization initialization failed, simulation only");
         }
     }
 
     ~MuJoCoInterfaceNode()
     {
-        RCLCPP_INFO(this->get_logger(), "🧹 清理MuJoCo资源...");
+        RCLCPP_INFO(this->get_logger(), "[INFO] Cleaning up MuJoCo resources...");
 
         // 停止渲染线程
         render_running_ = false;
@@ -111,7 +111,7 @@ public:
             mj_deleteModel(model_);
         }
 
-        RCLCPP_INFO(this->get_logger(), "✅ 资源清理完成");
+        RCLCPP_INFO(this->get_logger(), "[OK] Resource cleanup completed");
     }
 
 private:
@@ -179,13 +179,13 @@ private:
 
 bool MuJoCoInterfaceNode::loadMuJoCoModel()
 {
-    RCLCPP_INFO(this->get_logger(), "📦 正在加载URDF: %s", urdf_path_.c_str());
+    RCLCPP_INFO(this->get_logger(), "[INFO] Loading URDF: %s", urdf_path_.c_str());
 
     // 读取URDF文件
     std::ifstream urdf_file(urdf_path_);
     if (!urdf_file.is_open())
     {
-        RCLCPP_ERROR(this->get_logger(), "❌ 无法打开URDF文件: %s", urdf_path_.c_str());
+        RCLCPP_ERROR(this->get_logger(), "[ERROR] Cannot open URDF file: %s", urdf_path_.c_str());
         return false;
     }
 
@@ -193,7 +193,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
                             std::istreambuf_iterator<char>());
     urdf_file.close();
 
-    RCLCPP_INFO(this->get_logger(), "✓ URDF文件读取成功");
+    RCLCPP_INFO(this->get_logger(), "[OK] URDF file read successfully");
 
     // 插入MuJoCo编译器设置
     std::string mujoco_compiler =
@@ -206,7 +206,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
     size_t robot_pos = urdf_string.find("<robot");
     if (robot_pos == std::string::npos)
     {
-        RCLCPP_ERROR(this->get_logger(), "❌ 无法找到<robot>标签");
+        RCLCPP_ERROR(this->get_logger(), "[ERROR] Cannot find <robot> tag");
         return false;
     }
 
@@ -234,7 +234,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
     mjModel *temp_model = mj_loadXML(temp_urdf_path.c_str(), nullptr, error, 1000);
     if (!temp_model)
     {
-        RCLCPP_ERROR(this->get_logger(), "❌ MuJoCo加载URDF失败: %s", error);
+        RCLCPP_ERROR(this->get_logger(), "[ERROR] MuJoCo failed to load URDF: %s", error);
         return false;
     }
 
@@ -288,20 +288,20 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
     model_ = mj_loadXML(final_mjcf_path.c_str(), nullptr, error, 1000);
     if (!model_)
     {
-        RCLCPP_ERROR(this->get_logger(), "❌ 加载最终MJCF失败: %s", error);
+        RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to load final MJCF: %s", error);
         return false;
     }
 
     data_ = mj_makeData(model_);
     if (!data_)
     {
-        RCLCPP_ERROR(this->get_logger(), "❌ 创建MuJoCo数据结构失败");
+        RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to create MuJoCo data structure");
         mj_deleteModel(model_);
         model_ = nullptr;
         return false;
     }
 
-    RCLCPP_INFO(this->get_logger(), "✅ MuJoCo模型加载成功");
+    RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo model loaded successfully");
     return true;
 }
 
@@ -313,21 +313,21 @@ void MuJoCoInterfaceNode::setInitialPose()
         data_->qpos[i] = initial_q[i];
     }
     mj_forward(model_, data_);
-    RCLCPP_INFO(this->get_logger(), "✅ 初始位姿设置完成");
+    RCLCPP_INFO(this->get_logger(), "[OK] Initial pose set");
 }
 
 void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
     if (msg->data.size() != 6)
     {
-        RCLCPP_ERROR(this->get_logger(), "❌ 力矩数组大小错误！");
+        RCLCPP_ERROR(this->get_logger(), "[ERROR] Torque array size mismatch!");
         return;
     }
 
     if (!received_first_command_)
     {
         received_first_command_ = true;
-        RCLCPP_INFO(this->get_logger(), "✅ 收到首次力矩命令，MuJoCo仿真启动");
+        RCLCPP_INFO(this->get_logger(), "[OK] First torque command received, MuJoCo simulation started");
     }
 
     for (size_t i = 0; i < 6; i++)
@@ -341,7 +341,7 @@ void MuJoCoInterfaceNode::simulationStep()
     if (!received_first_command_)
     {
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                             "⏸️  等待力矩控制器发送命令...");
+                             "[WARN] Waiting for torque command from controller...");
         publishJointStates();
         return;
     }
@@ -374,18 +374,18 @@ void MuJoCoInterfaceNode::publishJointStates()
 
 bool MuJoCoInterfaceNode::initializeVisualization()
 {
-    RCLCPP_INFO(this->get_logger(), "🎨 初始化MuJoCo可视化...");
+    RCLCPP_INFO(this->get_logger(), "[INFO] Initializing MuJoCo visualization...");
 
     if (!glfwInit())
     {
-        RCLCPP_ERROR(this->get_logger(), "❌ GLFW初始化失败");
+        RCLCPP_ERROR(this->get_logger(), "[ERROR] GLFW initialization failed");
         return false;
     }
 
     window_ = glfwCreateWindow(1200, 900, "MuJoCo - ARV Robot", nullptr, nullptr);
     if (!window_)
     {
-        RCLCPP_ERROR(this->get_logger(), "❌ 创建GLFW窗口失败");
+        RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to create GLFW window");
         glfwTerminate();
         return false;
     }
@@ -413,14 +413,14 @@ bool MuJoCoInterfaceNode::initializeVisualization()
     cam_.lookat[1] = 0.0;
     cam_.lookat[2] = 0.5;
 
-    RCLCPP_INFO(this->get_logger(), "✅ MuJoCo可视化初始化完成");
-    RCLCPP_INFO(this->get_logger(), "📖 快捷键: 空格-暂停 | H-隐藏UI | R-重置相机 | ESC-退出");
+    RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo visualization initialized");
+    RCLCPP_INFO(this->get_logger(), "[INFO] Keys: Space-Pause | H-Hide UI | R-Reset Camera | ESC-Exit");
 
     return true;
 }
 void MuJoCoInterfaceNode::renderLoop()
 {
-    RCLCPP_INFO(this->get_logger(), "🎬 渲染循环开始");
+    RCLCPP_INFO(this->get_logger(), "[INFO] Render loop started");
 
     glfwMakeContextCurrent(window_);
     glfwSwapInterval(1);
@@ -500,7 +500,7 @@ void MuJoCoInterfaceNode::renderLoop()
         glfwPollEvents();
     }
 
-    RCLCPP_INFO(this->get_logger(), "🎬 渲染循环结束");
+    RCLCPP_INFO(this->get_logger(), "[INFO] Render loop ended");
 }
 
 // ========== 静态回调函数实现 ==========
@@ -600,7 +600,7 @@ void MuJoCoInterfaceNode::keyCallback(GLFWwindow *window, int key, int scancode,
     {
     case GLFW_KEY_SPACE:
         node->paused_ = !node->paused_;
-        RCLCPP_INFO(node->get_logger(), node->paused_ ? "⏸️  暂停" : "▶️  继续");
+        RCLCPP_INFO(node->get_logger(), node->paused_ ? "[INFO] Paused" : "[INFO] Resumed");
         break;
 
     case GLFW_KEY_H:
@@ -624,7 +624,7 @@ void MuJoCoInterfaceNode::keyCallback(GLFWwindow *window, int key, int scancode,
         node->cam_.lookat[0] = 0.0;
         node->cam_.lookat[1] = 0.0;
         node->cam_.lookat[2] = 0.5;
-        RCLCPP_INFO(node->get_logger(), "📷 相机已重置");
+        RCLCPP_INFO(node->get_logger(), "[INFO] Camera reset");
         break;
 
     case GLFW_KEY_ESCAPE:

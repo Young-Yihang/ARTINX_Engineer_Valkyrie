@@ -59,27 +59,27 @@ bool URDFDynamicsParser::parseURDF(const std::string& urdf_path) {
     // 从文件加载URDF
     urdf::Model model;
     if (!model.initFile(urdf_path)) {
-        std::cerr << "❌ Failed to parse URDF file: " << urdf_path << std::endl;
+        std::cerr << "[ERROR] Failed to parse URDF file: " << urdf_path << std::endl;
         return false;
     }
     
-    std::cout << "✅ Successfully loaded URDF: " << model.getName() << std::endl;
+    std::cout << "[OK] Loaded URDF: " << model.getName() << std::endl;
     extractFromModel(model);
     
     // 从文件构建KDL chain
     KDL::Tree tree;
     if (!kdl_parser::treeFromFile(urdf_path, tree)) {
-        std::cerr << "❌ Failed to build KDL tree from URDF" << std::endl;
+        std::cerr << "[ERROR] Failed to build KDL tree from URDF" << std::endl;
         return false;
     }
     
     // 提取运动链: base_link → link6_2006roll
     if (!tree.getChain("base_link", "link6_2006roll", kdl_chain_)) {
-        std::cerr << "❌ Failed to extract KDL chain" << std::endl;
+        std::cerr << "[ERROR] Failed to extract KDL chain" << std::endl;
         return false;
     }
     
-    std::cout << "✅ KDL chain extracted: " 
+    std::cout << "[OK] KDL chain extracted: " 
               << kdl_chain_.getNrOfSegments() << " segments, "
               << kdl_chain_.getNrOfJoints() << " joints" << std::endl;
     
@@ -90,27 +90,27 @@ bool URDFDynamicsParser::parseURDFString(const std::string& urdf_string) {
     // 从字符串加载URDF
     urdf::Model model;
     if (!model.initString(urdf_string)) {
-        std::cerr << "❌ Failed to parse URDF string" << std::endl;
+        std::cerr << "[ERROR] Failed to parse URDF string" << std::endl;
         return false;
     }
     
-    std::cout << "✅ Successfully parsed URDF: " << model.getName() << std::endl;
+    std::cout << "[OK] Parsed URDF: " << model.getName() << std::endl;
     extractFromModel(model);
     
     // 从字符串构建KDL chain
     KDL::Tree tree;
     if (!kdl_parser::treeFromString(urdf_string, tree)) {
-        std::cerr << "❌ Failed to build KDL tree" << std::endl;
+        std::cerr << "[ERROR] Failed to build KDL tree" << std::endl;
         return false;
     }
     
     // 提取运动链
     if (!tree.getChain("base_link", "link6_2006roll", kdl_chain_)) {
-        std::cerr << "❌ Failed to extract KDL chain" << std::endl;
+        std::cerr << "[ERROR] Failed to extract KDL chain" << std::endl;
         return false;
     }
     
-    std::cout << "✅ KDL chain extracted: " 
+    std::cout << "[OK] KDL chain extracted: " 
               << kdl_chain_.getNrOfSegments() << " segments, "
               << kdl_chain_.getNrOfJoints() << " joints" << std::endl;
     
@@ -131,7 +131,7 @@ void URDFDynamicsParser::extractFromModel(const urdf::Model& model) {
     for (const auto& joint_name : joint_names) {
         auto joint_ptr = model.getJoint(joint_name);
         if (!joint_ptr) {
-            std::cerr << "⚠️  Joint not found: " << joint_name << std::endl;
+            std::cerr << "[WARN] Joint not found: " << joint_name << std::endl;
             continue;
         }
         
@@ -187,36 +187,36 @@ void URDFDynamicsParser::extractFromModel(const urdf::Model& model) {
         }
     }
     
-    std::cout << "📊 Extracted " << joints_ordered_.size() << " joints and " 
+    std::cout << "[INFO] Extracted " << joints_ordered_.size() << " joints and " 
               << links_ordered_.size() << " links" << std::endl;
 }
 
 void URDFDynamicsParser::printSummary() const {
-    std::cout << "\n========== URDF 运动链提取摘要 ==========" << std::endl;
+    std::cout << "\n========== URDF Kinematic Chain Summary ==========" << std::endl;
     
-    std::cout << "\n【KDL运动链】" << std::endl;
+    std::cout << "\n[KDL CHAIN]" << std::endl;
     std::cout << "  Segments: " << kdl_chain_.getNrOfSegments() << std::endl;
     std::cout << "  Joints:   " << kdl_chain_.getNrOfJoints() << std::endl;
     
-    std::cout << "\n【关节信息】(" << joints_ordered_.size() << " 个)" << std::endl;
+    std::cout << "\n[JOINTS] (" << joints_ordered_.size() << " total)" << std::endl;
     for (size_t i = 0; i < joints_ordered_.size(); i++) {
         const auto& ji = joints_ordered_[i];
         std::cout << "  [" << i+1 << "] " << ji.name 
-                  << " | 类型: " << ji.type
-                  << " | 轴: (" << ji.axis.transpose() << ")"
-                  << " | 力矩限制: " << ji.effort_limit << " N·m"
-                  << " | 阻尼: " << ji.damping << std::endl;
+                  << " | type: " << ji.type
+                  << " | axis: (" << ji.axis.transpose() << ")"
+                  << " | torque_limit: " << ji.effort_limit << " N·m"
+                  << " | damping: " << ji.damping << std::endl;
     }
     
-    std::cout << "\n【连杆动力学】(" << links_ordered_.size() << " 个)" << std::endl;
+    std::cout << "\n[LINKS] (" << links_ordered_.size() << " total)" << std::endl;
     for (size_t i = 0; i < links_ordered_.size(); i++) {
         const auto& ld = links_ordered_[i];
         std::cout << "  [" << i+1 << "] " << ld.name 
-                  << " | 质量: " << ld.mass << " kg"
+                  << " | mass: " << ld.mass << " kg"
                   << " | COM: (" << ld.com.transpose() << ") m" << std::endl;
     }
     
-    std::cout << "\n========================================\n" << std::endl;
+    std::cout << "\n=================================================\n" << std::endl;
 }
 
 // ============= 测试主函数 (可选) =============
@@ -238,7 +238,7 @@ int main(int argc, char** argv) {
     
     // 测试获取KDL chain
     KDL::Chain chain = parser.getKDLChain();
-    std::cout << "✅ 成功获取KDL运动链，可用于动力学计算！" << std::endl;
+    std::cout << "[OK] Successfully obtained KDL chain for dynamics" << std::endl;
     
     return 0;
 }

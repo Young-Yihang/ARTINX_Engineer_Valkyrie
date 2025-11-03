@@ -12,7 +12,7 @@
 //   - 用于验证动力学计算的正确性
 //   - 实际控制由 torque_controller_node 负责 (Stage 4)
 //
-// Stage: 3 (已完成 ✅)
+// Stage: 3 (completed)
 // Author: ARV V1 Team
 // Date: 2025-10-28
 // ============================================================
@@ -54,7 +54,7 @@ public:
 
             if (!file.is_open())
             {
-                RCLCPP_ERROR(this->get_logger(), "❌ 无法打开 URDF 文件: %s", urdf_path.c_str());
+                RCLCPP_ERROR(this->get_logger(), "[ERROR] Cannot open URDF file: %s", urdf_path.c_str());
                 return;
             }
 
@@ -62,22 +62,22 @@ public:
             buffer << file.rdbuf();
             urdf_string = buffer.str();
 
-            RCLCPP_INFO(this->get_logger(), "✅ 成功从文件加载 URDF (%zu bytes)", urdf_string.size());
+            RCLCPP_INFO(this->get_logger(), "[OK] Loaded URDF from file (%zu bytes)", urdf_string.size());
         }
         // 实例化对象
         URDFDynamicsParser parser;
         if (!parser.parseURDFString(urdf_string))
         {
-            RCLCPP_ERROR(this->get_logger(), "❌ URDF解析失败！");
+            RCLCPP_ERROR(this->get_logger(), "[ERROR] URDF parse failed");
             return;
         }
 
         // 获取KDL运动链
         kdl_chain_ = parser.getKDLChain();
 
-        RCLCPP_INFO(this->get_logger(),
-                    "✅ 成功提取运动链: %d 个关节",
-                    kdl_chain_.getNrOfJoints());
+    RCLCPP_INFO(this->get_logger(),
+            "[OK] Extracted kinematic chain: %d joints",
+            kdl_chain_.getNrOfJoints());
 
         // 打印摘要信息
         parser.printSummary();
@@ -100,13 +100,13 @@ public:
             10
         );
         
-        RCLCPP_INFO(this->get_logger(), "📡 已订阅话题: /joint_states");
-        RCLCPP_INFO(this->get_logger(), "📡 发布力矩到: /computed_torques");
+    RCLCPP_INFO(this->get_logger(), "[INFO] Subscribed: /joint_states");
+    RCLCPP_INFO(this->get_logger(), "[INFO] Publishing torques to: /computed_torques");
     }
     
     ~DynamicsSolverNode()
     {
-        RCLCPP_INFO(this->get_logger(), "DynamicsSolverNode 正在析构...程序结束。");
+        RCLCPP_INFO(this->get_logger(), "[INFO] DynamicsSolverNode destructing");
     }
 
 private:
@@ -141,9 +141,9 @@ private:
         // 创建动力学参数计算器（使用提取的运动链和重力）
         dyn_param_ = std::make_shared<KDL::ChainDynParam>(kdl_chain_, gravity);
         
-        RCLCPP_INFO(this->get_logger(), "✅ 动力学求解器初始化完成");
-        RCLCPP_INFO(this->get_logger(), "   - 重力方向: [%.2f, %.2f, %.2f] m/s²", 
-                    gravity.x(), gravity.y(), gravity.z());
+    RCLCPP_INFO(this->get_logger(), "[OK] Dynamics solver initialized");
+    RCLCPP_INFO(this->get_logger(), "   - Gravity: [%.2f, %.2f, %.2f] m/s²", 
+            gravity.x(), gravity.y(), gravity.z());
         
         // 初始化关节数组
         q_current_.resize(num_joints_);
@@ -173,7 +173,7 @@ private:
         
         if (msg->position.size() != num_joints_ || msg->velocity.size() != num_joints_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                "⚠️  joint_states 数据不完整: pos=%zu, vel=%zu, 期望=%d",
+                "[WARN] joint_states incomplete: pos=%zu, vel=%zu, expected=%d",
                 msg->position.size(), msg->velocity.size(), num_joints_);
             return;
         }
@@ -204,7 +204,7 @@ private:
             previous_time_ = current_time;
             first_msg_received_ = true;
             
-            RCLCPP_INFO(this->get_logger(), "✅ 首次接收 joint_states 数据");
+            RCLCPP_INFO(this->get_logger(), "[OK] First joint_states received");
             return;
         }
         
@@ -213,7 +213,7 @@ private:
         
         if (dt <= 0.0 || dt > 1.0) {
             // 时间异常（时间倒流或间隔太大）
-            RCLCPP_WARN(this->get_logger(), "⚠️  时间间隔异常: dt=%.3f s", dt);
+            RCLCPP_WARN(this->get_logger(), "[WARN] Time interval abnormal: dt=%.3f s", dt);
             previous_time_ = current_time;
             return;
         }
@@ -261,7 +261,7 @@ private:
         // ========== 步骤7: 打印信息（限流：每秒1次）==========
         
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-            "🔧 动力学计算: τ=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f] N·m | dt=%.3f s",
+            "[DEBUG] Dynamics calc: τ=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f] N·m | dt=%.3f s",
             tau(0), tau(1), tau(2), tau(3), tau(4), tau(5), dt);
         
         // ========== 步骤8: 保存当前数据供下次使用 ==========
