@@ -40,7 +40,7 @@ public: // 构造函数log
                                          KalmanFilter1D(1.0 / 200.0)  // Joint 6
                                      },
                                      q_dot_filtered_(6),
-                                     kalman_filter_enabled_(false) // 默认启用卡尔曼滤波
+                                     kalman_filter_enabled_(true) // 默认启用卡尔曼滤波
 
     {
         RCLCPP_INFO(this->get_logger(), "[START] Torque controller node starting");
@@ -159,6 +159,9 @@ public: // 构造函数log
             std::bind(&TorqueControllerActionServer::controlLoop, this));
 
         RCLCPP_INFO(this->get_logger(), "[INFO] Control loop timer started (%.1f Hz)", control_frequency_);
+
+        this->declare_parameter("kalman.print_interval", 1000); // 默认 1000 次打印一次
+        kalman_print_interval_ = this->get_parameter("kalman.print_interval").as_int();
     }
 
     ~TorqueControllerActionServer()
@@ -191,6 +194,10 @@ private:
     std::array<KalmanFilter1D, 6> joint_filters_;
     KDL::JntArray q_dot_filtered_;
     bool kalman_filter_enabled_; // 卡尔曼滤波开关
+
+    // 卡尔曼增益观察
+    size_t control_loop_count_ = 0;       // 控制循环计数器
+    size_t kalman_print_interval_ = 1000; // 每 1000 次打印一次（1000/200Hz = 5秒）
 
     rclcpp::TimerBase::SharedPtr control_timer_;                                // 控制循环定时器
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_; // 力矩发布者
@@ -394,7 +401,7 @@ void TorqueControllerActionServer::jointStateCallback(
                         q_target_(3), q_target_(4), q_target_(5));
         }
         // ========== 调试：打印卡尔曼增益 ==========
-        RCLCPP_INFO(this->get_logger(), "[DEBUG] First Kalman gain (Joint 1):");
+        RCLCPP_INFO(this->get_logger(), "📝  First Kalman gain (Joint 1):");
         auto K = joint_filters_[0].getKalmanGain();
         RCLCPP_INFO(this->get_logger(), "   K = [%.4f, %.4f]", K(0, 0), K(0, 1));
         RCLCPP_INFO(this->get_logger(), "       [%.4f, %.4f]", K(1, 0), K(1, 1));
@@ -594,6 +601,27 @@ void TorqueControllerActionServer::computeFeedbackTorque(
 
 void TorqueControllerActionServer::controlLoop()
 {
+    // ========== 新增：周期性打印卡尔曼增益 ==========
+    control_loop_count_++;
+
+    if (kalman_filter_enabled_ &&
+        control_loop_count_ % kalman_print_interval_ == 0)
+    {
+        RCLCPP_INFO(this->get_logger(), "=== Kalman Gain Observation (Loop #%zu) ===",
+                    control_loop_count_);
+
+        for (size_t i = 0; i < 6; i++)
+        {
+            auto K = joint_filters_[i].getKalmanGain();
+            RCLCPP_INFO(this->get_logger(),
+                        "Joint %zu: K = [[%.4f, %.4f], [%.4f, %.4f]]",
+                        i + 1,
+                        K(0, 0), K(0, 1),
+                        K(1, 0), K(1, 1));
+        }
+
+        RCLCPP_INFO(this->get_logger(), "==========================================");
+    }
     if (!is_executing_)
     {
         // 没有活动轨迹时，发送重力补偿力矩保持位置

@@ -1,120 +1,68 @@
-# ARV V1 力矩控制系统 - 核心要点
+# ARV_V1 力矩控制系统技术文档
 
-> **更新**: 2025-11-02 | **状态**: 轨迹跟踪效果良好 ✅ | Joint1 碰撞问题已解决 🔧
+## 系统架构
+
+```
+RViz/MoveIt (规划)
+     │ 轨迹 Goal
+     ▼
+torque_controller_node (200 Hz)
+     │ 计算: τ = τ_ff + τ_fb
+     │ - 前馈: M(q)q̈ + C(q,q̇) + G(q)
+     │ - 反馈: Kp·e_p + Kd·e_v
+     │ - Kalman: 速度滤波 (可选)
+     ▼ /effort_controller/commands
+mujoco_interface_node (200 Hz 仿真 + 60 Hz 渲染)
+     │ 物理仿真 + 3D 可视化
+     ▼ /joint_states
+dynamics_computer (KDL 动力学库)
+```
+
+## 状态机
+
+```
+启动 → 等待 Goal → 保持模式 (Hold) ⇄ 执行模式 (Execute)
+                       ↑_____________↓
+                         轨迹完成返回
+```
+
+**切换逻辑**:
+- 启动: 首次收到 `/joint_states` → 保存 `q_target_` → 保持模式
+- 接收 Goal: 保存轨迹终点 → 执行模式
+- 完成: 使用轨迹终点作为新 `q_target_` → 保持模式
+
+## 控制律
+
+**保持模式**: `τ = G(q) + Kp·(q_t - q) + Kd·(0 - q̇)`  
+**执行模式**: `τ = M(q_d)q̈_d + C(q_d,q̇_d) + G(q_d) + Kp·(q_d - q) + Kd·(q̇_d - q̇)`
 
 ---
 
-## 📊 系统架构
+## 核心参数
 
-```
-┌─────────────────┐
-│  MoveIt 规划器  │
-└────────┬────────┘
-         │ Action: /ARM_controller/follow_joint_trajectory
-         ↓
-┌─────────────────────────────────────────────────┐
-│    Torque Controller Node (200Hz)              │
-│  ┌─────────────┐    ┌──────────────┐          │
-│  │ 动力学解算   │ →  │  PD 控制     │ → τ_total│
-│  │ τ_ff=M·q̈+C+G│    │ τ_fb=Kp·e+Kd·ė│          │
-│  └─────────────┘    └──────────────┘          │
-└────────┬────────────────────────────────────────┘
-         │ /effort_controller/commands
-         ↓
-┌─────────────────────────────────────────────────┐
-│    MuJoCo Interface Node (200Hz)                │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ 力矩执行  │→ │ 物理仿真  │→ │ 3D 可视化    │ │
-│  │ ctrl[6]  │  │ mj_step  │  │ GLFW/OpenGL  │ │
-│  └──────────┘  └──────────┘  └──────────────┘ │
-└────────┬────────────────────────────────────────┘
-         │ /joint_states
-         ↓ (闭环反馈)
-    [回到 Torque Controller]
-```
-
----
-
-## 🎯 控制律框图
-
-### 状态机
-
-```
-    ┌─────────────┐
-    │  系统启动    │
-    └──────┬──────┘
-           │ 收到首个关节状态
-           ↓
-    ┌─────────────────────┐
-    │  保存启动姿态        │ q_target_ = q_actual_
-    │  has_target_ = true │
-    └──────┬──────────────┘
-           │
-           ↓
-    ┌──────────────────────────────┐
-    │   保持模式                    │ is_executing_ = false
-    │   • τ = G(q) + PD(q_target_) │
-    │   • 维持启动姿态/规划终点     │
-    └──────┬───────────────────────┘
-           │ 收到 MoveIt 轨迹
-           ↓
-    ┌──────────────────────────────┐
-    │   执行模式                    │ is_executing_ = true
-    │   • 更新 q_target_ = 终点    │
-    │   • τ = τ_ff + PD(q_d - q)   │
-    │   • 轨迹插值 & 跟踪          │
-    └──────┬───────────────────────┘
-           │ t ≥ t_end
-           ↓
-    [返回保持模式] → [收到新轨迹] → [立刻抢占切换]
-```
-
-### 控制律详细
-
-**保持模式** (`!is_executing_`):
-```
-输入: q_actual_, q_dot_actual_, q_target_
-
-重力补偿: τ_g = G(q_actual_)
-
-PD 控制:   e_p = q_target_ - q_actual_
-          e_v = 0 - q_dot_actual_
-          τ_pd = Kp·e_p + Kd·e_v
-
-输出: τ_total = τ_g + τ_pd
-```
-
-**执行模式** (`is_executing_`):
-```
-输入: 轨迹, t_now, q_actual_, q_dot_actual_
-
-插值:     q_d, qd_d, qdd_d = interpolate(t_now)
-
-前馈:     τ_ff = G(q_actual_)  [简化版]
-         [完整版: τ_ff = M(q_d)·qdd_d + C(q_d,qd_d) + G(q_d)]
-
-PD 反馈:  e_p = q_d - q_actual_
-         e_v = qd_d - q_dot_actual_
-         τ_fb = Kp·e_p + Kd·e_v
-
-输出: τ_total = τ_ff + τ_fb
-```
-
----
-
-## ⚙️ 核心参数
-
-### PD 增益 (torque_controller_node.cpp:35-47)
+### PD 增益
 ```cpp
-// 位置增益
-Kp: [1000, 1500, 1550, 350, 100, 20]   // N·m/rad
+// torque_controller_node.cpp:35-47
+Kp: [700, 1000, 650, 150, 20, 5]    // N·m/rad
+Kd: [11, 17, 15, 6, 2, 1]           // N·m·s/rad
+```
 
-// 速度增益 (当前全部设为 0)
-Kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]      // N·m·s/rad
+### Kalman 滤波器 (可选启用)
+```cpp
+// 状态: x = [q, q̇]ᵀ  (仅滤波速度，位置保持编码器精度)
+Q_pos: 1e-10    // 位置过程噪声
+Q_vel: 1e-7     // 速度过程噪声 (调大 → 响应快，调小 → 平滑)
+R_pos: 1e-3     // 位置测量噪声
+R_vel: 2.5e-2   // 速度测量噪声
+
+// 增益矩阵判断:
+// K11, K22 < 0.05  → 过度平滑，增大 Q_vel
+// K ∈ [0.1, 0.3]   → 平衡配置
+// K > 0.5          → 过度信任测量，减小 Q_vel
 ```
 
 ### 控制频率
-- 力矩控制器: **200 Hz**
+- 力矩控制器: **200 Hz** (5ms 周期)
 - MuJoCo 仿真: **200 Hz**
 - 渲染线程: **60 Hz**
 
@@ -123,214 +71,178 @@ Kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]      // N·m·s/rad
 
 ---
 
-## 🔧 关键代码位置
+## 关键代码位置
 
-| 功能 | 文件 | 行数范围 |
-|------|------|----------|
-| 碰撞禁用配置 | mujoco_interface_node.cpp | 195-210 |
-| 状态机变量 | torque_controller_node.cpp | 100-115 |
+| 功能 | 文件 | 行数 |
+|------|------|------|
 | PD 增益初始化 | torque_controller_node.cpp | 35-47 |
+| Kalman 参数声明 | torque_controller_node.cpp | 93-107 |
+| 状态机变量 | torque_controller_node.cpp | 100-115 |
 | 保存启动姿态 | torque_controller_node.cpp | 270-284 |
 | 保存规划终点 | torque_controller_node.cpp | 220-236 |
+| Kalman 滤波回调 | torque_controller_node.cpp | 330-390 |
 | 保持模式控制 | torque_controller_node.cpp | 490-545 |
 | 执行模式控制 | torque_controller_node.cpp | 547-669 |
 | 动力学计算 | dynamics_computer.cpp | 11-52 |
+| Kalman 实现 | kalman_filter.{cpp,hpp} | - |
+| MuJoCo 碰撞配置 | mujoco_interface_node.cpp | 195-210 |
+| UI 渲染 (mjr_text) | mujoco_interface_node.cpp | 882-970 |
+| 交互回调 | mujoco_interface_node.cpp | 640-730 |
 
 ---
 
-## ✅ 已解决的关键问题
+## 已解决的关键问题
 
-### 1. Joint1 运动极慢问题 🔥 【2025-11-02 新解决】
+### 1. Kalman 滤波器运行时崩溃 🔥
+- **现象**: `ParameterNotDeclaredException: kalman.Q_pos`
+- **原因**: 成员初始化列表在构造函数体之前执行,试图读取未声明参数
+- **解决**: 移动参数声明/读取到构造函数体内 (93-107 行)
 
-**现象**: 
-- Joint1 速度恒定 ~0.06 rad/s
-- 控制器输出数千 N·m 力矩无效
+### 2. Joint1 运动极慢问题 🔥
+- **现象**: Joint1 速度恒定 ~0.06 rad/s,执行器力矩达数千 N·m 无效
+- **根因**: MuJoCo 碰撞约束力抵消执行器力矩
+  ```
+  qfrc_actuator   = -20.0 N·m  (执行器)
+  qfrc_constraint = +19.5 N·m  (约束力)
+  ────────────────────────────────────
+  τ_net           ≈   0.0 N·m
+  ```
+- **碰撞源**: Link1 与 world (地面), Link4 与 Link6 自碰撞
+- **解决**: 为所有 `<geom>` 添加 `contype="0" conaffinity="0"` 禁用碰撞检测
 
-**根本原因**: MuJoCo 碰撞约束力抵消执行器力矩
+### 3. 力矩高频振荡 (±2 N·m)
+- **现象**: 位置/速度平滑,但力矩输出振荡
+- **原因分析**:
+  1. Kd 放大相位滞后的速度误差 (主因)
+  2. Kalman 增益过小 (K < 0.05) → 10-15ms 相位延迟
+  3. Q/R 比值过小 (4e-6) → 过度平滑
+- **建议解决**:
+  - 增大 `Q_vel`: 1e-7 → 1e-5 (减小相位滞后)
+  - 调整 Kd 至临界阻尼: ζ = Kd/(2√(M·Kp)) ≈ 0.7
+  - 目标增益: K ∈ [0.1, 0.3]
 
-```
-力矩平衡分析：
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-qfrc_actuator   = -20.0 N·m  (执行器)
-qfrc_constraint = +19.5 N·m  (约束力)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-τ_net           ≈   0.0 N·m  (净力矩)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-结果: qacc ≈ 0 → 速度几乎不变
-```
+### 4. MuJoCo UI 文本重叠
+- **现象**: 所有 UI 文本渲染在同一位置
+- **原因**: `mjr_overlay` 只接受粗粒度网格位置 (mjGRID_TOPLEFT)
+- **解决**: 替换为 `mjr_text` 手动计算 Y 坐标: `start_y - line * height`
 
-**碰撞源**:
-1. Link1 与 world（地面）碰撞
-2. Link4 与 Link6 自碰撞
+### 5. 死锁导致控制停止
+- **问题**: `controlLoop()` 嵌套加锁 → 永久阻塞
+- **解决**: 删除嵌套锁,外层加锁一次即可
 
-**解决方案**:
-```cpp
-// mujoco_interface_node.cpp (line 195-210)
+### 6. 启动时机械臂漂移
+- **问题**: 启动后无目标位置 → PD 无效 → 重力漂移
+- **解决**: 首次收到状态时保存为 `q_target_`,立刻启用 PD
 
-// 方案1: 禁用所有接触约束
-"<size nconmax=\"0\" njmax=\"0\"/>"
+### 7. 轨迹完成后掉落
+- **问题**: 规划终点未保存 → 完成后 PD 目标错误
+- **解决**: 在 `handleAccepted()` 保存轨迹终点
 
-// 方案2: 为每个几何体禁用碰撞（已实现）
-for (all <geom> tags) {
-    add: contype="0" conaffinity="0"
-}
-```
+### 8. RViz 机械臂闪烁
+- **问题**: 两个节点同时发布 `/joint_states`
+- **解决**: `mujoco_demo.launch.py` 禁用 `joint_state_broadcaster`
 
-**诊断方法**:
-```cpp
-// 监控约束统计
-RCLCPP_INFO("nefc=%d, ncon=%d", data_->nefc, data_->ncon);
-RCLCPP_INFO("qfrc_constraint=%.3f", data_->qfrc_constraint[0]);
+### 9. MuJoCo 窗口黑屏
+- **问题**: OpenGL 上下文在错误线程创建
+- **解决**: 在渲染线程中 `glfwMakeContextCurrent()` + `mjr_makeContext()`
 
-// 检查接触详情
-for (int i = 0; i < data_->ncon; i++) {
-    mjContact* con = &data_->contact[i];
-    const char* geom1_name = mj_id2name(model_, mjOBJ_GEOM, con->geom1);
-    const char* geom2_name = mj_id2name(model_, mjOBJ_GEOM, con->geom2);
-    int body1 = model_->geom_bodyid[con->geom1];
-    int body2 = model_->geom_bodyid[con->geom2];
-    const char* body1_name = mj_id2name(model_, mjOBJ_BODY, body1);
-    const char* body2_name = mj_id2name(model_, mjOBJ_BODY, body2);
-    
-    RCLCPP_INFO("接触 [%d]: %s(%s) <-> %s(%s), dist=%.6f", 
-                i, geom1_name, body1_name, geom2_name, body2_name, con->dist);
-}
-```
-
-### 2. 死锁导致控制停止
-**问题**: `controlLoop()` 嵌套加锁 → 永久阻塞
-**解决**: 删除嵌套锁，外层加锁一次即可
-
-### 2. 启动时机械臂漂移
-**问题**: 启动后无目标位置 → PD 无效 → 重力漂移
-**解决**: 首次收到状态时保存为 `q_target_`，立刻启用 PD
-
-### 3. 轨迹完成后掉落
-**问题**: 规划终点未保存 → 完成后 PD 目标错误
-**解决**: 在 `handleAccepted()` 保存轨迹终点
-
-### 4. RViz 机械臂闪烁
-**问题**: 两个节点同时发布 `/joint_states`
-**解决**: `mujoco_demo.launch.py` 禁用 `joint_state_broadcaster`
-
-### 5. MuJoCo 窗口黑屏
-**问题**: OpenGL 上下文在错误线程创建
-**解决**: 在渲染线程中 `glfwMakeContextCurrent()` + `mjr_makeContext()`
-
-### 6. 执行模式控制律错误
-**问题**: 前馈只用重力补偿，PD 期望位置用了实际位置
-**解决**: 
-- 前馈改用完整动力学：`computeFeedforwardTorque(q_d, qd_d, qdd_d, tau_ff)`
-- PD 使用正确期望值：`computeFeedbackTorque(q_d, qd_d, q_actual, qd_actual, tau_fb)`
-
-### 7. 轨迹完成时缺少 PD 控制
-**问题**: 轨迹完成瞬间只发送重力补偿，没有 PD
-**解决**: 轨迹完成时也计算 PD 控制，使用 `q_target_` 作为期望位置
+### 10. 执行模式控制律错误
+- **问题**: 前馈只用重力补偿,PD 期望位置用了实际位置
+- **解决**: 
+  - 前馈改用完整动力学: `computeFeedforwardTorque(q_d, qd_d, qdd_d, tau_ff)`
+  - PD 使用正确期望值: `computeFeedbackTorque(q_d, qd_d, q_actual, qd_actual, tau_fb)`
 
 ---
 
-## 🚧 待优化项
+## 待优化项
 
 ### 🔥 高优先级
 
-1. **D 项异常问题诊断** ⚠️
-   
-   **现象**: 
-   - 第一关节 D 项在轨迹完成时达到 500+ N·m
-   - 临时方案：所有 Kd 设为 0（仅 P 控制 + 动力学前馈）
-   - 当前效果：轨迹跟踪良好 ✅
-   
-   **可能原因**:
-   - 速度误差异常大（qd_d - qd_actual ≈ 166 rad/s？）
-   - 轨迹完成瞬间的速度跳变
-   - MuJoCo 速度数据噪声或数值积分误差
-   - Joint 1 转动惯量大，速度累积效应
-   
-   **调试方法**:
-   ```cpp
-   // 在轨迹完成时添加日志
-   RCLCPP_WARN("实际速度: qd=[%.3f, %.3f, ...]", qd_actual_copy(0), ...);
-   RCLCPP_WARN("D 项力矩: τ_d=[%.2f, %.2f, ...]", tau_pd(0), ...);
+1. **Kalman 滤波器调参** (解决力矩振荡)
+   ```bash
+   ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
+   # 观察 K22 是否增大到 0.1-0.3
+   # 检查力矩振荡是否减小
    ```
-   
-   **解决方案**:
-   - [ ] 方案 A: 添加速度死区（小速度误差不产生 D 项）
-   - [ ] 方案 B: 对速度信号进行滤波（低通滤波器）
-   - [ ] 方案 C: 限制 D 项最大输出
-   - [x] 方案 D: 调小 Kd 增益（临时：设为 0）
 
-2. **速度测量质量改进**
-   - 检查 MuJoCo 速度输出是否有噪声
-   - 考虑对 `/joint_states` 的速度数据进行滤波
-   - 验证速度数值范围是否合理
-
-### ⚙️ 中优先级
+2. **Kd 参数优化** (当前可能过大)
+   - Joint 2: 测试 Kd = 10 (vs 当前 17)
+   - 目标阻尼比: ζ = Kd/(2√(M·Kp)) ≈ 0.7
 
 3. **力矩限幅**
    ```cpp
    const double MAX_TORQUE[6] = {20, 20, 20, 20, 20, 20};
-   for (size_t i = 0; i < 6; i++) {
-       tau_total(i) = std::clamp(tau_total(i), -MAX_TORQUE[i], MAX_TORQUE[i]);
-   }
+   tau_total(i) = std::clamp(tau_total(i), -MAX_TORQUE[i], MAX_TORQUE[i]);
    ```
+
+### ⚙️ 中优先级
 
 4. **性能监控**
    - 控制循环耗时统计
    - CPU 占用率监控
    - 频率偏差检测
 
-### 📊 已完成的优化
-
-- [x] Joint1 碰撞问题解决（2025-11-02）✨
-- [x] 完整动力学前馈（已实现）
-- [x] 轨迹抢占机制（已实现）
-- [x] 轨迹完成时的 PD 控制（已实现）
-- [x] 启动姿态保存（已实现）
-- [x] 规划终点保持（已实现）
-
+5. **速度信号质量**
+   - 检查 MuJoCo 速度输出噪声
+   - 验证速度数值范围合理性
 
 ---
 
-## � 待优化项
+## Kalman 滤波调参指南
 
-### 高优先级
+### 理论基础
+- **状态空间**: `x_{k+1} = F·x_k + w_k`, `z_k = H·x_k + v_k`
+- **增益公式**: `K = P⁻·Hᵀ·(H·P⁻·Hᵀ + R)⁻¹`
+- **关键关系**: K 大小取决于 Q/R 比值,而非绝对值
+- **误区**: K 矩阵元素平方和 ≠ 1 (无此约束)
 
-1. **完整动力学前馈** (当前仅重力补偿)
+### 判断方法
+
+#### 1. 检查对角元素 (K11, K22)
+- K < 0.05: 过度平滑 → 相位滞后严重 → 增大 Q
+- K ∈ [0.1, 0.3]: 平衡 (推荐)
+- K > 0.5: 过度信任测量 → 噪声放大 → 减小 Q
+
+#### 2. 检查非对角元素 (K12, K21)
+- K21 > K22: 位置测量显著影响速度估计 (正常)
+- K12 接近 0: 速度测量不影响位置 (本系统使用编码器,精度高)
+
+#### 3. 计算 Q/R 比值
+- 位置: Q_pos/R_pos = 1e-10/1e-3 = 1e-7 (极保守)
+- 速度: Q_vel/R_vel = 1e-7/2.5e-2 = 4e-6 (过度平滑)
+- **目标**: Q/R ∈ [1e-4, 1e-3] 
+
+#### 4. 判断滤波特性
+- Q/R 小 → 信任模型 → 平滑但滞后
+- Q/R 大 → 信任测量 → 响应快但噪声大
+
+#### 5. 关联力矩振荡
+- K < 0.05 → 10-15ms 相位延迟
+- Kd·e_v 放大延迟误差 → ±2 N·m 振荡
+- **解决**: 增大 Q_vel → K 增大 → 减小延迟
+
+### 调参步骤
+
+1. **初步评估**: 打印当前 K 矩阵
    ```cpp
-   // 当前: torque_controller_node.cpp:595
-   dynamic_computer_->computeGravityTorque(q_actual, tau_ff);
-   
-   // 改进:
-   dynamic_computer_->computeFeedforwardTorque(q_d, qd_d, qdd_d, tau_ff);
+   Eigen::Matrix2d K = joint_filters_[i].getKalmanGain();
+   RCLCPP_INFO("K = [[%.4f, %.4f], [%.4f, %.4f]]", ...);
    ```
 
-2. **轨迹抢占机制**
-   - 修改 `handleGoal()`: 删除拒绝新轨迹的逻辑
-   - 修改 `handleAccepted()`: 取消旧轨迹，立刻切换
+2. **调整速度噪声**: 
+   - 振荡/滞后严重 → 增大 Q_vel (1e-7 → 1e-6 → 1e-5)
+   - 噪声放大 → 减小 Q_vel
 
-3. **PD 参数调优**
-   - 单关节阶跃响应测试
-   - 分析超调、稳态误差
-   - 使用 PlotJuggler 绘制波形
+3. **验证效果**:
+   - 绘制力矩波形 (PlotJuggler)
+   - 检查相位延迟 (目标 < 5ms)
+   - 测量振荡幅值 (目标 < 0.5 N·m)
 
-### 中优先级
-
-4. **力矩限幅**
-   ```cpp
-   const double MAX_TORQUE[6] = {20, 20, 20, 20, 20, 20};
-   for (size_t i = 0; i < 6; i++) {
-       tau_total(i) = std::clamp(tau_total(i), -MAX_TORQUE[i], MAX_TORQUE[i]);
-   }
-   ```
-
-5. **性能监控**
-   - 控制循环耗时统计
-   - CPU 占用率监控
-   - 频率偏差检测
+4. **迭代优化**: 重复步骤 2-3 直至 K ∈ [0.1, 0.3]
 
 ---
 
-## �️ 快速启动
+## 快速启动
 
 ### 编译
 ```bash
@@ -341,10 +253,10 @@ source install/setup.bash
 
 ### 启动
 ```bash
-# 一键启动（推荐）
+# 一键启动 (推荐)
 bash src/ARV_V1_MOVEIT/bash/start_mujoco_system.sh
 
-# 或手动启动三个终端：
+# 或手动启动三个终端:
 # 1. MuJoCo 仿真
 ros2 run ARV_V1_MOVEIT mujoco_interface_node
 
@@ -366,42 +278,55 @@ ros2 topic echo /effort_controller/commands
 # 监控关节状态
 ros2 topic hz /joint_states
 
+# Kalman 参数调整
+ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
+
 # 在 RViz 中规划并执行
 # Motion Planning → Plan → Execute
 ```
 
+### MuJoCo 交互
+- **鼠标左键**: 旋转视角
+- **鼠标右键**: 平移视角
+- **滚轮/中键**: 缩放
+- **空格**: 暂停/继续
+- **H**: 隐藏/显示 UI
+- **R**: 重置相机
+- **ESC**: 退出
+
 ---
 
-## 📚 技术笔记
+## 技术笔记
 
-### 为什么 joint_1 重力项接近 0？
-joint_1 绕 Z 轴旋转，重力 (0,0,-9.81) 平行于旋转轴 → 力臂=0 → τ_g≈0
+### Joint1 重力项为何接近 0?
+Joint1 绕 Z 轴旋转,重力 (0,0,-9.81) 平行于旋转轴 → 力臂 = 0 → τ_g ≈ 0
 
 ### MuJoCo 碰撞配置
 ```xml
 <!-- 方案1: 禁用所有接触 -->
 <size nconmax="0" njmax="0"/>
 
-<!-- 方案2: 禁用单个几何体碰撞（当前使用）-->
+<!-- 方案2: 禁用单个几何体碰撞 (当前使用) -->
 <geom ... contype="0" conaffinity="0"/>
 ```
 
-### 控制频率选择
-- **100Hz**: 慢速运动，计算负载低
-- **200Hz**: 标准控制（当前），平衡性能
-- **1000Hz**: 高速/高精度，计算负载高
-
 ### MuJoCo vs Gazebo
-| 模式 | 物理仿真 | 可视化 | 状态 |
-|------|---------|--------|------|
-| MuJoCo | ✅ | 3D 窗口 | ✅ 当前 |
-| Gazebo | ✅ | 3D 窗口 | ❌ ROS2 Jazzy Bug |
+| 特性 | MuJoCo | Gazebo |
+|------|--------|--------|
+| 物理仿真 | ✅ 快速精确 | ✅ 完善 |
+| 可视化 | ✅ OpenGL 3D | ✅ 3D 窗口 |
+| ROS2 Jazzy | ✅ 正常 | ❌ Repo Bug |
 
-**选择原因**: Gazebo Harmonic + ROS2 Jazzy 有系统级 Repo Bug，MuJoCo 轻量快速
+**选择原因**: Gazebo Harmonic + ROS2 Jazzy 有系统级依赖问题,MuJoCo 轻量快速
+
+### 控制频率选择
+- **100Hz**: 慢速运动,计算负载低
+- **200Hz**: 标准控制 (当前),平衡性能
+- **1000Hz**: 高速/高精度,计算负载高
 
 ---
 
-**最后更新**: 2025-11-02  
-**状态**: 系统稳定运行 ✅ | Joint1 碰撞问题已解决 🔧  
-**当前配置**: P 控制 + 完整动力学前馈（Kd 全部为 0）  
-**下一步**: D 项调优 → 速度滤波 → 性能优化
+**最后更新**: 2025-01-XX  
+**状态**: 系统稳定运行 ✅ | Kalman 滤波器已集成 🔧  
+**当前配置**: PD + 完整动力学前馈 + 可选 Kalman 速度滤波  
+**下一步**: Kalman 调参 → Kd 优化 → 性能监控
