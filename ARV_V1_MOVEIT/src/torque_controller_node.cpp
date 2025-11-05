@@ -91,8 +91,8 @@ public: // 构造函数log
                     kalman_filter_enabled_ ? "[OK] Enabled" : "[DISABLED]");
 
         // ========== 新增：声明卡尔曼滤波器参数（必须在读取之前声明）==========
-        this->declare_parameter("kalman.Q_pos", 1e-10);  // 过程噪声：位置
-        this->declare_parameter("kalman.Q_vel", 1e-7);   // 过程噪声：速度
+        this->declare_parameter("kalman.Q_pos", 1e-5);  // 过程噪声：位置
+        this->declare_parameter("kalman.Q_vel", 1e-4);   // 过程噪声：速度
         this->declare_parameter("kalman.R_pos", 1e-3);   // 测量噪声：位置
         this->declare_parameter("kalman.R_vel", 2.5e-2); // 测量噪声：速度
 
