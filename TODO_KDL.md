@@ -1,6 +1,6 @@
-# ARV_V1 力矩控制系统技术文档
+# ARV_V1 力矩控制系统技术文档 + 功能扩展蓝图
 
-## 系统架构
+## 当前系统架构 (v1.0 - 基础力矩控制)
 
 ```
 RViz/MoveIt (规划)
@@ -16,6 +16,53 @@ mujoco_interface_node (200 Hz 仿真 + 60 Hz 渲染)
      │ 物理仿真 + 3D 可视化
      ▼ /joint_states
 dynamics_computer (KDL 动力学库)
+```
+
+## 未来系统架构 (v2.0+ - 多功能集成)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      感知层 (Perception)                         │
+├─────────────────────────────────────────────────────────────────┤
+│  [Eye-in-Hand 相机] ──┐                                          │
+│   └─ RealSense D435i  │                                          │
+│                       ├──> visual_servo_node (30Hz)              │
+│  [外部深度相机] ──────┘       │ PBVS/IBVS                        │
+│   └─ RealSense D405          │ 目标跟踪                          │
+│                              │                                   │
+│  [3D LiDAR (可选)] ───────> obstacle_avoidance_node (20Hz)      │
+│   └─ RPLIDAR A3 / Livox      │ 点云处理                          │
+│                              │ 碰撞检测                          │
+└──────────────────────────────┼──────────────────────────────────┘
+                               │ /target_pose, /obstacle_cloud
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      规划层 (Planning)                           │
+├─────────────────────────────────────────────────────────────────┤
+│  MoveIt2 + RViz                                                  │
+│   ├─ 运动规划 (OMPL/Pilz)                                       │
+│   ├─ 碰撞检测 (FCL + 动态障碍物)                                 │
+│   └─ 实时重规划 (MoveIt Servo)                                  │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ /follow_joint_trajectory
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      控制层 (Control)                            │
+├─────────────────────────────────────────────────────────────────┤
+│  torque_controller_node (200Hz)                                  │
+│   ├─ 力矩控制: τ = τ_ff + τ_fb                                   │
+│   ├─ Kalman 滤波                                                 │
+│   └─ 安全限制                                                    │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ /effort_controller/commands
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    执行层 (Execution)                            │
+├─────────────────────────────────────────────────────────────────┤
+│  [仿真] mujoco_interface_node (200Hz)                            │
+│  [实物] serial_interface_node (200Hz)                            │
+│         └─ STM32 串口通信 (CAN/UART)                             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## 状态机
@@ -284,6 +331,596 @@ ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
 # 在 RViz 中规划并执行
 # Motion Planning → Plan → Execute
 ```
+
+---
+
+# 🚀 项目扩展蓝图 (Feature Roadmap)
+
+## Git 分支管理策略
+
+```
+master (主分支 - 稳定版本)
+  │
+  ├── feature/kalman          ✅ [已完成] Kalman 滤波器集成
+  │
+  ├── feature/visual-servo    🔧 [规划中] 视觉伺服功能
+  │   ├── eye-in-hand 配置
+  │   ├── PBVS/IBVS 算法
+  │   └── 目标识别与跟踪
+  │
+  ├── feature/serial-output   🔧 [规划中] 实物串口通信
+  │   ├── STM32 串口协议
+  │   ├── CAN 总线驱动
+  │   └── 硬件接口节点
+  │
+  ├── feature/obstacle-avoidance 🔧 [规划中] 动态避障
+  │   ├── 点云处理
+  │   ├── 碰撞检测
+  │   └── 实时重规划
+  │
+  └── release/v2.0            📅 [未来] 多功能集成版本
+```
+
+---
+
+## 📷 功能模块 1: 视觉伺服 (Visual Servoing)
+
+### 1.1 硬件方案推荐
+
+#### **方案 A: Eye-in-Hand (推荐)** ⭐
+**硬件配置**:
+- **相机**: Intel RealSense D435i
+  - RGB: 1920×1080 @ 30fps
+  - 深度: 1280×720 @ 30fps (立体视觉)
+  - IMU: 6-DoF 加速度计+陀螺仪
+  - 价格: ~¥2000
+  - 重量: 72g (适合末端安装)
+  
+- **安装位置**: 机械臂末端 (link6)
+  - 设计 3D 打印支架
+  - 连接末端法兰盘
+  - USB 3.0 数据线管理
+
+**优势**:
+- ✅ 相机随末端移动,视野灵活
+- ✅ 适合精细操作 (抓取、装配)
+- ✅ 自带深度信息
+- ✅ ROS2 官方支持好 (`realsense-ros`)
+
+**劣势**:
+- ❌ 增加末端负载 (~100g)
+- ❌ 需要手眼标定 (Camera-to-Flange)
+
+---
+
+#### **方案 B: Eye-to-Hand (备选)**
+**硬件配置**:
+- **相机**: Intel RealSense D405 (短距专用版)
+  - 工作距离: 7-100cm
+  - 视野角: 87° × 58°
+  - 价格: ~¥1500
+  
+- **安装位置**: 固定在工作台/外部支架
+  - 俯视或侧视角度
+  - 覆盖整个工作空间
+
+**优势**:
+- ✅ 不影响末端负载
+- ✅ 工作空间视野完整
+- ✅ 标定简单 (Base-to-Camera)
+
+**劣势**:
+- ❌ 遮挡问题 (机械臂挡住目标)
+- ❌ 不适合精细操作
+
+---
+
+### 1.2 算法方案
+
+#### **PBVS (Position-Based Visual Servoing)** ⭐ 推荐
+**原理**: 先估计目标 3D 位姿 → 生成笛卡尔空间轨迹 → MoveIt 规划
+
+**实现流程**:
+```
+1. 目标检测 (YOLO/AprilTag)
+   ├─ RGB 图像识别
+   └─ 输出目标 2D 边界框/角点
+
+2. 位姿估计 (PnP/点云配准)
+   ├─ 深度图提取 3D 点云
+   ├─ ICP/PnP 计算目标位姿
+   └─ 输出: T_target^camera (4×4 变换矩阵)
+
+3. 坐标转换
+   ├─ T_target^base = T_camera^base × T_target^camera
+   └─ 发布到 /target_pose
+
+4. MoveIt 规划
+   ├─ 订阅 /target_pose
+   ├─ 笛卡尔路径规划
+   └─ 执行抓取动作
+```
+
+**核心代码** (Python 示例):
+```python
+import rclpy
+from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import Image, CameraInfo
+import cv2, numpy as np
+from cv_bridge import CvBridge
+
+class PBVSNode(Node):
+    def __init__(self):
+        super().__init__('pbvs_node')
+        
+        # 订阅相机话题
+        self.create_subscription(Image, '/camera/color/image_raw', 
+                                self.image_callback, 10)
+        self.create_subscription(Image, '/camera/depth/image_rect_raw',
+                                self.depth_callback, 10)
+        
+        # 发布目标位姿
+        self.pose_pub = self.create_publisher(PoseStamped, '/target_pose', 10)
+        
+        # 相机内参 (从 CameraInfo 获取)
+        self.K = None  # 3x3 内参矩阵
+        
+    def image_callback(self, msg):
+        # 1. 检测目标 (ArUco/AprilTag)
+        image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        corners, ids = self.detect_aruco(image)
+        
+        if ids is None:
+            return
+        
+        # 2. PnP 位姿估计
+        rvec, tvec = cv2.solvePnP(object_points, corners, self.K, None)
+        
+        # 3. 转换到 base 坐标系
+        T_target_base = self.transform_to_base(rvec, tvec)
+        
+        # 4. 发布目标位姿
+        pose_msg = self.to_pose_msg(T_target_base)
+        self.pose_pub.publish(pose_msg)
+```
+
+**优势**:
+- ✅ 控制稳定 (闭环在关节空间)
+- ✅ 可利用 MoveIt 避障
+- ✅ 对相机标定误差鲁棒
+
+**劣势**:
+- ❌ 依赖深度信息质量
+- ❌ 计算延迟 (检测+估计+规划)
+
+---
+
+#### **IBVS (Image-Based Visual Servoing)** (备选)
+**原理**: 直接在图像空间控制 → 雅可比矩阵映射到关节速度
+
+**实现流程**:
+```
+1. 提取图像特征 (s = [u, v, ...])
+2. 计算误差: e = s_desired - s_current
+3. 雅可比矩阵: J = ∂s/∂q (图像到关节)
+4. 速度控制: q̇ = -λ·J^†·e
+```
+
+**优势**:
+- ✅ 无需深度信息
+- ✅ 反应快 (直接控制)
+
+**劣势**:
+- ❌ 易陷入局部极小值
+- ❌ 不易集成避障
+
+---
+
+### 1.3 ROS2 实现架构
+
+```
+visual_servo_node (30Hz)
+  │
+  ├─ 订阅话题:
+  │   ├─ /camera/color/image_raw      (RGB 图像)
+  │   ├─ /camera/depth/image_rect_raw (深度图)
+  │   └─ /joint_states                (当前关节角)
+  │
+  ├─ 发布话题:
+  │   ├─ /target_pose                 (目标位姿)
+  │   └─ /visual_servo/debug_image    (可视化图像)
+  │
+  └─ 调用服务:
+      └─ /compute_ik                  (逆运动学求解)
+```
+
+**依赖库**:
+```xml
+<!-- package.xml -->
+<depend>realsense2_camera</depend>
+<depend>cv_bridge</depend>
+<depend>image_transport</depend>
+<depend>moveit_ros_planning_interface</depend>
+<depend>apriltag_ros</depend>
+```
+
+---
+
+## 🛡️ 功能模块 2: 动态避障 (Obstacle Avoidance)
+
+### 2.1 硬件方案
+
+#### **方案 A: 3D LiDAR (推荐)** ⭐
+**硬件**:
+- **RPLIDAR A3**: 
+  - 扫描距离: 25m
+  - 频率: 20Hz
+  - 价格: ~¥2500
+  - 接口: USB/UART
+  
+- **Livox Mid-360**:
+  - 非重复扫描
+  - FOV: 360° × 59°
+  - 价格: ~¥4000
+  - 精度更高
+
+**安装位置**: 
+- 工作台顶部/侧面
+- 覆盖机械臂工作空间
+
+**优势**:
+- ✅ 大范围障碍物检测
+- ✅ 实时点云数据
+- ✅ 不受光照影响
+
+---
+
+#### **方案 B: 深度相机阵列 (备选)**
+**硬件**: 2-3 个 RealSense D435i
+- 多角度覆盖工作空间
+- 点云融合
+
+**优势**:
+- ✅ 成本低 (如果已有相机)
+- ✅ RGB+Depth 融合
+
+**劣势**:
+- ❌ 数据量大
+- ❌ 需要多相机标定
+
+---
+
+### 2.2 算法方案
+
+#### **实时点云处理流程**:
+```
+1. 点云获取
+   ├─ LiDAR 扫描 → PointCloud2
+   └─ 或深度相机 → 转换为点云
+
+2. 点云滤波
+   ├─ 体素滤波 (降采样)
+   ├─ 统计滤波 (去噪)
+   └─ 移除地面/机械臂自身
+
+3. 障碍物检测
+   ├─ 欧氏聚类
+   ├─ 包围盒计算 (AABB/OBB)
+   └─ 输出障碍物列表
+
+4. 动态更新 MoveIt Planning Scene
+   ├─ 发布 CollisionObject
+   ├─ 标记为移动障碍物
+   └─ 触发重规划
+```
+
+**核心代码** (C++):
+```cpp
+#include <pcl/point_cloud.h>
+#include <pcl/filters/voxel_grid.h>
+#include <moveit/planning_scene_interface/planning_scene_interface.h>
+
+class ObstacleAvoidanceNode : public rclcpp::Node {
+public:
+    ObstacleAvoidanceNode() : Node("obstacle_avoidance_node") {
+        // 订阅点云
+        cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+            "/scan_points", 10, 
+            std::bind(&ObstacleAvoidanceNode::cloudCallback, this, _1)
+        );
+        
+        // MoveIt 规划场景接口
+        planning_scene_interface_ = 
+            std::make_shared<moveit::planning_interface::PlanningSceneInterface>();
+    }
+    
+private:
+    void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+        // 1. 转换点云
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::fromROSMsg(*msg, *cloud);
+        
+        // 2. 滤波
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+        voxel_filter.setInputCloud(cloud);
+        voxel_filter.setLeafSize(0.01, 0.01, 0.01);  // 1cm 体素
+        voxel_filter.filter(*cloud);
+        
+        // 3. 聚类检测障碍物
+        auto obstacles = detectObstacles(cloud);
+        
+        // 4. 更新 MoveIt 规划场景
+        updatePlanningScene(obstacles);
+    }
+    
+    void updatePlanningScene(const std::vector<Obstacle>& obstacles) {
+        std::vector<moveit_msgs::msg::CollisionObject> collision_objects;
+        
+        for (const auto& obs : obstacles) {
+            moveit_msgs::msg::CollisionObject obj;
+            obj.header.frame_id = "base_link";
+            obj.id = "obstacle_" + std::to_string(obs.id);
+            
+            // 添加包围盒
+            shape_msgs::msg::SolidPrimitive primitive;
+            primitive.type = primitive.BOX;
+            primitive.dimensions = {obs.size_x, obs.size_y, obs.size_z};
+            
+            obj.primitives.push_back(primitive);
+            obj.primitive_poses.push_back(obs.pose);
+            obj.operation = obj.ADD;
+            
+            collision_objects.push_back(obj);
+        }
+        
+        planning_scene_interface_->applyCollisionObjects(collision_objects);
+    }
+};
+```
+
+---
+
+### 2.3 与 MoveIt 集成
+
+**实时重规划策略**:
+```cpp
+// 订阅碰撞预警
+auto collision_sub = create_subscription<std_msgs::msg::Bool>(
+    "/collision_warning", 10,
+    [this](const std_msgs::msg::Bool::SharedPtr msg) {
+        if (msg->data && is_executing_) {
+            // 1. 停止当前轨迹
+            current_goal_handle_->abort();
+            
+            // 2. 触发重规划
+            replan_service_->async_send_request(replan_req);
+        }
+    }
+);
+```
+
+---
+
+## 🔌 功能模块 3: 串口输出 (Serial Interface)
+
+### 3.1 硬件通信方案
+
+#### **方案 A: UART 串口 (简单)**
+**硬件**: 
+- USB-TTL 转换器 (CH340/CP2102)
+- STM32 UART 接口
+
+**协议设计**:
+```cpp
+// 数据包格式 (20 bytes)
+struct TorqueCommand {
+    uint8_t  header[2];      // 帧头: 0xAA, 0x55
+    float    torque[6];      // 6 关节力矩 (4 bytes × 6)
+    uint16_t checksum;       // CRC16 校验
+} __attribute__((packed));
+```
+
+**通信频率**: 200Hz (与控制频率同步)
+
+---
+
+#### **方案 B: CAN 总线 (推荐)** ⭐
+**硬件**:
+- USB-CAN 适配器 (PEAK PCAN/ZLG USBCAN)
+- 每个关节独立 CAN ID
+
+**优势**:
+- ✅ 抗干扰能力强
+- ✅ 多节点总线拓扑
+- ✅ 实时性好 (< 1ms)
+
+**CAN 帧设计**:
+```cpp
+// Joint 1 力矩指令
+CAN ID: 0x101
+Data: [torque_high_byte, torque_low_byte, 0x00, ...]
+
+// 状态反馈
+CAN ID: 0x201
+Data: [position, velocity, current, ...]
+```
+
+---
+
+### 3.2 ROS2 实现
+
+```cpp
+class SerialInterfaceNode : public rclcpp::Node {
+public:
+    SerialInterfaceNode() : Node("serial_interface_node") {
+        // 订阅力矩指令
+        torque_sub_ = create_subscription<std_msgs::msg::Float64MultiArray>(
+            "/effort_controller/commands", 10,
+            std::bind(&SerialInterfaceNode::torqueCallback, this, _1)
+        );
+        
+        // 发布关节状态
+        joint_state_pub_ = create_publisher<sensor_msgs::msg::JointState>(
+            "/joint_states", 10
+        );
+        
+        // 打开串口
+        serial_port_.open("/dev/ttyUSB0");
+        serial_port_.set_option(boost::asio::serial_port_base::baud_rate(921600));
+    }
+    
+private:
+    void torqueCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+        TorqueCommand cmd;
+        cmd.header[0] = 0xAA;
+        cmd.header[1] = 0x55;
+        
+        for (size_t i = 0; i < 6; i++) {
+            cmd.torque[i] = static_cast<float>(msg->data[i]);
+        }
+        
+        cmd.checksum = calculateCRC16(&cmd, sizeof(cmd) - 2);
+        
+        // 发送到串口
+        boost::asio::write(serial_port_, boost::asio::buffer(&cmd, sizeof(cmd)));
+    }
+    
+    boost::asio::serial_port serial_port_;
+};
+```
+
+---
+
+## 📊 系统集成与测试
+
+### 4.1 分支合并策略
+
+```bash
+# 开发新功能
+git checkout -b feature/visual-servo
+# ... 开发完成后 ...
+git checkout master
+git merge --no-ff feature/visual-servo  # 保留分支历史
+
+# 测试多功能组合
+git checkout -b integration/vs-oa  # visual-servo + obstacle-avoidance
+git merge feature/visual-servo
+git merge feature/obstacle-avoidance
+# 解决冲突并测试
+```
+
+---
+
+### 4.2 性能指标
+
+| 功能模块 | 频率 | 延迟 | CPU 占用 |
+|---------|------|------|---------|
+| 力矩控制 | 200Hz | < 5ms | ~15% |
+| 视觉伺服 | 30Hz | < 50ms | ~25% |
+| 避障检测 | 20Hz | < 100ms | ~20% |
+| 串口通信 | 200Hz | < 2ms | ~5% |
+| **总计** | - | - | **~65%** |
+
+**硬件需求**: 
+- CPU: Intel i5 8代+ (4核)
+- RAM: 8GB+
+- GPU: GTX 1050+ (YOLO 推理)
+
+---
+
+### 4.3 调试工具
+
+```bash
+# 1. 相机标定
+ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.025
+
+# 2. 点云可视化
+ros2 run rviz2 rviz2 -d config/obstacle_detection.rviz
+
+# 3. 串口监控
+ros2 topic echo /serial/diagnostics
+
+# 4. 性能分析
+ros2 run ros2_performance performance_test --topic /effort_controller/commands
+```
+
+---
+
+## 🎯 开发优先级建议
+
+### Phase 1: 基础功能完善 (当前)
+- [x] 力矩控制核心
+- [x] Kalman 滤波器
+- [ ] 力矩限幅与安全机制
+- [ ] 参数自动调优
+
+### Phase 2: 硬件扩展 (3-6个月)
+- [ ] 串口通信协议实现
+- [ ] 实物测试平台搭建
+- [ ] 硬件接口调试
+
+### Phase 3: 感知集成 (6-9个月)
+- [ ] RealSense 相机集成
+- [ ] PBVS 视觉伺服
+- [ ] 目标识别与跟踪
+
+### Phase 4: 智能避障 (9-12个月)
+- [ ] LiDAR 点云处理
+- [ ] 动态障碍物检测
+- [ ] 实时重规划
+
+### Phase 5: 系统优化 (12个月+)
+- [ ] 多传感器融合
+- [ ] 机器学习优化控制
+- [ ] 云端监控平台
+
+---
+
+## 💡 关键技术难点
+
+### 1. 手眼标定 (Eye-in-Hand)
+**问题**: 相机与末端法兰坐标系关系未知  
+**方案**: 
+- 使用标定板 (ChArUco/AprilTag)
+- easy_handeye2 ROS2 包
+- 至少 15 组不同位姿数据
+
+### 2. 实时性保证
+**问题**: 视觉处理 30Hz + 控制 200Hz 冲突  
+**方案**:
+- 异步架构: 视觉节点与控制节点解耦
+- 共享内存: 减少话题传输延迟
+- GPU 加速: CUDA 加速图像处理
+
+### 3. 碰撞检测误报
+**问题**: 机械臂自身点云误识别为障碍物  
+**方案**:
+- 自碰撞过滤: 根据 URDF 模型移除
+- 动态掩码: 实时更新机械臂占用空间
+- 工作空间限制: ROI 裁剪
+
+---
+
+## 📚 参考资源
+
+### 论文
+- [PBVS] "Visual Servoing: A Tutorial" - F. Chaumette, 2006
+- [避障] "Real-time Obstacle Avoidance for Manipulators" - O. Khatib, 1986
+
+### 开源项目
+- [visp_ros](https://github.com/lagadic/visp_ros) - 视觉伺服库
+- [moveit_servo](https://github.com/ros-planning/moveit2) - 实时伺服
+- [pcl_ros](https://github.com/ros-perception/perception_pcl) - 点云处理
+
+### 硬件文档
+- [RealSense SDK](https://github.com/IntelRealSense/librealsense)
+- [RPLIDAR](https://github.com/Slamtec/rplidar_ros)
+
+---
+
+**最后更新**: 2025-11-06  
+**状态**: 基础系统稳定 ✅ | 扩展功能规划完成 📋  
+**下一步**: Kalman 调参 → 串口协议实现 → 相机选型采购
 
 ### MuJoCo 交互
 - **鼠标左键**: 旋转视角
