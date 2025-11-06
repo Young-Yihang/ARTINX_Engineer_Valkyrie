@@ -68,6 +68,17 @@ target_include_directories(kalman_filter PUBLIC
   ${EIGEN3_INCLUDE_DIRS}
 )
 
+# ============= 2.6 创建级联PID控制器库 =============
+add_library(cascade_pid
+  src/cascade_pid.cpp
+)
+
+# 级联PID的头文件路径
+target_include_directories(cascade_pid PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<INSTALL_INTERFACE:include>
+)
+
 # ============= 3. 创建可执行文件 =============
 
 # 动力学求解器观察者节点 (Stage 3)
@@ -117,6 +128,7 @@ add_executable(torque_controller_node
 target_link_libraries(torque_controller_node
   dynamics_computer  # ← 链接动力学工具类
   kalman_filter      # ← 链接卡尔曼滤波器
+  cascade_pid        # ← 新增: 链接级联PID
   ${rclcpp_LIBRARIES}
   ${rclcpp_action_LIBRARIES}
   ${urdf_LIBRARIES}

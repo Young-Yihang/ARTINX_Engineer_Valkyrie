@@ -216,9 +216,7 @@ master (主分支)
   └── release/v2.0              📅 未来
 ```
 
----
-
-## 📷 功能模块 1: 视觉伺服
+---## 📷 功能模块 1: 视觉伺服
 
 ### 核心方案
 - **硬件**: RealSense D435i (Eye-in-Hand, ¥2000)
@@ -233,69 +231,133 @@ master (主分支)
 | Eye-in-Hand | D435i | 末端 | 视野灵活 | 增加负载 |
 | Eye-to-Hand | D405 | 固定 | 无负载 | 易遮挡 |
 
-### PBVS vs IBVS
+### PBVS vs IBVS 核心区别
 
 | 维度 | PBVS (推荐) | IBVS |
 |------|------------|------|
-| 控制空间 | 3D笛卡尔 | 2D图像 |
+| 控制空间 | 3D笛卡尔空间 | 2D图像空间 |
 | MoveIt集成 | ✅ 直接兼容 | ❌ 需重写控制律 |
 | 避障支持 | ✅ 完整支持 | ❌ 困难 |
 | 需要深度 | ✅ 必须 | ❌ 不需要 |
+| 实现流程 | ArUco检测→PnP位姿估计→MoveIt规划 | 特征提取→图像雅可比→速度控制 |
 
-### 实现流程
+**PBVS优势**:
+- 控制稳定 (闭环在关节空间)
+- 可利用 MoveIt 避障
+- 对相机标定误差鲁棒
+
+**IBVS优势**:
+- 无需深度信息
+- 反应快 (直接控制)
+- 劣势: 易陷入局部极小值、不易集成避障
+
+### ROS2 实现架构
+
 ```
-ArUco检测 → PnP位姿估计 → 坐标转换 → MoveIt规划 → 执行
-        # 相机内参 (从 CameraInfo 获取)
-        self.K = None  # 3x3 内参矩阵
-        
-    def image_callback(self, msg):
-        # 1. 检测目标 (ArUco/AprilTag)
-        image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        corners, ids = self.detect_aruco(image)
-        
-        if ids is None:
-            return
-        
-        # 2. PnP 位姿估计
-        rvec, tvec = cv2.solvePnP(object_points, corners, self.K, None)
-        
-        # 3. 转换到 base 坐标系
-        T_target_base = self.transform_to_base(rvec, tvec)
-        
-        # 4. 发布目标位姿
-        pose_msg = self.to_pose_msg(T_target_base)
-        self.pose_pub.publish(pose_msg)
+visual_servo_node (30Hz)
+  ├─ 订阅: /camera/color/image_raw, /camera/depth/image_rect_raw
+  ├─ 发布: /target_pose, /visual_servo/debug_image
+  └─ 核心: ArUco/AprilTag检测 + PnP位姿估计 + 坐标转换
 ```
 
-**优势**:
-- ✅ 控制稳定 (闭环在关节空间)
-- ✅ 可利用 MoveIt 避障
-- ✅ 对相机标定误差鲁棒
-
-**劣势**:
-- ❌ 依赖深度信息质量
-- ❌ 计算延迟 (检测+估计+规划)
+**依赖库**: realsense2_camera, cv_bridge, moveit_ros_planning_interface, apriltag_ros
 
 ---
 
-#### **IBVS (Image-Based Visual Servoing)** (备选)
-**原理**: 直接在图像空间控制 → 雅可比矩阵映射到关节速度
+## 🛡️ 功能模块 2: 动态避障
 
-**实现流程**:
+### 核心方案 ⭐
+
+**方案选择**: 基于视觉的避障 (利用已有 RealSense)  
+**技术路线**: 深度图 → 点云 → 欧氏聚类 → MoveIt Planning Scene  
+**关键技术**: 自碰撞过滤、体素滤波、实时场景更新
+
+### 硬件方案对比
+
+| 方案 | 硬件 | 成本 | 优势 | 劣势 |
+|------|------|------|------|------|
+| **视觉避障** | RealSense D435i | ¥0 (已有) | 无额外成本 | 视野受限 |
+| **LiDAR** | RPLIDAR A3 | ¥2500 | 全向、大范围 | 成本高 |
+
+**推荐**: 先用视觉方案验证，后期可选LiDAR增强
+
+### 实现流程
+
 ```
-1. 提取图像特征 (s = [u, v, ...])
-2. 计算误差: e = s_desired - s_current
-3. 雅可比矩阵: J = ∂s/∂q (图像到关节)
-4. 速度控制: q̇ = -λ·J^†·e
+深度图 → 点云转换 → 体素滤波(1cm) → 移除机械臂自身
+   ↓
+欧氏聚类 → AABB包围盒 → MoveIt CollisionObject
+   ↓
+Planning Scene 实时更新 → 触发重规划
 ```
 
-**优势**:
-- ✅ 无需深度信息
-- ✅ 反应快 (直接控制)
+### 关键实现位置
 
-**劣势**:
-- ❌ 易陷入局部极小值
-- ❌ 不易集成避障
+**新增文件**: `ARV_V1_MOVEIT/src/visual_obstacle_avoidance_node.cpp`
+
+**核心函数**:
+- `cloudCallback()`: 点云处理主循环
+- `filterSelfCollision()`: 移除机械臂自身点云
+- `detectObstacles()`: 欧氏聚类检测
+- `updatePlanningScene()`: 更新MoveIt场景
+
+---
+
+## 🔌 功能模块 3: 串口输出
+
+### 硬件通信方案对比
+
+| 方案 | 硬件 | 延迟 | 优势 | 劣势 |
+|------|------|------|------|------|
+| **UART** | USB-TTL (CH340) | ~2ms | 简单、成本低 | 易丢包 |
+| **CAN** ⭐ | PEAK PCAN | <1ms | 抗干扰强、实时性好 | 成本稍高 |
+
+**CAN帧设计**:
+```
+力矩指令: CAN ID 0x101-0x106 (6关节)
+状态反馈: CAN ID 0x201-0x206
+数据: [torque_high, torque_low, checksum]
+```
+
+### 协议要点
+- 频率: 200Hz (与控制同步)
+- 校验: CRC16
+- 波特率: 921600 (UART) / 1Mbps (CAN)
+
+---
+
+## 📊 系统性能预估
+
+| 功能模块 | 频率 | 延迟 | CPU占用 |
+|---------|------|------|---------|
+| 力矩控制 | 200Hz | <5ms | ~15% |
+| 视觉伺服 | 30Hz | <50ms | ~25% |
+| 避障检测 | 20Hz | <100ms | ~20% |
+| 串口通信 | 200Hz | <2ms | ~5% |
+| **总计** | - | - | **~65%** |
+
+**推荐硬件**: 
+- CPU: Intel i5 8代+ (4核)
+- RAM: 8GB+
+- GPU: GTX 1050+ (深度学习推理)
+
+---
+
+## 💡 关键技术难点
+
+1. **手眼标定**: 使用 easy_handeye2 + 至少15组位姿数据
+2. **实时性保证**: 异步架构 + 共享内存 + GPU加速
+3. **碰撞检测误报**: URDF自碰撞过滤 + ROI裁剪
+
+---
+
+## 📚 参考资源
+
+- [PBVS] "Visual Servoing: A Tutorial" - Chaumette, 2006
+- [避障] "Real-time Obstacle Avoidance" - Khatib, 1986
+- [visp_ros](https://github.com/lagadic/visp_ros)
+- [moveit_servo](https://moveit.picknik.ai)
+- [RealSense SDK](https://github.com/IntelRealSense/librealsense)
 
 ---
 
@@ -316,130 +378,6 @@ visual_servo_node (30Hz)
   └─ 调用服务:
       └─ /compute_ik                  (逆运动学求解)
 ```
-
-**依赖库**:
-```xml
-<!-- package.xml -->
-<depend>realsense2_camera</depend>
-<depend>cv_bridge</depend>
-<depend>image_transport</depend>
-<depend>moveit_ros_planning_interface</depend>
-<depend>apriltag_ros</depend>
-```
-
----
-
-## 🛡️ 功能模块 2: 动态避障 (Obstacle Avoidance)
-
-### 核心方案摘要 ⭐
-
-**方案选择**: 基于视觉的避障 (利用已有 RealSense)  
-**技术路线**: 深度图 → 点云 → 欧氏聚类 → MoveIt Planning Scene  
-**关键技术**: 自碰撞过滤、体素滤波、实时场景更新  
-**优势**: 无需额外硬件，30Hz实时性
-
-### 2.1 硬件方案对比
-
-| 方案 | 硬件 | 成本 | 优势 | 劣势 |
-|------|------|------|------|------|
-| **视觉避障** | RealSense D435i | ¥0 (已有) | 无额外成本 | 视野受限 |
-| **LiDAR** | RPLIDAR A3 | ¥2500 | 全向、大范围 | 成本高 |
-
-**推荐**: 先用视觉方案验证，后期可选LiDAR增强
-
-### 2.2 实现流程
-
-```
-深度图 → 点云转换 → 体素滤波(1cm) → 移除机械臂自身
-   ↓
-欧氏聚类 → AABB包围盒 → MoveIt CollisionObject
-   ↓
-Planning Scene 实时更新 → 触发重规划
-```
-
-### 2.3 关键代码位置
-
-**新增文件**: `ARV_V1_MOVEIT/src/visual_obstacle_avoidance_node.cpp`
-
-**核心函数**:
-- `cloudCallback()`: 点云处理主循环
-- `filterSelfCollision()`: 移除机械臂自身点云
-- `detectObstacles()`: 欧氏聚类检测
-- `updatePlanningScene()`: 更新MoveIt场景
-
----
-
-## 🛡️ 功能模块 2 (LiDAR方案 - 可选)
-
-### 2.1 硬件方案
-
-#### **方案 A: 3D LiDAR (推荐)** ⭐
-**硬件**:
-- **RPLIDAR A3**: 
-  - 扫描距离: 25m
-  - 频率: 20Hz
-  - 价格: ~¥2500
-  - 接口: USB/UART
-  
-- **Livox Mid-360**:
-  - 非重复扫描
-  - FOV: 360° × 59°
-  - 价格: ~¥4000
-  - 精度更高
-
-**安装位置**: 
-- 工作台顶部/侧面
-- 覆盖机械臂工作空间
-
-**优势**:
-- ✅ 大范围障碍物检测
-- ✅ 实时点云数据
-- ✅ 不受光照影响
-
----
-
-#### **方案 B: 深度相机阵列 (备选)**
-**硬件**: 2-3 个 RealSense D435i
-- 多角度覆盖工作空间
-- 点云融合
-
-````
-
-**优势**:
-- ✅ 成本低 (如果已有相机)
-- ✅ RGB+Depth 融合
-
-**劣势**:
-- ❌ 数据量大
-- ❌ 需要多相机标定
-
----
-
-### 2.2 算法方案
-
-#### **实时点云处理流程**:
-```
-1. 点云获取
-   ├─ LiDAR 扫描 → PointCloud2
-   └─ 或深度相机 → 转换为点云
-
-2. 点云滤波
-   ├─ 体素滤波 (降采样)
-   ├─ 统计滤波 (去噪)
-   └─ 移除地面/机械臂自身
-
-3. 障碍物检测
-   ├─ 欧氏聚类
-   ├─ 包围盒计算 (AABB/OBB)
-   └─ 输出障碍物列表
-
-4. 动态更新 MoveIt Planning Scene
-   ├─ 发布 CollisionObject
-   ├─ 标记为移动障碍物
-   └─ 触发重规划
-```
-
----
 
 ## 📊 系统集成与测试
 

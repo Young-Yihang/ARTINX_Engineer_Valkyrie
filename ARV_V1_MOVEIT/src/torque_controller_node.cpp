@@ -14,6 +14,7 @@
 #include <urdf/model.h>
 #include "dynamics_computer.hpp"
 #include "kalman_filter.hpp"
+#include "cascade_pid.hpp"
 
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GoalHandleFJT = rclcpp_action::ServerGoalHandle<FollowJointTrajectory>;
@@ -91,7 +92,7 @@ public: // 构造函数log
                     kalman_filter_enabled_ ? "[OK] Enabled" : "[DISABLED]");
 
         // ========== 新增：声明卡尔曼滤波器参数（必须在读取之前声明）==========
-        this->declare_parameter("kalman.Q_pos", 1e-5);  // 过程噪声：位置
+        this->declare_parameter("kalman.Q_pos", 1e-5);   // 过程噪声：位置
         this->declare_parameter("kalman.Q_vel", 1e-4);   // 过程噪声：速度
         this->declare_parameter("kalman.R_pos", 1e-3);   // 测量噪声：位置
         this->declare_parameter("kalman.R_vel", 2.5e-2); // 测量噪声：速度
@@ -162,6 +163,59 @@ public: // 构造函数log
 
         this->declare_parameter("kalman.print_interval", 1000); // 默认 1000 次打印一次
         kalman_print_interval_ = this->get_parameter("kalman.print_interval").as_int();
+
+        // ========== 级联PID初始化 ==========
+        this->declare_parameter("use_cascade_pid", false); // 默认启用
+        cascade_pid_enabled_ = this->get_parameter("use_cascade_pid").as_bool();
+
+        if (cascade_pid_enabled_)
+        {
+            RCLCPP_INFO(this->get_logger(), "[PID] Initializing Cascade PID controller...");
+
+            cascade_pid_ = std::make_unique<MultiJointCascadePid>(6);
+
+            // ========== 新增：声明级联PID参数（可动态调节）==========
+            // 为每个关节声明位置环参数
+            for (int i = 1; i <= 6; i++)
+            {
+                std::string prefix = "cascade_pid.joint_" + std::to_string(i);
+
+                // 位置环参数
+                this->declare_parameter(prefix + ".pos_Kp", 10.0);
+                this->declare_parameter(prefix + ".pos_Ki", 0.0);
+                this->declare_parameter(prefix + ".pos_Kd", 1.0);
+
+                // 速度环参数
+                this->declare_parameter(prefix + ".vel_Kp", 50.0);
+                this->declare_parameter(prefix + ".vel_Ki", 5.0);
+                this->declare_parameter(prefix + ".vel_Kd", 0.0);
+
+                // 速度限制
+                this->declare_parameter(prefix + ".vel_limit", 2.0);
+            }
+
+            // 读取参数并设置控制器
+            for (int i = 0; i < 6; i++)
+            {
+                std::string prefix = "cascade_pid.joint_" + std::to_string(i + 1);
+
+                PidGains pos_gains(
+                    this->get_parameter(prefix + ".pos_Kp").as_double(),
+                    this->get_parameter(prefix + ".pos_Ki").as_double(),
+                    this->get_parameter(prefix + ".pos_Kd").as_double());
+
+                PidGains vel_gains(
+                    this->get_parameter(prefix + ".vel_Kp").as_double(),
+                    this->get_parameter(prefix + ".vel_Ki").as_double(),
+                    this->get_parameter(prefix + ".vel_Kd").as_double());
+
+                double vel_limit = this->get_parameter(prefix + ".vel_limit").as_double();
+
+                cascade_pid_->setJointParams(i, pos_gains, vel_gains, vel_limit);
+            }
+
+            RCLCPP_INFO(this->get_logger(), "[OK] Cascade PID initialized with default gains");
+        }
     }
 
     ~TorqueControllerActionServer()
@@ -190,6 +244,9 @@ private:
 
     KDL::JntArray Kp_; // P of position
     KDL::JntArray Kd_; // D of position
+
+    std::unique_ptr<MultiJointCascadePid> cascade_pid_; // 级联PID控制器
+    bool cascade_pid_enabled_ = true;                   // 是否启用级联PID (false则使用原PD控制)
 
     std::array<KalmanFilter1D, 6> joint_filters_;
     KDL::JntArray q_dot_filtered_;
@@ -572,7 +629,7 @@ bool TorqueControllerActionServer::interpolateTrajectory(
     return true;
 }
 
-// ========== PD 反馈控制 ==========
+// ========== PD 反馈控制 ========== //或者双环级联PID
 void TorqueControllerActionServer::computeFeedbackTorque(
     const KDL::JntArray &q_d,
     const KDL::JntArray &qd_d,
@@ -580,6 +637,29 @@ void TorqueControllerActionServer::computeFeedbackTorque(
     const KDL::JntArray &qd_actual,
     KDL::JntArray &tau_fb)
 {
+    if (cascade_pid_enabled_ && cascade_pid_)
+    {
+        // 使用级联PID控制
+        std::vector<double> pos_ref(6), pos_fdb(6), vel_fdb(6), torque_out(6);
+
+        for (size_t i = 0; i < 6; i++)
+        {
+            pos_ref[i] = q_d(i);
+            pos_fdb[i] = q_actual(i);
+            vel_fdb[i] = qd_actual(i);
+        }
+
+        double dt = 1.0 / control_frequency_; // 200Hz -> 0.005s
+        cascade_pid_->compute(pos_ref, pos_fdb, vel_fdb, dt, torque_out);
+
+        for (size_t i = 0; i < 6; i++)
+        {
+            tau_fb(i) = torque_out[i];
+        }
+
+        return; // 提前返回,不执行下面的PD控制
+    }
+
     KDL::JntArray error_p(6);
     for (size_t i = 0; i < 6; i++)
     {
@@ -894,6 +974,56 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
                 RCLCPP_INFO(this->get_logger(), "[CONFIG] Measurement noise updated: R_pos=%.1e, R_vel=%.1e",
                             R_pos, R_vel);
             }
+        }
+        // ========== 新增：级联PID参数 ==========
+        else if (name.find("cascade_pid.joint_") == 0 && cascade_pid_enabled_)
+        {
+            // 解析参数名: cascade_pid.joint_1.pos_Kp
+            size_t first_dot = name.find('.', 13);  // 找到 "joint_X" 后的点
+            if (first_dot == std::string::npos) continue;
+            
+            size_t second_dot = name.find('.', first_dot + 1);
+            if (second_dot == std::string::npos) continue;
+            
+            std::string joint_num_str = name.substr(13, first_dot - 13);  // 提取 "1"
+            std::string loop_type = name.substr(first_dot + 1, 3);        // 提取 "pos" 或 "vel"
+            std::string gain_type = name.substr(second_dot + 1);          // 提取 "Kp"/"Ki"/"Kd" 或 "limit"
+            
+            int joint_idx = std::stoi(joint_num_str) - 1;  // 0-based索引
+            
+            if (joint_idx >= 0 && joint_idx < 6)
+            {
+                double new_value = param.as_double();
+                
+                // 读取该关节的所有参数
+                std::string prefix = "cascade_pid.joint_" + std::to_string(joint_idx + 1);
+                
+                PidGains pos_gains(
+                    this->get_parameter(prefix + ".pos_Kp").as_double(),
+                    this->get_parameter(prefix + ".pos_Ki").as_double(),
+                    this->get_parameter(prefix + ".pos_Kd").as_double()
+                );
+                
+                PidGains vel_gains(
+                    this->get_parameter(prefix + ".vel_Kp").as_double(),
+                    this->get_parameter(prefix + ".vel_Ki").as_double(),
+                    this->get_parameter(prefix + ".vel_Kd").as_double()
+                );
+                
+                double vel_limit = this->get_parameter(prefix + ".vel_limit").as_double();
+                
+                // 更新级联PID
+                cascade_pid_->setJointParams(joint_idx, pos_gains, vel_gains, vel_limit);
+                
+                RCLCPP_INFO(this->get_logger(), 
+                            "[CONFIG] Cascade PID Joint %d updated: %s.%s = %.2f",
+                            joint_idx + 1, loop_type.c_str(), gain_type.c_str(), new_value);
+            }
+        }
+        else if (name == "kalman.print_interval")
+        {
+            kalman_print_interval_ = param.as_int();
+            RCLCPP_INFO(this->get_logger(), "[CONFIG] Kalman print interval updated: %zu", kalman_print_interval_);
         }
     }
 
