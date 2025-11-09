@@ -48,19 +48,19 @@ public: // 构造函数log
         // ========== 参数声明：PD 增益（可动态调节）==========
 
         // 声明 Kp 参数（每个关节独立）
-        this->declare_parameter("Kp.joint_1", 700.0);
-        this->declare_parameter("Kp.joint_2", 1000.0);
-        this->declare_parameter("Kp.joint_3", 650.0);
-        this->declare_parameter("Kp.joint_4", 150.0);
-        this->declare_parameter("Kp.joint_5", 20.0);
-        this->declare_parameter("Kp.joint_6", 5.0);
+        this->declare_parameter("Kp.joint_1", 30.0);
+        this->declare_parameter("Kp.joint_2", 50.0);
+        this->declare_parameter("Kp.joint_3", 30.0);
+        this->declare_parameter("Kp.joint_4", 10.0);
+        this->declare_parameter("Kp.joint_5", 1.0);
+        this->declare_parameter("Kp.joint_6", 1.0);
 
         // 声明 Kd 参数
-        this->declare_parameter("Kd.joint_1", 11.0);
-        this->declare_parameter("Kd.joint_2", 17.0);
-        this->declare_parameter("Kd.joint_3", 15.0);
-        this->declare_parameter("Kd.joint_4", 6.0);
-        this->declare_parameter("Kd.joint_5", 2.0);
+        this->declare_parameter("Kd.joint_1", 1.0);
+        this->declare_parameter("Kd.joint_2", 1.0);
+        this->declare_parameter("Kd.joint_3", 1.0);
+        this->declare_parameter("Kd.joint_4", 0.3);
+        this->declare_parameter("Kd.joint_5", 1.0);
         this->declare_parameter("Kd.joint_6", 1.0);
 
         // 读取初始值到成员变量
