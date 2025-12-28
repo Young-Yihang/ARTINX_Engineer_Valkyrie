@@ -49,7 +49,7 @@ public:
             RCLCPP_WARN(this->get_logger(), "robot_description 参数为空，尝试从文件读取...");
 
             // 使用相对于工作空间的路径
-            std::string urdf_path = "/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf";
+            std::string urdf_path = "/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf";
             std::ifstream file(urdf_path);
 
             if (!file.is_open())

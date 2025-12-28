@@ -470,7 +470,7 @@ bool TorqueControllerActionServer::initializeDynamics()
     RCLCPP_INFO(this->get_logger(), "[INFO] Starting dynamics solver initialization...");
 
     // 1. 读取 URDF 文件
-    std::string urdf_path = "/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf";
+    std::string urdf_path = "/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf";
     std::ifstream urdf_file(urdf_path);
     if (!urdf_file.is_open())
     {

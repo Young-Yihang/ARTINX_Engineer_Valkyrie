@@ -16,13 +16,13 @@ find_package(control_msgs REQUIRED)
 find_package(glfw3 REQUIRED)
 # ========== MuJoCo手动配置 ==========
 # 设置MuJoCo安装路径
-set(MUJOCO_DIR "/home/huan/.local/lib/python3.12/site-packages/mujoco")
+set(MUJOCO_DIR "$ENV{MUJOCO_PATH}")
 
 # 头文件目录
 set(MUJOCO_INCLUDE_DIRS "${MUJOCO_DIR}/include")
 
 # 库文件
-set(MUJOCO_LIBRARIES "${MUJOCO_DIR}/libmujoco.so.3.3.7")
+set(MUJOCO_LIBRARIES "${MUJOCO_DIR}/lib/libmujoco.so")
 
 # 打印找到的路径（调试用）
 message(STATUS "MuJoCo include: ${MUJOCO_INCLUDE_DIRS}")

@@ -8,8 +8,8 @@
       "args": [],
       "stopAtEntry": false,
       "externalConsole": false,
-      "cwd": "/home/huan/ros2_ws/src",
-      "program": "/home/huan/ros2_ws/src/build/Debug/outDebug",
+      "cwd": "/home/wuhuan/ros2_ws/src",
+      "program": "/home/wuhuan/ros2_ws/src/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [

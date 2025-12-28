@@ -26,7 +26,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 工作空间路径
-WORKSPACE_DIR="/home/huan/ros2_ws"
+WORKSPACE_DIR="/home/wuhuan/ros2_ws"
 
 # 日志函数
 log_info() {
@@ -90,6 +90,15 @@ setup_environment() {
     cd "$WORKSPACE_DIR"
     source /opt/ros/jazzy/setup.bash
     source install/setup.bash
+
+    # 设置 MuJoCo 环境变量
+    if [ -z "$MUJOCO_PATH" ]; then
+        export MUJOCO_PATH=~/mujoco-3.4.0
+        log_info "设置默认 MUJOCO_PATH: $MUJOCO_PATH"
+    fi
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$MUJOCO_PATH/lib
+    log_info "添加 MuJoCo 库路径到 LD_LIBRARY_PATH: $MUJOCO_PATH/lib"
+
     log_success "环境变量设置完成"
 }
 

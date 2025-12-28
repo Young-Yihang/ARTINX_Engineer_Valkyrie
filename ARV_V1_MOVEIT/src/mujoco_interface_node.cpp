@@ -23,7 +23,7 @@ public:
                             model_(nullptr),
                             data_(nullptr),
                             sim_frequency_(200.0),
-                            urdf_path_("/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf"),
+                            urdf_path_("/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf"),
                             received_first_command_(false)
     {
         RCLCPP_INFO(this->get_logger(), "[START] MuJoCo interface node starting");
@@ -198,7 +198,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
     // 插入MuJoCo编译器设置
     std::string mujoco_compiler =
         "\n  <mujoco>\n"
-        "    <compiler meshdir=\"/home/huan/ros2_ws/src/ARV_V1_MODEL/meshes\" strippath=\"false\"/>\n"
+        "    <compiler meshdir=\"/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/meshes\" strippath=\"false\"/>\n"
         "    <option timestep=\"0.005\"/>\n"
         "    <size nconmax=\"0\" njmax=\"0\"/>\n"
         "  </mujoco>\n";
@@ -224,7 +224,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
     }
 
     // 写入临时文件
-    std::string temp_urdf_path = "/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/.mujoco_temp.urdf";
+    std::string temp_urdf_path = "/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/.mujoco_temp.urdf";
     std::ofstream temp_file(temp_urdf_path);
     temp_file << urdf_string;
     temp_file.close();
@@ -239,7 +239,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
     }
 
     // 保存为MJCF
-    std::string mjcf_path = "/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/.mujoco_converted.xml";
+    std::string mjcf_path = "/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/.mujoco_converted.xml";
     mj_saveLastXML(mjcf_path.c_str(), temp_model, error, 1000);
     mj_deleteModel(temp_model);
 
@@ -279,7 +279,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
     }
 
     // 保存最终MJCF
-    std::string final_mjcf_path = "/home/huan/ros2_ws/src/ARV_V1_MODEL/urdf/.mujoco_final.xml";
+    std::string final_mjcf_path = "/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/.mujoco_final.xml";
     std::ofstream final_mjcf_file(final_mjcf_path);
     final_mjcf_file << mjcf_string;
     final_mjcf_file.close();

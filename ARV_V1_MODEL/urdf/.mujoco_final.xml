@@ -1,5 +1,5 @@
 <mujoco model="ARV_V1_MODEL">
-  <compiler angle="radian" meshdir="/home/huan/ros2_ws/src/ARV_V1_MODEL/meshes/"/>
+  <compiler angle="radian" meshdir="/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/meshes/"/>
 
   <option timestep="0.005"/>
 

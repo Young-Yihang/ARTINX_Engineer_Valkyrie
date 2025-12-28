@@ -5,7 +5,7 @@
 <robot
   name="ARV_V1_MODEL">
   <mujoco>
-    <compiler meshdir="/home/huan/ros2_ws/src/ARV_V1_MODEL/meshes" strippath="false"/>
+    <compiler meshdir="/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/meshes" strippath="false"/>
     <option timestep="0.005"/>
     <size nconmax="0" njmax="0"/>
   </mujoco>
