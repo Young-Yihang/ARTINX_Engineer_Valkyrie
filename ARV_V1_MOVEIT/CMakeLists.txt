@@ -14,6 +14,7 @@ find_package(std_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 find_package(glfw3 REQUIRED)
+find_package(serial_driver REQUIRED)
 # ========== MuJoCo手动配置 ==========
 # 设置MuJoCo安装路径
 set(MUJOCO_DIR "$ENV{MUJOCO_PATH}")
@@ -199,6 +200,34 @@ ament_target_dependencies(mujoco_interface_node
   std_msgs
 )
 
+# -------------------------------------------
+# 硬件接口节点 (Sim2Real)
+add_executable(hardware_interface_node
+  src/hardware_interface_node.cpp
+)
+
+# 链接库
+target_link_libraries(hardware_interface_node
+  ${rclcpp_LIBRARIES}
+  ${serial_driver_LIBRARIES}
+)
+
+# 头文件路径
+target_include_directories(hardware_interface_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${rclcpp_INCLUDE_DIRS}
+  ${serial_driver_INCLUDE_DIRS}
+)
+
+# ROS2 依赖
+ament_target_dependencies(hardware_interface_node
+  rclcpp
+  sensor_msgs
+  std_msgs
+  serial_driver
+)
+
 # ============= 4. 安装 =============
 
 # 安装可执行文件和库
@@ -207,6 +236,7 @@ install(TARGETS
   dynamics_solver_node
   torque_controller_node
   mujoco_interface_node 
+  hardware_interface_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

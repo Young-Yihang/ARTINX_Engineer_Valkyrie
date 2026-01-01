@@ -52,6 +52,7 @@
   <depend>eigen3_cmake_module</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>serial_driver</depend>
 
   <export>
       <build_type>ament_cmake</build_type>

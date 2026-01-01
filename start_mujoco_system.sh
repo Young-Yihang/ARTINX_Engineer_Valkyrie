@@ -26,7 +26,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 工作空间路径
-WORKSPACE_DIR="/home/wuhuan/ros2_ws"
+WORKSPACE_DIR="$HOME/ros2_ws"
 
 # 日志函数
 log_info() {
@@ -88,12 +88,20 @@ build_workspace() {
 setup_environment() {
     log_info "设置 ROS2 环境变量..."
     cd "$WORKSPACE_DIR"
-    source /opt/ros/jazzy/setup.bash
-    source install/setup.bash
 
-    # 设置 MuJoCo 环境变量
+    source /opt/ros/jazzy/setup.bash
+    # 如果本地已安装工作区（install），再 source 本地 setup
+    if [ -f "install/setup.bash" ]; then
+        source install/setup.bash
+    fi
+
+    # 设置 MuJoCo 环境变量（优先使用 ~/mujoco-3.3.7，如无则回退到 3.4.0）
     if [ -z "$MUJOCO_PATH" ]; then
-        export MUJOCO_PATH=~/mujoco-3.4.0
+        if [ -d "$HOME/mujoco-3.3.7" ]; then
+            export MUJOCO_PATH="$HOME/mujoco-3.3.7"
+        else
+            export MUJOCO_PATH="$HOME/mujoco-3.4.0"
+        fi
         log_info "设置默认 MUJOCO_PATH: $MUJOCO_PATH"
     fi
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$MUJOCO_PATH/lib
@@ -134,14 +142,14 @@ main() {
     check_directory
     echo ""
 
-    # 步骤2：编译项目
-    log_info "步骤 2/5: 编译项目"
-    build_workspace
+    # 步骤2：设置环境（在编译前设置 MUJOCO_PATH/ROS 环境）
+    log_info "步骤 2/5: 设置环境变量"
+    setup_environment
     echo ""
 
-    # 步骤3：设置环境
-    log_info "步骤 3/5: 设置环境变量"
-    setup_environment
+    # 步骤3：编译项目
+    log_info "步骤 3/5: 编译项目"
+    build_workspace
     echo ""
 
     # 步骤4：启动节点

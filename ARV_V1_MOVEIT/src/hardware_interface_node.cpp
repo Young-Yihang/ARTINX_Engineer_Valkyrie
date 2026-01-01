@@ -15,10 +15,12 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
-#include <serial/serial.h>
+#include <io_context/io_context.hpp>
+#include <serial_driver/serial_driver.hpp>
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 #include "serial_protocol.hpp"
 
 class HardwareInterfaceNode : public rclcpp::Node
@@ -61,14 +63,25 @@ public:
     ~HardwareInterfaceNode()
     {
         running_ = false;
+
+        // 先关闭串口，解除阻塞读，确保线程可退出
+        try
+        {
+            if (serial_port_ && serial_port_->is_open())
+            {
+                serial_port_->close();
+            }
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_WARN(this->get_logger(), "[WARN] Serial close: %s", e.what());
+        }
+
         if (receive_thread_.joinable())
         {
             receive_thread_.join();
         }
-        if (serial_ && serial_->isOpen())
-        {
-            serial_->close();
-        }
+
         RCLCPP_INFO(this->get_logger(), "[SHUTDOWN] Hardware interface closed");
     }
 
@@ -78,7 +91,11 @@ private:
     std::atomic<bool> running_;
 
     // 串口
-    std::unique_ptr<serial::Serial> serial_;
+    std::string device_name_;
+    uint32_t baud_rate_{0};
+    std::unique_ptr<drivers::common::IoContext> io_ctx_;
+    std::unique_ptr<drivers::serial_driver::SerialDriver> serial_driver_;
+    std::shared_ptr<drivers::serial_driver::SerialPort> serial_port_;
     std::thread receive_thread_;
 
     // ROS2 通信
@@ -97,27 +114,105 @@ private:
     {
         try
         {
-            serial_ = std::make_unique<serial::Serial>(
-                port,
-                baud,
-                serial::Timeout::simpleTimeout(100) // 100ms 超时
-            );
+            device_name_ = port;
+            baud_rate_ = static_cast<uint32_t>(baud);
 
-            if (!serial_->isOpen())
-            {
-                return false;
-            }
+            // IoContext 内部会启动 worker 线程
+            io_ctx_ = std::make_unique<drivers::common::IoContext>(1);
+            serial_driver_ = std::make_unique<drivers::serial_driver::SerialDriver>(*io_ctx_);
 
-            // 清空缓冲区
-            serial_->flush();
+            drivers::serial_driver::SerialPortConfig config(
+                baud_rate_,
+                drivers::serial_driver::FlowControl::NONE,
+                drivers::serial_driver::Parity::NONE,
+                drivers::serial_driver::StopBits::ONE);
 
-            return true;
+            serial_driver_->init_port(device_name_, config);
+            serial_port_ = serial_driver_->port();
+            serial_port_->open();
+
+            return serial_port_ && serial_port_->is_open();
         }
         catch (const std::exception &e)
         {
             RCLCPP_ERROR(this->get_logger(), "[ERROR] Serial init: %s", e.what());
             return false;
         }
+    }
+
+    bool ensureSerialOpen(std::chrono::milliseconds backoff)
+    {
+        if (serial_port_ && serial_port_->is_open())
+        {
+            return true;
+        }
+
+        try
+        {
+            if (!serial_port_)
+            {
+                // 极端情况下（initSerial 未完成）尝试重新 init
+                return initSerial(device_name_.empty() ? std::string("/dev/ttyS4") : device_name_,
+                                  static_cast<int>(baud_rate_ == 0 ? 921600 : baud_rate_));
+            }
+            serial_port_->open();
+            return serial_port_->is_open();
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_WARN(this->get_logger(), "[WARN] Serial reopen failed: %s", e.what());
+            std::this_thread::sleep_for(backoff);
+            return false;
+        }
+    }
+
+    bool readExact(uint8_t *dst, size_t len)
+    {
+        size_t received = 0;
+        std::vector<uint8_t> tmp;
+        tmp.reserve(256);
+
+        while (running_ && received < len)
+        {
+            if (!serial_port_ || !serial_port_->is_open())
+            {
+                return false;
+            }
+
+            const size_t need = len - received;
+            tmp.assign(need, 0);
+
+            size_t n = 0;
+            try
+            {
+                n = serial_port_->receive(tmp);
+            }
+            catch (const std::exception &e)
+            {
+                RCLCPP_ERROR(this->get_logger(), "[ERROR] Serial receive: %s", e.what());
+                try
+                {
+                    serial_port_->close();
+                }
+                catch (...) {}
+                return false;
+            }
+
+            if (n == 0)
+            {
+                continue;
+            }
+
+            if (n > need)
+            {
+                n = need;
+            }
+
+            std::memcpy(dst + received, tmp.data(), n);
+            received += n;
+        }
+
+        return received == len;
     }
 
     void initROS2Communication()
@@ -161,7 +256,7 @@ private:
 
     void sendTorqueCommand()
     {
-        if (!serial_ || !serial_->isOpen())
+        if (!serial_port_ || !serial_port_->is_open())
         {
             return;
         }
@@ -177,12 +272,21 @@ private:
 
         try
         {
-            serial_->write(packet);
+            const size_t sent = serial_port_->send(packet);
+            if (sent != packet.size())
+            {
+                RCLCPP_WARN(this->get_logger(), "[WARN] Partial send: %zu/%zu", sent, packet.size());
+            }
             // RCLCPP_DEBUG(this->get_logger(), "[TX] Sent %zu bytes", packet.size());
         }
         catch (const std::exception &e)
         {
             RCLCPP_ERROR(this->get_logger(), "[ERROR] Send failed: %s", e.what());
+            try
+            {
+                serial_port_->close();
+            }
+            catch (...) {}
         }
     }
 
@@ -205,20 +309,24 @@ private:
 
         while (running_)
         {
-            if (!serial_ || !serial_->isOpen())
+            if (!ensureSerialOpen(std::chrono::milliseconds(200)))
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
 
             try
             {
-                uint8_t byte;
                 switch (state)
                 {
                 case WAIT_SOF:
-                    if (serial_->read(&byte, 1) == 1)
                     {
+                        uint8_t byte = 0;
+                        if (!readExact(&byte, 1))
+                        {
+                            state = WAIT_SOF;
+                            break;
+                        }
+
                         if (byte == SerialProtocol::SOF)
                         {
                             buffer.clear();
@@ -229,10 +337,13 @@ private:
                     break;
 
                 case READ_LEN:
-                    if (serial_->available() >= 2)
                     {
-                        uint8_t len_bytes[2];
-                        serial_->read(len_bytes, 2);
+                        uint8_t len_bytes[2] = {0, 0};
+                        if (!readExact(len_bytes, 2))
+                        {
+                            state = WAIT_SOF;
+                            break;
+                        }
                         buffer.push_back(len_bytes[0]);
                         buffer.push_back(len_bytes[1]);
 
@@ -242,8 +353,13 @@ private:
                     break;
 
                 case READ_HEADER_CRC:
-                    if (serial_->read(&byte, 1) == 1)
                     {
+                        uint8_t byte = 0;
+                        if (!readExact(&byte, 1))
+                        {
+                            state = WAIT_SOF;
+                            break;
+                        }
                         buffer.push_back(byte);
 
                         // Validate Header CRC8 (SOF + Len_L + Len_H)
@@ -265,10 +381,13 @@ private:
                     // Note: DataLen includes CmdID(2) + Flags(2) + Payload(N)
                     size_t body_size = data_len + 2;
 
-                    if (serial_->available() >= body_size)
                     {
                         std::vector<uint8_t> body(body_size);
-                        serial_->read(body.data(), body_size);
+                        if (!readExact(body.data(), body_size))
+                        {
+                            state = WAIT_SOF;
+                            break;
+                        }
                         buffer.insert(buffer.end(), body.begin(), body.end());
 
                         // Validate Whole Packet CRC16
@@ -291,6 +410,14 @@ private:
             catch (const std::exception &e)
             {
                 RCLCPP_ERROR(this->get_logger(), "[ERROR] Receive: %s", e.what());
+                try
+                {
+                    if (serial_port_ && serial_port_->is_open())
+                    {
+                        serial_port_->close();
+                    }
+                }
+                catch (...) {}
                 state = WAIT_SOF;
             }
         }
