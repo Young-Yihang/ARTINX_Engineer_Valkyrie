@@ -28,6 +28,11 @@ NC='\033[0m' # No Color
 # 工作空间路径
 WORKSPACE_DIR="$HOME/ros2_ws"
 
+# 运行模式（可通过参数指定）
+# SIM  = 仿真模式（mujoco_interface_node）
+# HARDWARE = 真机模式（hardware_interface_node）
+MODE="${1:-SIM}"  # 默认仿真模式
+
 # 日志函数
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -61,6 +66,28 @@ check_directory() {
         exit 1
     fi
     log_success "工作空间检查通过"
+}
+
+# 检查串口设备是否存在
+check_serial_device() {
+    local device="${1:-/dev/ttyS4}"
+    
+    if [ ! -e "$device" ]; then
+        log_error "串口设备不存在: $device"
+        log_info "可用串口设备："
+        ls -l /dev/tty{USB,ACM,S}* 2>/dev/null || echo "  未找到串口设备"
+        return 1
+    fi
+    
+    if [ ! -r "$device" ] || [ ! -w "$device" ]; then
+        log_warning "串口设备权限不足: $device"
+        log_info "尝试修复权限：sudo chmod 666 $device"
+        log_info "或将用户添加到 dialout 组：sudo usermod -aG dialout $USER"
+        return 1
+    fi
+    
+    log_success "串口设备检查通过: $device"
+    return 0
 }
 
 # 编译项目
@@ -215,9 +242,25 @@ start_node() {
 main() {
     print_header
 
+    # 显示模式
+    if [ "$MODE" = "HARDWARE" ]; then
+        log_info "运行模式: 真机模式 (HARDWARE)"
+    else
+        log_info "运行模式: 仿真模式 (SIM)"
+    fi
+    echo ""
+
     # 步骤1：检查目录
     log_info "步骤 1/5: 检查工作空间"
     check_directory
+    
+    # 如果是真机模式，检查串口设备
+    if [ "$MODE" = "HARDWARE" ]; then
+        if ! check_serial_device "/dev/ttyS4"; then
+            log_error "真机模式需要可用的串口设备！"
+            exit 1
+        fi
+    fi
     echo ""
 
     # 步骤2：设置环境（在编译前设置 MUJOCO_PATH/ROS 环境）
@@ -234,8 +277,7 @@ main() {
     log_info "步骤 4/5: 启动所有节点"
     echo ""
 
-
-    # 节点3：MoveIt + RViz
+    # 节点3：MoveIt + RViz（先启动，提供规划界面）
     start_node \
         "3. MoveIt + RViz" \
         "ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py" \
@@ -249,11 +291,22 @@ main() {
 
     sleep 3  # 等待控制器完全启动并开始发布重力补偿
 
-    # 节点2：MuJoCo 仿真节点（后启动，避免机械臂下落）
-    start_node \
-        "2. MuJoCo Interface" \
-        "ros2 run ARV_V1_MOVEIT mujoco_interface_node" \
-        0
+    # 节点2：执行层（根据模式选择仿真或真机）
+    if [ "$MODE" = "HARDWARE" ]; then
+        # 真机模式：启动串口硬件接口节点
+        start_node \
+            "2. Hardware Interface (Serial)" \
+            "ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=/dev/ttyS4 -p baud_rate:=921600" \
+            0
+        log_info "启动真机串口节点（/dev/ttyS4, 921600bps）"
+    else
+        # 仿真模式：启动 MuJoCo 节点
+        start_node \
+            "2. MuJoCo Interface" \
+            "ros2 run ARV_V1_MOVEIT mujoco_interface_node" \
+            0
+        log_info "启动 MuJoCo 仿真节点"
+    fi
 
     sleep 2  # 等待 MuJoCo 节点启动
 
@@ -280,9 +333,32 @@ main() {
     echo "  - 发布: /joint_states (200 Hz)"
     echo "  - 订阅: /effort_controller/commands"
     echo ""
+    echo -e "${GREEN}终端 2:${NC} $([ \"$MODE\" = \"HARDWARE\" ] && echo \"Hardware Interface (Serial)\" || echo \"MuJoCo Interface Node\")"
+    if [ "$MODE" = "HARDWARE" ]; then
+        echo "  - 功能: 串口通信 + 真机控制"
+        echo "  - 发布: /hardware_joint_states (100 Hz)"
+        echo "  - 订阅: /effort_controller/commands"
+        echo "  - 串口: /dev/ttyS4 @ 921600bps"
+        echo "  - 协议: SEASKY (SOF=0x53, CRC8+CRC16)"
+    else
+        echo "  - 功能: MuJoCo 物理仿真 + 3D可视化"
+        echo "  - 发布: /joint_states (200 Hz)"
+        echo "  - 订阅: /effort_controller/commands"
+    fi
+    echo ""
     echo -e "${GREEN}终端 3:${NC} MoveIt + RViz"
     echo "  - 功能: 轨迹规划 + 可视化"
     echo "  - 使用: 在 RViz 中拖动机械臂并执行"
+    echo ""
+    echo -e "${YELLOW}=========================================="
+    echo "  运行模式："
+    echo "==========================================${NC}"
+    echo ""
+    echo "# 仿真模式（默认）："
+    echo "./start_mujoco_system.sh"
+    echo ""
+    echo "# 真机模式（需要串口设备）："
+    echo "./start_mujoco_system.sh HARDWARE"
     echo ""
     echo -e "${YELLOW}=========================================="
     echo "  有用的调试命令："
