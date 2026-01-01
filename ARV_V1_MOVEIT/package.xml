@@ -46,6 +46,7 @@
   <exec_depend>xacro</exec_depend>
 
   <depend>rclcpp</depend>
+  <depend>ament_index_cpp</depend>
   <depend>urdf</depend>
   <depend>kdl_parser</depend>
   <depend>orocos_kdl</depend>

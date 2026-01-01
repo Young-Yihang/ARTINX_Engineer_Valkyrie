@@ -6,6 +6,7 @@
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <mujoco/mujoco.h>
 #include <GLFW/glfw3.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <string>
 #include <vector>
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <atomic>
 #include <cmath>
+#include <filesystem>
 
 class MuJoCoInterfaceNode : public rclcpp::Node
 {
@@ -23,10 +25,26 @@ public:
                             model_(nullptr),
                             data_(nullptr),
                             sim_frequency_(200.0),
-                            urdf_path_("/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf"),
                             received_first_command_(false)
     {
         RCLCPP_INFO(this->get_logger(), "[START] MuJoCo interface node starting");
+
+        // 动态获取包路径（编译时查表，零运行时开销）
+        try {
+            pkg_share_dir_ = ament_index_cpp::get_package_share_directory("ARV_V1_MODEL");
+            urdf_path_ = pkg_share_dir_ + "/urdf/ARV_V1_MODEL.urdf";
+            mesh_dir_ = pkg_share_dir_ + "/meshes";
+            
+            RCLCPP_INFO(this->get_logger(), "[OK] Package path: %s", pkg_share_dir_.c_str());
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to find ARV_V1_MODEL package: %s", e.what());
+            throw;
+        }
+
+        // 创建临时目录（使用 /tmp 避免权限问题）
+        temp_dir_ = std::filesystem::temp_directory_path() / "arv_v1_mujoco";
+        std::filesystem::create_directories(temp_dir_);
+        RCLCPP_INFO(this->get_logger(), "[OK] Temp directory: %s", temp_dir_.c_str());
 
         // ========== 步骤1: 加载MuJoCo模型 ==========
         if (!loadMuJoCoModel())
@@ -125,7 +143,10 @@ private:
     rclcpp::TimerBase::SharedPtr sim_timer_;
 
     // ========== 配置参数 ==========
-    std::string urdf_path_;
+    std::string pkg_share_dir_;    // ARV_V1_MODEL 包共享目录
+    std::string urdf_path_;        // URDF 文件路径
+    std::string mesh_dir_;         // Mesh 文件目录
+    std::filesystem::path temp_dir_;  // 临时文件目录
     double sim_frequency_;
 
     // ========== 可视化相关成员变量 ==========
@@ -195,10 +216,10 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
 
     RCLCPP_INFO(this->get_logger(), "[OK] URDF file read successfully");
 
-    // 插入MuJoCo编译器设置
+    // 插入MuJoCo编译器设置（使用动态获取的 mesh 目录）
     std::string mujoco_compiler =
         "\n  <mujoco>\n"
-        "    <compiler meshdir=\"/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/meshes\" strippath=\"false\"/>\n"
+        "    <compiler meshdir=\"" + mesh_dir_ + "\" strippath=\"false\"/>\n"
         "    <option timestep=\"0.005\"/>\n"
         "    <size nconmax=\"0\" njmax=\"0\"/>\n"
         "  </mujoco>\n";
@@ -223,8 +244,8 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
         pos += replace_str.length();
     }
 
-    // 写入临时文件
-    std::string temp_urdf_path = "/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/.mujoco_temp.urdf";
+    // 写入临时文件（使用 /tmp 目录）
+    std::string temp_urdf_path = temp_dir_ / ".mujoco_temp.urdf";
     std::ofstream temp_file(temp_urdf_path);
     temp_file << urdf_string;
     temp_file.close();
@@ -238,8 +259,8 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
         return false;
     }
 
-    // 保存为MJCF
-    std::string mjcf_path = "/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/.mujoco_converted.xml";
+    // 保存为MJCF（使用 /tmp 目录）
+    std::string mjcf_path = temp_dir_ / ".mujoco_converted.xml";
     mj_saveLastXML(mjcf_path.c_str(), temp_model, error, 1000);
     mj_deleteModel(temp_model);
 
@@ -278,8 +299,8 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
         pos = geom_end + 1;
     }
 
-    // 保存最终MJCF
-    std::string final_mjcf_path = "/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/.mujoco_final.xml";
+    // 保存最终MJCF（使用 /tmp 目录）
+    std::string final_mjcf_path = temp_dir_ / ".mujoco_final.xml";
     std::ofstream final_mjcf_file(final_mjcf_path);
     final_mjcf_file << mjcf_string;
     final_mjcf_file.close();

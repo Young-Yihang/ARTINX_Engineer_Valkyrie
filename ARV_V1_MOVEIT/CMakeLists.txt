@@ -3,6 +3,7 @@ project(ARV_V1_MOVEIT)
 
 # ============= 1. 查找所有依赖包 =============
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(urdf REQUIRED)
@@ -117,6 +118,7 @@ ament_target_dependencies(dynamics_solver_node
   kdl_parser
   orocos_kdl
   Eigen3
+  ament_index_cpp
 )
 
 # -------------------------------------------
@@ -163,6 +165,7 @@ ament_target_dependencies(torque_controller_node
   kdl_parser
   orocos_kdl
   Eigen3
+  ament_index_cpp
 )
 
 # -------------------------------------------
@@ -198,6 +201,7 @@ ament_target_dependencies(mujoco_interface_node
   rclcpp
   sensor_msgs
   std_msgs
+  ament_index_cpp
 )
 
 # -------------------------------------------

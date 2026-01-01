@@ -18,6 +18,7 @@
 // ============================================================
 //注意：这个cpp已经不使用
 #include <rclcpp/rclcpp.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <string>
 #include <fstream>
 #include <sstream>
@@ -48,8 +49,16 @@ public:
         {
             RCLCPP_WARN(this->get_logger(), "robot_description 参数为空，尝试从文件读取...");
 
-            // 使用相对于工作空间的路径
-            std::string urdf_path = "/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf";
+            // 使用 ament_index 动态查找包路径
+            std::string urdf_path;
+            try {
+                std::string pkg_path = ament_index_cpp::get_package_share_directory("ARV_V1_MODEL");
+                urdf_path = pkg_path + "/urdf/ARV_V1_MODEL.urdf";
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to find ARV_V1_MODEL package: %s", e.what());
+                return;
+            }
+
             std::ifstream file(urdf_path);
 
             if (!file.is_open())

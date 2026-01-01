@@ -1,6 +1,7 @@
 // 解算核心部分
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <string>
 #include <mutex>
 #include <fstream>
@@ -469,8 +470,16 @@ bool TorqueControllerActionServer::initializeDynamics()
 {
     RCLCPP_INFO(this->get_logger(), "[INFO] Starting dynamics solver initialization...");
 
-    // 1. 读取 URDF 文件
-    std::string urdf_path = "/home/wuhuan/ros2_ws/src/ARV_V1_MODEL/urdf/ARV_V1_MODEL.urdf";
+    // 1. 读取 URDF 文件（使用 ament_index 动态查找）
+    std::string urdf_path;
+    try {
+        std::string pkg_path = ament_index_cpp::get_package_share_directory("ARV_V1_MODEL");
+        urdf_path = pkg_path + "/urdf/ARV_V1_MODEL.urdf";
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to find ARV_V1_MODEL package: %s", e.what());
+        return false;
+    }
+
     std::ifstream urdf_file(urdf_path);
     if (!urdf_file.is_open())
     {

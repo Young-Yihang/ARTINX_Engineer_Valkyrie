@@ -84,6 +84,88 @@ build_workspace() {
     fi
 }
 
+# 智能探测 MuJoCo 安装路径
+detect_mujoco_path() {
+    log_info "自动探测 MuJoCo 安装路径..."
+
+    # 候选路径列表（按优先级排序）
+    local candidates=(
+        "$MUJOCO_PATH"                                          # 用户预设环境变量
+        "$HOME/.mujoco/mujoco-3.3.7"                            # 标准安装位置
+        "$HOME/mujoco-3.3.7"
+        "$HOME/mujoco-3.4.0"
+        "$HOME/.mujoco/mujoco-3.4.0"
+        "/usr/local/mujoco"                                      # 系统级安装
+        $(ls -d $HOME/.local/lib/python*/site-packages/mujoco 2>/dev/null | head -1)  # Python包
+    )
+
+    for path in "${candidates[@]}"; do
+        if [ -z "$path" ]; then
+            continue
+        fi
+
+        # 检查路径存在且包含必要文件
+        if [ -d "$path" ]; then
+            # 检查库文件（支持带版本号和不带版本号）
+            local lib_found=false
+            if [ -f "$path/lib/libmujoco.so" ] || ls "$path/lib/libmujoco.so"* >/dev/null 2>&1; then
+                lib_found=true
+            elif [ -f "$path/libmujoco.so" ] || ls "$path/libmujoco.so"* >/dev/null 2>&1; then
+                lib_found=true
+            fi
+
+            # 检查头文件
+            local header_found=false
+            if [ -f "$path/include/mujoco/mujoco.h" ]; then
+                header_found=true
+            elif [ -f "$path/mujoco.h" ]; then
+                header_found=true
+            fi
+
+            if [ "$lib_found" = true ] && [ "$header_found" = true ]; then
+                export MUJOCO_PATH="$path"
+                log_success "找到 MuJoCo: $MUJOCO_PATH"
+                check_mujoco_version "$path"
+                return 0
+            fi
+        fi
+    done
+
+    log_error "未找到有效的 MuJoCo 安装！"
+    log_error "请检查以下候选路径是否包含 libmujoco.so 和 mujoco.h:"
+    for path in "${candidates[@]}"; do
+        [ -n "$path" ] && echo "  - $path"
+    done
+    exit 1
+}
+
+# 检查 MuJoCo 版本兼容性
+check_mujoco_version() {
+    local mujoco_path=$1
+    local version_file=""
+
+    # 查找版本信息文件
+    if [ -f "$mujoco_path/include/mujoco/mjversion.h" ]; then
+        version_file="$mujoco_path/include/mujoco/mjversion.h"
+    elif [ -f "$mujoco_path/mjversion.h" ]; then
+        version_file="$mujoco_path/mjversion.h"
+    fi
+
+    if [ -n "$version_file" ] && [ -f "$version_file" ]; then
+        local version=$(grep -oP '(?<=#define mjVERSION )\d+' "$version_file" 2>/dev/null | head -1)
+        if [ -n "$version" ]; then
+            log_info "MuJoCo 版本: $(echo "$version" | sed 's/\([0-9]\)\([0-9]\)\([0-9]\)/\1.\2.\3/')" 
+            
+            # 警告低版本
+            if [ "$version" -lt 330 ]; then
+                log_warning "检测到 MuJoCo 版本 < 3.3.0，建议升级以获得最佳兼容性"
+            fi
+        fi
+    else
+        log_warning "无法确定 MuJoCo 版本（未找到 mjversion.h）"
+    fi
+}
+
 # 设置环境变量
 setup_environment() {
     log_info "设置 ROS2 环境变量..."
@@ -95,19 +177,13 @@ setup_environment() {
         source install/setup.bash
     fi
 
-    # 设置 MuJoCo 环境变量（优先使用 ~/mujoco-3.3.7，如无则回退到 3.4.0）
-    if [ -z "$MUJOCO_PATH" ]; then
-        if [ -d "$HOME/mujoco-3.3.7" ]; then
-            export MUJOCO_PATH="$HOME/mujoco-3.3.7"
-        else
-            export MUJOCO_PATH="$HOME/mujoco-3.4.0"
-        fi
-        log_info "设置默认 MUJOCO_PATH: $MUJOCO_PATH"
-    fi
-    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$MUJOCO_PATH/lib
-    log_info "添加 MuJoCo 库路径到 LD_LIBRARY_PATH: $MUJOCO_PATH/lib"
+    # 智能探测 MuJoCo 路径（仅用于编译时头文件查找）
+    detect_mujoco_path
 
-    log_success "环境变量设置完成"
+    # 注意：运行时库查找由系统 ldconfig 处理（/etc/ld.so.conf.d/mujoco.conf）
+    # 如果未配置 ldconfig，请运行：sudo bash -c 'echo "$MUJOCO_PATH/lib" > /etc/ld.so.conf.d/mujoco.conf' && sudo ldconfig
+
+    log_success "环境变量设置完成（MUJOCO_PATH=$MUJOCO_PATH）"
 }
 
 # 启动节点（在新终端中）
@@ -118,10 +194,12 @@ start_node() {
 
     log_info "启动节点: $node_name (延迟 ${delay}s)"
 
+    # 注意：MuJoCo 库路径由系统 ldconfig 管理，无需设置 LD_LIBRARY_PATH
     gnome-terminal --title="$node_name" -- bash -c "
         cd $WORKSPACE_DIR
         source /opt/ros/jazzy/setup.bash
         source install/setup.bash
+        
         sleep $delay
         echo -e '${GREEN}=========================================='
         echo ' 节点: $node_name'
