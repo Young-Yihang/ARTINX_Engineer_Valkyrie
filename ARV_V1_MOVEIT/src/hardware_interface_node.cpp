@@ -28,20 +28,27 @@ class HardwareInterfaceNode : public rclcpp::Node
 public:
     HardwareInterfaceNode() : Node("hardware_interface_node"),
                               num_joints_(6),
-                              running_(false)
+                              running_(false),
+                              simulation_mode_(false)
     {
         // 1. 声明参数
-        this->declare_parameter("serial_port", "/dev/ttyS4");
+        this->declare_parameter("serial_port", "/dev/ttyACM0");
         this->declare_parameter("baud_rate", 921600);
-        this->declare_parameter("publish_rate", 100.0); // 100Hz 发布频率
+        this->declare_parameter("publish_rate", 200.0); // 100Hz 发布频率
+        this->declare_parameter("simulation_mode", false);  // 新增：仿真模式参数
 
         // 2. 获取参数
         std::string port = this->get_parameter("serial_port").as_string();
         int baud = this->get_parameter("baud_rate").as_int();
         double rate = this->get_parameter("publish_rate").as_double();
+        simulation_mode_ = this->get_parameter("simulation_mode").as_bool();
 
         RCLCPP_INFO(this->get_logger(), "[INIT] Serial port: %s, Baud: %d",
                     port.c_str(), baud);
+        
+        if (simulation_mode_) {
+            RCLCPP_INFO(this->get_logger(), "[SIMULATION MODE] Using MuJoCo feedback, serial TX only");
+        }
 
         // 3. 初始化串口
         if (!initSerial(port, baud))
@@ -55,7 +62,15 @@ public:
 
         // 5. 启动收发线程
         running_ = true;
-        receive_thread_ = std::thread(&HardwareInterfaceNode::receiveLoop, this);
+        
+        if (simulation_mode_) {
+            // 仿真模式：不启动串口接收线程，等待MuJoCo反馈
+            RCLCPP_INFO(this->get_logger(), "[OK] Simulation mode - Serial TX only, waiting for MuJoCo feedback");
+        } else {
+            // 真机模式：启动串口接收线程
+            receive_thread_ = std::thread(&HardwareInterfaceNode::receiveLoop, this);
+            RCLCPP_INFO(this->get_logger(), "[OK] Hardware mode - Serial RX/TX enabled");
+        }
 
         RCLCPP_INFO(this->get_logger(), "[OK] Hardware interface node started");
     }
@@ -89,6 +104,7 @@ private:
     // ========== 成员变量 ==========
     int num_joints_;
     std::atomic<bool> running_;
+    bool simulation_mode_;  // 新增：是否为仿真模式（不从串口读取）
 
     // 串口
     std::string device_name_;
@@ -101,6 +117,7 @@ private:
     // ROS2 通信
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr torque_sub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr mujoco_feedback_sub_;  // 新增：订阅MuJoCo仿真反馈
 
     // 数据缓存
     std::mutex data_mutex_;
@@ -227,6 +244,15 @@ private:
         joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
             "/hardware_joint_states",
             10);
+        
+        // 仿真模式下订阅MuJoCo反馈
+        if (simulation_mode_) {
+            mujoco_feedback_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+                "/joint_states",
+                10,
+                std::bind(&HardwareInterfaceNode::mujocoFeedbackCallback, this, std::placeholders::_1));
+            RCLCPP_INFO(this->get_logger(), "[INIT] Subscribed to /joint_states for simulation feedback");
+        }
     }
 
     // ========== 回调函数 ==========
@@ -250,6 +276,26 @@ private:
 
         // 2. 打包并发送
         sendTorqueCommand();
+    }
+
+    // 新增：MuJoCo仿真反馈回调（仿真模式下使用）
+    void mujocoFeedbackCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
+    {
+        if (msg->position.size() < static_cast<size_t>(num_joints_) ||
+            msg->velocity.size() < static_cast<size_t>(num_joints_))
+        {
+            RCLCPP_WARN(this->get_logger(), "[WARN] Invalid MuJoCo feedback size");
+            return;
+        }
+
+        // 直接转发MuJoCo的反馈到/hardware_joint_states
+        float positions[6], velocities[6];
+        for (int i = 0; i < num_joints_; ++i) {
+            positions[i] = static_cast<float>(msg->position[i]);
+            velocities[i] = static_cast<float>(msg->velocity[i]);
+        }
+        
+        updateAndPublishJointStates(positions, velocities);
     }
 
     // ========== 串口收发函数 ==========

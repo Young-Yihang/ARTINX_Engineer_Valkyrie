@@ -29,8 +29,9 @@ NC='\033[0m' # No Color
 WORKSPACE_DIR="$HOME/ros2_ws"
 
 # 运行模式（可通过参数指定）
-# SIM  = 仿真模式（mujoco_interface_node）
+# SIM      = 纯仿真模式（mujoco_interface_node）
 # HARDWARE = 真机模式（hardware_interface_node）
+# HYBRID   = 混合模式（mujoco仿真物理 + 串口测试，不接收串口反馈）
 MODE="${1:-SIM}"  # 默认仿真模式
 
 # 日志函数
@@ -68,26 +69,53 @@ check_directory() {
     log_success "工作空间检查通过"
 }
 
-# 检查串口设备是否存在
-check_serial_device() {
-    local device="${1:-/dev/ttyS4}"
-    
-    if [ ! -e "$device" ]; then
-        log_error "串口设备不存在: $device"
-        log_info "可用串口设备："
-        ls -l /dev/tty{USB,ACM,S}* 2>/dev/null || echo "  未找到串口设备"
+# 智能探测串口设备（自动寻找可用设备）
+detect_serial_device() {
+    log_info "自动探测串口设备..."
+
+    # 候选设备列表（按优先级排序）
+    local candidates=(
+        /dev/ttyACM*      # Arduino/STM32 USB CDC
+        /dev/ttyUSB*      # USB-to-Serial
+        /dev/ttyS[0-9]    # 系统串口
+    )
+
+    # 展开 glob 匹配
+    local devices=()
+    for pattern in "${candidates[@]}"; do
+        for dev in $pattern; do
+            [ -e "$dev" ] && devices+=("$dev")
+        done
+    done
+
+    if [ ${#devices[@]} -eq 0 ]; then
+        log_error "未找到任何串口设备！"
+        log_info "请检查："
+        log_info "  1. 硬件是否已连接"
+        log_info "  2. 运行 'dmesg | tail' 查看内核日志"
         return 1
     fi
-    
-    if [ ! -r "$device" ] || [ ! -w "$device" ]; then
-        log_warning "串口设备权限不足: $device"
-        log_info "尝试修复权限：sudo chmod 666 $device"
-        log_info "或将用户添加到 dialout 组：sudo usermod -aG dialout $USER"
-        return 1
-    fi
-    
-    log_success "串口设备检查通过: $device"
-    return 0
+
+    # 查找第一个可读写的设备
+    for dev in "${devices[@]}"; do
+        if [ -r "$dev" ] && [ -w "$dev" ]; then
+            export DETECTED_SERIAL_DEVICE="$dev"
+            log_success "找到可用串口: $dev"
+            return 0
+        fi
+    done
+
+    # 所有设备都权限不足
+    log_warning "找到 ${#devices[@]} 个串口设备，但权限不足："
+    for dev in "${devices[@]}"; do
+        log_info "  - $dev $(ls -l $dev | awk '{print $1, $3, $4}')"
+    done
+    log_info ""
+    log_info "修复方法："
+    log_info "  临时：sudo chmod 666 ${devices[0]}"
+    log_info "  永久：sudo usermod -aG dialout \$USER && 重新登录"
+    export DETECTED_SERIAL_DEVICE="${devices[0]}"
+    return 1
 }
 
 # 编译项目
@@ -254,12 +282,13 @@ main() {
     log_info "步骤 1/5: 检查工作空间"
     check_directory
     
-    # 如果是真机模式，检查串口设备
-    if [ "$MODE" = "HARDWARE" ]; then
-        if ! check_serial_device "/dev/ttyS4"; then
-            log_error "真机模式需要可用的串口设备！"
+    # 如果是真机或混合模式，自动探测串口设备
+    if [ "$MODE" = "HARDWARE" ] || [ "$MODE" = "HYBRID" ]; then
+        if ! detect_serial_device; then
+            log_error "$MODE 模式需要可用的串口设备！"
             exit 1
         fi
+        log_info "将使用串口设备: $DETECTED_SERIAL_DEVICE"
     fi
     echo ""
 
@@ -291,14 +320,30 @@ main() {
 
     sleep 3  # 等待控制器完全启动并开始发布重力补偿
 
-    # 节点2：执行层（根据模式选择仿真或真机）
-    if [ "$MODE" = "HARDWARE" ]; then
-        # 真机模式：启动串口硬件接口节点
+    # 节点2：执行层（根据模式选择仿真/真机/混合）
+    if [ "$MODE" = "HYBRID" ]; then
+        # 混合模式：同时启动MuJoCo（物理仿真）和Hardware Interface（串口测试）
+        start_node \
+            "2a. MuJoCo Interface (Physics)" \
+            "ros2 run ARV_V1_MOVEIT mujoco_interface_node" \
+            0
+        log_info "启动 MuJoCo 仿真节点（提供物理反馈）"
+        
+        sleep 2  # 等待MuJoCo启动
+        
+        start_node \
+            "2b. Hardware Interface (Serial TX Test)" \
+            "ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p simulation_mode:=true -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" \
+            0
+        log_info "启动串口测试节点（TX only，使用MuJoCo反馈，设备: $DETECTED_SERIAL_DEVICE）"
+        
+    elif [ "$MODE" = "HARDWARE" ]; then
+        # 真机模式：启动串口硬件接口节点（使用探测到的设备）
         start_node \
             "2. Hardware Interface (Serial)" \
-            "ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=/dev/ttyS4 -p baud_rate:=921600" \
+            "ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" \
             0
-        log_info "启动真机串口节点（/dev/ttyS4, 921600bps）"
+        log_info "启动真机串口节点（RX/TX，设备: $DETECTED_SERIAL_DEVICE）"
     else
         # 仿真模式：启动 MuJoCo 节点
         start_node \
@@ -308,7 +353,7 @@ main() {
         log_info "启动 MuJoCo 仿真节点"
     fi
 
-    sleep 2  # 等待 MuJoCo 节点启动
+    sleep 2  # 等待执行层节点启动
 
     echo ""
     log_success "所有节点已启动！"
@@ -333,7 +378,11 @@ main() {
     echo "  - 发布: /joint_states (200 Hz)"
     echo "  - 订阅: /effort_controller/commands"
     echo ""
-    echo -e "${GREEN}终端 2:${NC} $([ \"$MODE\" = \"HARDWARE\" ] && echo \"Hardware Interface (Serial)\" || echo \"MuJoCo Interface Node\")"
+    if [ "$MODE" = "HARDWARE" ]; then
+        echo -e "${GREEN}终端 2:${NC} Hardware Interface (Serial)"
+    else
+        echo -e "${GREEN}终端 2:${NC} MuJoCo Interface Node"
+    fi
     if [ "$MODE" = "HARDWARE" ]; then
         echo "  - 功能: 串口通信 + 真机控制"
         echo "  - 发布: /hardware_joint_states (100 Hz)"
@@ -354,10 +403,13 @@ main() {
     echo "  运行模式："
     echo "==========================================${NC}"
     echo ""
-    echo "# 仿真模式（默认）："
+    echo "# 纯仿真模式（默认）："
     echo "./start_mujoco_system.sh"
     echo ""
-    echo "# 真机模式（需要串口设备）："
+    echo "# 混合模式（仿真物理 + 串口测试，不接收串口）："
+    echo "./start_mujoco_system.sh HYBRID"
+    echo ""
+    echo "# 真机模式（需要串口设备，双向通信）："
     echo "./start_mujoco_system.sh HARDWARE"
     echo ""
     echo -e "${YELLOW}=========================================="
