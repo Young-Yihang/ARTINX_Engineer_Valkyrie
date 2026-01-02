@@ -24,10 +24,15 @@ echo -e "${GREEN}查找运行中的节点...${NC}"
 # 节点列表
 nodes=(
     "mujoco_interface_node"
+    "hardware_interface_node"
     "torque_controller_node"
+    "dynamics_solver_node"
     "move_group"
     "rviz2"
     "robot_state_publisher"
+    "static_transform_publisher"
+    "ros2_control_node"
+    "controller_manager"
 )
 
 for node in "${nodes[@]}"; do
