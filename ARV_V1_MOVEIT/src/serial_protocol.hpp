@@ -102,7 +102,7 @@ namespace SerialProtocol
         // 1. Payload Serialization
         std::vector<uint8_t> payload_bytes;
         // This part needs specialization or a generic way. 
-        // For simplicity, let's do it manually in specific builders.
+        // For simplicity, let's do it manually in specific buildersinit_port.
         return packet; 
     }
 

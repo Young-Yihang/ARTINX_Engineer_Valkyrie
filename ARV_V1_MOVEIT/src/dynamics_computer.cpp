@@ -8,9 +8,9 @@ DynamicsComputer::DynamicsComputer(const KDL::Chain &chain,
     dyn_param_ = std::make_unique<KDL::ChainDynParam>(chain, gravity_);
 }
 
-//前馈力矩，就是所谓系统分析得出的动力学力矩
+// 前馈力矩，就是所谓系统分析得出的动力学力矩
 void DynamicsComputer::computeFeedforwardTorque(
-    const KDL::JntArray &q, 
+    const KDL::JntArray &q,
     const KDL::JntArray &qd,
     const KDL::JntArray &qdd,
     KDL::JntArray &tau_ff)
@@ -53,21 +53,21 @@ void DynamicsComputer::computeGravityTorque(
     dyn_param_->JntToGravity(q, tau_ff);
 }
 
-void DynamicsComputer::getMassMatrix(const KDL::JntArray& q, 
-                                     KDL::JntSpaceInertiaMatrix& M)
+void DynamicsComputer::getMassMatrix(const KDL::JntArray &q,
+                                     KDL::JntSpaceInertiaMatrix &M)
 {
     dyn_param_->JntToMass(q, M);
 }
 
-void DynamicsComputer::getCoriolisForces(const KDL::JntArray& q, 
-                                        const KDL::JntArray& qd,
-                                        KDL::JntArray& C)
+void DynamicsComputer::getCoriolisForces(const KDL::JntArray &q,
+                                         const KDL::JntArray &qd,
+                                         KDL::JntArray &C)
 {
     dyn_param_->JntToCoriolis(q, qd, C);
 }
 
-void DynamicsComputer::getGravityForces(const KDL::JntArray& q,
-                                       KDL::JntArray& G)
+void DynamicsComputer::getGravityForces(const KDL::JntArray &q,
+                                        KDL::JntArray &G)
 {
     dyn_param_->JntToGravity(q, G);
 }
