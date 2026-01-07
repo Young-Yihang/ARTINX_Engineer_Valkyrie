@@ -266,7 +266,7 @@ start_node() {
         
         # 动态添加 MuJoCo 库路径
         if [ -n '$mujoco_lib_path' ]; then
-            export LD_LIBRARY_PATH='$mujoco_lib_path:\$LD_LIBRARY_PATH'
+            export LD_LIBRARY_PATH='$mujoco_lib_path':\"\$LD_LIBRARY_PATH\"
         fi
         
         sleep $delay
