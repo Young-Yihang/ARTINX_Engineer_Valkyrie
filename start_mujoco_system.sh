@@ -32,7 +32,7 @@ WORKSPACE_DIR="$HOME/ros2_ws"
 # SIM      = 纯仿真模式（mujoco_interface_node）
 # HARDWARE = 真机模式（hardware_interface_node）
 # HYBRID   = 混合模式（mujoco仿真物理 + 串口测试，不接收串口反馈）
-MODE="${1:-SIM}"  # 默认仿真模式
+MODE="${1:-HYBRID}"  # 默认混合模式
 
 # 日志函数
 log_info() {
