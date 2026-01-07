@@ -146,7 +146,9 @@ detect_mujoco_path() {
     # 候选路径列表（按优先级排序）
     local candidates=(
         "$MUJOCO_PATH"                                          # 用户预设环境变量
-        "$HOME/.mujoco/mujoco-3.3.7"                            # 标准安装位置
+        $(ls -d $HOME/mujoco-* 2>/dev/null | sort -V -r)       # 自动发现 ~/mujoco-* (最新版优先)
+        $(ls -d $HOME/.mujoco/mujoco-* 2>/dev/null | sort -V -r) # 自动发现 ~/.mujoco/mujoco-*
+        "$HOME/.mujoco/mujoco-3.3.7"                            # 标准安装位置（回退）
         "$HOME/mujoco-3.3.7"
         "$HOME/mujoco-3.4.0"
         "$HOME/.mujoco/mujoco-3.4.0"
@@ -249,11 +251,23 @@ start_node() {
 
     log_info "启动节点: $node_name (延迟 ${delay}s)"
 
-    # 注意：MuJoCo 库路径由系统 ldconfig 管理，无需设置 LD_LIBRARY_PATH
+    # 设置 MuJoCo 库路径以确保跨机器兼容性
+    local mujoco_lib_path=""
+    if [ -d "$MUJOCO_PATH/lib" ]; then
+        mujoco_lib_path="$MUJOCO_PATH/lib"
+    elif [ -d "$MUJOCO_PATH" ] && [ -f "$MUJOCO_PATH/libmujoco.so" ]; then
+        mujoco_lib_path="$MUJOCO_PATH"
+    fi
+
     gnome-terminal --title="$node_name" -- bash -c "
         cd $WORKSPACE_DIR
         source /opt/ros/jazzy/setup.bash
         source install/setup.bash
+        
+        # 动态添加 MuJoCo 库路径
+        if [ -n '$mujoco_lib_path' ]; then
+            export LD_LIBRARY_PATH='$mujoco_lib_path:\$LD_LIBRARY_PATH'
+        fi
         
         sleep $delay
         echo -e '${GREEN}=========================================='
