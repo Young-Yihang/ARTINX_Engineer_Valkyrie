@@ -5,11 +5,11 @@
 //   - 订阅 /effort_controller/commands 获取力矩指令
 //   - 通过串口发送力矩到下位机
 //   - 从串口接收关节状态 (位置、速度)
-//   - 发布到 /hardware_joint_states 供闭环控制
+//   - 发布到 /joint_states 供闭环控制和数字孪生可视化
 //
-// Stage: SIM2REAL
+// Stage: SIM2REAL - 串口通信
 // Author: ARV V1 Team
-// Date: 2025-11-04
+// Date: 2025-11-04 (Updated: 2026-01-08 统一话题)
 // ============================================================
 
 #include <rclcpp/rclcpp.hpp>
@@ -47,7 +47,7 @@ public:
                     port.c_str(), baud);
         
         if (simulation_mode_) {
-            RCLCPP_INFO(this->get_logger(), "[SIMULATION MODE] Using MuJoCo feedback, serial TX only");
+            RCLCPP_INFO(this->get_logger(), "[SIMULATION MODE] Serial TX only, no RX feedback");
         }
 
         // 3. 初始化串口
@@ -117,7 +117,6 @@ private:
     // ROS2 通信
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr torque_sub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
-    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr mujoco_feedback_sub_;  // 新增：订阅MuJoCo仿真反馈
 
     // 数据缓存
     std::mutex data_mutex_;
@@ -240,19 +239,11 @@ private:
             10,
             std::bind(&HardwareInterfaceNode::torqueCallback, this, std::placeholders::_1));
 
-        // 发布关节状态
+        // 发布关节状态到标准话题 (MoveIt/RViz/数字孪生都订阅此话题)
         joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
-            "/hardware_joint_states",
+            "/joint_states",
             10);
-        
-        // 仿真模式下订阅MuJoCo反馈
-        if (simulation_mode_) {
-            mujoco_feedback_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-                "/joint_states",
-                10,
-                std::bind(&HardwareInterfaceNode::mujocoFeedbackCallback, this, std::placeholders::_1));
-            RCLCPP_INFO(this->get_logger(), "[INIT] Subscribed to /joint_states for simulation feedback");
-        }
+        RCLCPP_INFO(this->get_logger(), "[INIT] Publishing to /joint_states");
     }
 
     // ========== 回调函数 ==========
@@ -276,26 +267,6 @@ private:
 
         // 2. 打包并发送
         sendTorqueCommand();
-    }
-
-    // 新增：MuJoCo仿真反馈回调（仿真模式下使用）
-    void mujocoFeedbackCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
-    {
-        if (msg->position.size() < static_cast<size_t>(num_joints_) ||
-            msg->velocity.size() < static_cast<size_t>(num_joints_))
-        {
-            RCLCPP_WARN(this->get_logger(), "[WARN] Invalid MuJoCo feedback size");
-            return;
-        }
-
-        // 直接转发MuJoCo的反馈到/hardware_joint_states
-        float positions[6], velocities[6];
-        for (int i = 0; i < num_joints_; ++i) {
-            positions[i] = static_cast<float>(msg->position[i]);
-            velocities[i] = static_cast<float>(msg->velocity[i]);
-        }
-        
-        updateAndPublishJointStates(positions, velocities);
     }
 
     // ========== 串口收发函数 ==========
