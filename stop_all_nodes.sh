@@ -21,10 +21,11 @@ echo ""
 # 查找并杀死相关进程
 echo -e "${GREEN}查找运行中的节点...${NC}"
 
-# 节点列表
+# 节点列表 (覆盖所有模式: SIM/HARDWARE/HYBRID/CAN)
 nodes=(
     "mujoco_interface_node"
     "hardware_interface_node"
+    "can_interface_node"          # CAN模式
     "torque_controller_node"
     "dynamics_solver_node"
     "move_group"

@@ -30,8 +30,9 @@ WORKSPACE_DIR="$HOME/ros2_ws"
 
 # 运行模式（可通过参数指定）
 # SIM      = 纯仿真模式（mujoco_interface_node）
-# HARDWARE = 真机模式（hardware_interface_node）
+# HARDWARE = 真机模式（hardware_interface_node，串口通信）
 # HYBRID   = 混合模式（mujoco仿真物理 + 串口测试，不接收串口反馈）
+# CAN      = SocketCAN模式（can_interface_node，MIT电机协议）
 MODE="${1:-SIM}"  # 默认仿真模式
 
 # 日志函数
@@ -115,6 +116,43 @@ detect_serial_device() {
     log_info "  临时：sudo chmod 666 ${devices[0]}"
     log_info "  永久：sudo usermod -aG dialout \$USER && 重新登录"
     export DETECTED_SERIAL_DEVICE="${devices[0]}"
+    return 1
+}
+
+# 智能探测CAN设备
+detect_can_device() {
+    log_info "自动探测CAN设备..."
+
+    # 检查 can0, can1 等接口
+    local can_devices=()
+    for i in 0 1 2 3; do
+        if ip link show "can$i" &>/dev/null; then
+            can_devices+=("can$i")
+        fi
+    done
+
+    if [ ${#can_devices[@]} -eq 0 ]; then
+        log_error "未找到任何CAN设备！"
+        log_info "请检查："
+        log_info "  1. USB-CAN适配器是否已连接"
+        log_info "  2. 运行 'sudo ip link set can0 up type can bitrate 1000000'"
+        return 1
+    fi
+
+    # 检查接口是否已启动
+    for dev in "${can_devices[@]}"; do
+        local state=$(ip link show "$dev" | grep -oP 'state \K\w+')
+        if [ "$state" = "UP" ]; then
+            export DETECTED_CAN_DEVICE="$dev"
+            log_success "找到可用CAN接口: $dev (状态: UP)"
+            return 0
+        fi
+    done
+
+    # 接口存在但未启动
+    export DETECTED_CAN_DEVICE="${can_devices[0]}"
+    log_warning "CAN接口 ${can_devices[0]} 未启动"
+    log_info "启动命令: sudo ip link set ${can_devices[0]} up type can bitrate 1000000"
     return 1
 }
 
@@ -285,24 +323,32 @@ main() {
     print_header
 
     # 显示模式
-    if [ "$MODE" = "HARDWARE" ]; then
-        log_info "运行模式: 真机模式 (HARDWARE)"
-    else
-        log_info "运行模式: 仿真模式 (SIM)"
-    fi
+    case "$MODE" in
+        SIM)      log_info "运行模式: 仿真模式 (SIM) - MuJoCo" ;;
+        HARDWARE) log_info "运行模式: 真机模式 (HARDWARE) - 串口" ;;
+        HYBRID)   log_info "运行模式: 混合模式 (HYBRID) - MuJoCo + 串口" ;;
+        CAN)      log_info "运行模式: CAN模式 (CAN) - SocketCAN/MIT协议" ;;
+        *)        log_error "未知模式: $MODE"; exit 1 ;;
+    esac
     echo ""
 
     # 步骤1：检查目录
     log_info "步骤 1/5: 检查工作空间"
     check_directory
     
-    # 如果是真机或混合模式，自动探测串口设备
+    # 根据模式探测相应设备
     if [ "$MODE" = "HARDWARE" ] || [ "$MODE" = "HYBRID" ]; then
         if ! detect_serial_device; then
             log_error "$MODE 模式需要可用的串口设备！"
             exit 1
         fi
         log_info "将使用串口设备: $DETECTED_SERIAL_DEVICE"
+    elif [ "$MODE" = "CAN" ]; then
+        if ! detect_can_device; then
+            log_error "CAN 模式需要可用的 SocketCAN 接口！"
+            exit 1
+        fi
+        log_info "将使用CAN接口: $DETECTED_CAN_DEVICE"
     fi
     echo ""
 
@@ -358,6 +404,13 @@ main() {
             "ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" \
             0
         log_info "启动真机串口节点（RX/TX，设备: $DETECTED_SERIAL_DEVICE）"
+    elif [ "$MODE" = "CAN" ]; then
+        # CAN模式：启动SocketCAN接口节点（MIT电机协议）
+        start_node \
+            "2. CAN Interface (MIT Protocol)" \
+            "ros2 run ARV_V1_MOVEIT can_interface_node --ros-args -p can_interface:=$DETECTED_CAN_DEVICE" \
+            0
+        log_info "启动SocketCAN节点（MIT协议，接口: $DETECTED_CAN_DEVICE）"
     else
         # 仿真模式：启动 MuJoCo 节点
         start_node \
@@ -425,6 +478,9 @@ main() {
     echo ""
     echo "# 真机模式（需要串口设备，双向通信）："
     echo "./start_mujoco_system.sh HARDWARE"
+    echo ""
+    echo "# CAN模式（SocketCAN + MIT电机协议）："
+    echo "./start_mujoco_system.sh CAN"
     echo ""
     echo -e "${YELLOW}=========================================="
     echo "  有用的调试命令："
