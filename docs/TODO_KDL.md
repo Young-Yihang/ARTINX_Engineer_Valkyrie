@@ -1,22 +1,46 @@
 # ARV_V1 力矩控制系统技术文档 + 功能扩展蓝图
 
-## 当前系统架构 (v1.0 - 基础力矩控制)
+## 当前系统架构 (v2.0 - 三模式架构)
 
+### 节点启动方式
+```bash
+# 所有模式共同启动:
+ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py  # MoveIt + RViz + TF (不含MuJoCo)
+ros2 run ARV_V1_MOVEIT torque_controller_node    # 纯C++力矩控制器
+
+# 模式1: 纯仿真
+ros2 run ARV_V1_MOVEIT mujoco_interface_node     # 物理仿真模式
+
+# 模式2: 串口真机 + 数字孪生
+ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=/dev/ttyACM0
+ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true
+
+# 模式3: CAN真机 + 数字孪生
+ros2 run ARV_V1_MOVEIT can_interface_node --ros-args -p can_interface:=can0
+ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true
 ```
-RViz/MoveIt (规划)
-     │ 轨迹 Goal
-     ▼
-torque_controller_node (200 Hz)
-     │ 计算: τ = τ_ff + τ_fb
-     │ - 前馈: M(q)q̈ + C(q,q̇) + G(q)
-     │ - 反馈: Kp·e_p + Kd·e_v
-     │ - Kalman: 速度滤波 (可选)
-     ▼ /effort_controller/commands
-mujoco_interface_node (200 Hz 仿真 + 60 Hz 渲染)
-     │ 物理仿真 + 3D 可视化
-     ▼ /joint_states
-dynamics_computer (KDL 动力学库)
+
+### 数据流拓扑
 ```
+MoveIt (move_group) ─→ /ARM_controller/follow_joint_trajectory
+                              │
+                              ▼
+              torque_controller_node (200Hz)
+              τ = M(q)q̈ + C(q,q̇) + G(q) + Kp·e_p + Kd·e_v
+                              │
+                              ▼ /effort_controller/commands
+         ┌──────────────────┬─┴─────────────────┐
+         ▼                  ▼                   ▼
+   mujoco_node        hardware_node        can_node
+   (仿真模式)          (串口→下位机)        (CAN→MIT电机)
+         │                  │                   │
+         └──────────────────┴───────────────────┘
+                              │ /joint_states
+                              ▼
+              torque_controller_node (闭环反馈)
+```
+
+**数字孪生模式**: mujoco_node 订阅 /joint_states 仅做3D可视化，不发布
 
 ## 未来系统架构 (v2.0+ - 多功能集成)
 
@@ -182,23 +206,35 @@ colcon build --packages-select ARV_V1_MOVEIT
 source install/setup.bash
 ```
 
-### 启动
+### 启动 (交互式菜单)
 ```bash
-# 一键启动
-bash src/ARV_V1_MOVEIT/bash/start_mujoco_system.sh
+cd ~/ros2_ws/src
+./start_mujoco_system.sh
+# 选择: [1] 纯仿真  [2] 串口真机  [3] CAN真机
+```
+
+### 停止所有节点
+```bash
+./stop_all_nodes.sh
+```
+
+### 参数热重载
+```bash
+./reload_params.sh  # 无需重启节点
 ```
 
 ### 测试命令
 ```bash
 # 检查节点
-ros2 node list | grep -E "(torque|mujoco)"
+ros2 node list | grep -E "(torque|mujoco|hardware|can)"
 
-# 监控力矩
+# 监控力矩/关节状态
 ros2 topic echo /effort_controller/commands
+ros2 topic echo /joint_states
 
-# 监控关节状态
-# 调参
+# 运行时调参
 ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
+ros2 param set /torque_controller_action_server use_cascade_pid true
 ```
 
 ---
@@ -209,11 +245,17 @@ ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
 
 ```
 master (主分支)
-  ├── feature/kalman            ✅ 已完成
+  └── feature/ros2_components   ✅ 当前分支 (包含以下功能)
+        ├── Kalman滤波器        ✅ 已完成
+        ├── 串口通信接口        ✅ 已完成 (hardware_interface_node)
+        ├── SocketCAN接口       ✅ 已完成 (can_interface_node)
+        ├── 级联PID控制器       ✅ 已完成 (可选启用)
+        ├── 参数热重载          ✅ 已完成 (reload_params.sh)
+        └── 数字孪生可视化      ✅ 已完成 (visualization_only模式)
+
+  待开发:
   ├── feature/visual-servo      🔧 规划中
-  ├── feature/serial-output     🔧 规划中  
-  ├── feature/obstacle-avoid    🔧 规划中
-  └── release/v2.0              📅 未来
+  └── feature/obstacle-avoid    🔧 规划中
 ```
 
 ---## 📷 功能模块 1: 视觉伺服
@@ -456,9 +498,10 @@ git merge feature/obstacle-avoidance
 
 ---
 
-**最后更新**: 2025-11-06  
-**状态**: 基础系统稳定 ✅ | 扩展功能规划完成 📋  
-**下一步**: 双环PID实现 → Kalman 调参 → 串口协议实现
+**最后更新**: 2026-01-08
+**当前分支**: feature/ros2_components
+**状态**: 三模式架构完成 ✅ | Kalman/级联PID/串口/CAN 全部实现
+**下一步**: 视觉伺服 → 动态避障
 
 ---
 
@@ -612,9 +655,9 @@ ros2 run plotjuggler plotjuggler
 | 调参难度 | 中 | 先难后易 |
 ---
 
-**最后更新**: 2025-11-06  
-**作者**: Claude + Young-Yihang  
-**状态**: 设计完成 ✅ | 待实现测试 🔧
+**最后更新**: 2026-01-08
+**作者**: Claude + Young-Yihang
+**状态**: 级联PID已实现 ✅ | cascade_pid.cpp/hpp
 
 ### 控制频率选择
 - **100Hz**: 慢速运动,计算负载低
