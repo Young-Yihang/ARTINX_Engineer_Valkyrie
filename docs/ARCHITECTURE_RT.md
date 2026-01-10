@@ -14,7 +14,7 @@
 | 0-1 | 非实时 | 否 | move_group, rviz, mujoco渲染 |
 | 2-3 | 软实时 | 否 | mujoco仿真, 视觉节点 |
 | 4 | 硬实时 | 是 | torque_controller + hardware_interface |
-| 5 | 超硬实时 | 是 | can_interface (1kHz) |
+| 5 | 预留 | 是 | 预留扩展 |
 
 **内核参数** (GRUB_CMDLINE_LINUX):
 ```
@@ -33,11 +33,10 @@ isolcpus=4,5 nohz_full=4,5 rcu_nocbs=4,5
 ### 3.2 节点分组
 
 | 组 | 进程类型 | 节点 | CPU绑定 |
-|----|---------|------|---------|
+|----|---------|----- |------|
 | 组1 | RT进程 | torque_controller + hardware_interface | Core 4 |
-| 组2 | RT进程 | can_interface | Core 5 |
-| 组3 | 普通进程 | mujoco_interface | Core 2-3 |
-| 组4 | 普通进程 | move_group + rviz | Core 0-1 |
+| 组2 | 普通进程 | mujoco_interface | Core 2-3 |
+| 组3 | 普通进程 | move_group + rviz | Core 0-1 |
 
 ### 3.3 Component 改造要点
 ```cpp
@@ -57,7 +56,6 @@ RCLCPP_COMPONENTS_REGISTER_NODE(TorqueControllerActionServer)
 ### 4.1 SCHED_FIFO 优先级
 | 节点 | 优先级 | 说明 |
 |------|--------|------|
-| can_interface | 90 | 1kHz，最高 |
 | torque_controller | 85 | 200Hz |
 | hardware_interface | 85 | 200Hz |
 
@@ -85,7 +83,7 @@ pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
 |------|----------|
 | 控制节点崩溃 | Watchdog 检测 → 自动重启 → 切换保持模式 |
 | 视觉节点崩溃 | 不影响控制回路，等待手动恢复 |
-| CAN 通信断开 | 超时检测 → 触发安全停止 |
+| 串口通信断开 | 超时检测 → 触发安全停止 |
 
 ---
 
@@ -96,7 +94,6 @@ pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
 # start_rt_system.sh
 
 # 1. 设置实时优先级
-sudo chrt -f 90 ros2 run ARV_V1_MOVEIT can_interface_node &
 sudo chrt -f 85 ros2 run ARV_V1_MOVEIT torque_controller_node &
 
 # 2. 绑定CPU (taskset)

@@ -6,7 +6,6 @@
 # 功能：
 #   1. 纯仿真模式 - MuJoCo物理仿真
 #   2. 串口真机 + 数字孪生
-#   3. SocketCAN真机 + 数字孪生
 #
 # 使用方法：
 #   chmod +x start_mujoco_system.sh
@@ -42,10 +41,9 @@ show_menu() {
     echo -e "${GREEN}╠══════════════════════════════════════╣${NC}"
     echo -e "${GREEN}║${NC}  [1] 纯仿真模式 (MuJoCo物理仿真)      ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  [2] 串口真机 + 数字孪生              ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  [3] SocketCAN真机 + 数字孪生         ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  [0] 退出                            ${GREEN}║${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════╝${NC}"
-    echo -n "请选择 [0-3]: "
+    echo -n "请选择 [0-2]: "
 }
 
 # ========== 智能探测串口设备 ==========
@@ -77,37 +75,7 @@ detect_serial_device() {
     return 1
 }
 
-# ========== 智能探测CAN设备 ==========
-detect_can_device() {
-    log_info "自动探测CAN设备..."
-    local can_devices=()
-    for i in 0 1 2 3; do
-        if ip link show "can$i" &>/dev/null; then
-            can_devices+=("can$i")
-        fi
-    done
 
-    if [ ${#can_devices[@]} -eq 0 ]; then
-        log_error "未找到任何CAN设备！"
-        log_info "请检查USB-CAN适配器并运行:"
-        log_info "  sudo ip link set can0 up type can bitrate 1000000"
-        return 1
-    fi
-
-    for dev in "${can_devices[@]}"; do
-        local state=$(ip link show "$dev" | grep -oP 'state \K\w+')
-        if [ "$state" = "UP" ]; then
-            export DETECTED_CAN_DEVICE="$dev"
-            log_success "找到可用CAN接口: $dev (状态: UP)"
-            return 0
-        fi
-    done
-
-    export DETECTED_CAN_DEVICE="${can_devices[0]}"
-    log_warning "CAN接口 ${can_devices[0]} 未启动"
-    log_info "启动命令: sudo ip link set ${can_devices[0]} up type can bitrate 1000000"
-    return 1
-}
 
 # ========== 智能探测 MuJoCo 安装路径 ==========
 detect_mujoco_path() {
@@ -192,16 +160,7 @@ start_serial_mode() {
     start_node "MuJoCo(孪生)" "ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true" 0
 }
 
-# ========== 模式3: CAN + 数字孪生 ==========
-start_can_mode() {
-    detect_can_device || exit 1
-    log_info "启动CAN真机模式 (接口: $DETECTED_CAN_DEVICE)..."
-    start_node "MoveIt+RViz" "ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py" 0
-    start_node "TorqueController" "ros2 run ARV_V1_MOVEIT torque_controller_node" 0
-    sleep 3
-    start_node "CANInterface" "ros2 run ARV_V1_MOVEIT can_interface_node --ros-args -p can_interface:=$DETECTED_CAN_DEVICE" 0
-    start_node "MuJoCo(孪生)" "ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true" 0
-}
+
 
 # ========== 主函数 ==========
 main() {
@@ -213,7 +172,6 @@ main() {
         case $choice in
             1) start_sim_mode; break ;;
             2) start_serial_mode; break ;;
-            3) start_can_mode; break ;;
             0) log_info "退出"; exit 0 ;;
             *) log_warning "无效选择，请重试" ;;
         esac

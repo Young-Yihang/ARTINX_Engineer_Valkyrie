@@ -232,26 +232,6 @@ ament_target_dependencies(hardware_interface_node
   serial_driver
 )
 
-# -------------------------------------------
-# SocketCAN 接口节点 (Sim2Real - CAN通信)
-add_executable(can_interface_node
-  src/can_interface_node.cpp
-)
-
-# 头文件路径
-target_include_directories(can_interface_node PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-  $<INSTALL_INTERFACE:include>
-  ${rclcpp_INCLUDE_DIRS}
-)
-
-# ROS2 依赖
-ament_target_dependencies(can_interface_node
-  rclcpp
-  sensor_msgs
-  std_msgs
-)
-
 # ============= 4. 安装 =============
 
 # 安装可执行文件和库
@@ -261,7 +241,6 @@ install(TARGETS
   torque_controller_node
   mujoco_interface_node
   hardware_interface_node
-  can_interface_node      # ← 新增: SocketCAN接口
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -51,7 +51,6 @@
 |------|------|------|
 | torque_controller | 200Hz | 力矩控制 |
 | hardware_interface | 200Hz | 串口通信 |
-| can_interface | 1kHz | CAN通信 |
 | mujoco_interface | 200Hz | 仿真/孪生 |
 
 ## 📚 文档位置

@@ -14,10 +14,6 @@ ros2 run ARV_V1_MOVEIT mujoco_interface_node     # 物理仿真模式
 # 模式2: 串口真机 + 数字孪生
 ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=/dev/ttyACM0
 ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true
-
-# 模式3: CAN真机 + 数字孪生
-ros2 run ARV_V1_MOVEIT can_interface_node --ros-args -p can_interface:=can0
-ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true
 ```
 
 ### 数据流拓扑
@@ -29,12 +25,12 @@ MoveIt (move_group) ─→ /ARM_controller/follow_joint_trajectory
               τ = M(q)q̈ + C(q,q̇) + G(q) + Kp·e_p + Kd·e_v
                               │
                               ▼ /effort_controller/commands
-         ┌──────────────────┬─┴─────────────────┐
-         ▼                  ▼                   ▼
-   mujoco_node        hardware_node        can_node
-   (仿真模式)          (串口→下位机)        (CAN→MIT电机)
-         │                  │                   │
-         └──────────────────┴───────────────────┘
+         ┌──────────────────────────┬──────────────────────┐
+         ▼                      ▼                      ▼
+   mujoco_node              hardware_node
+   (仿真模式)                (串口→下位机)
+         │                      │
+         └──────────────────────┴──────────────────────┘
                               │ /joint_states
                               ▼
               torque_controller_node (闭环反馈)
@@ -210,7 +206,7 @@ source install/setup.bash
 ```bash
 cd ~/ros2_ws/src
 ./start_mujoco_system.sh
-# 选择: [1] 纯仿真  [2] 串口真机  [3] CAN真机
+# 选择: [1] 纯仿真  [2] 串口真机
 ```
 
 ### 停止所有节点
@@ -226,7 +222,7 @@ cd ~/ros2_ws/src
 ### 测试命令
 ```bash
 # 检查节点
-ros2 node list | grep -E "(torque|mujoco|hardware|can)"
+ros2 node list | grep -E "(torque|mujoco|hardware)"
 
 # 监控力矩/关节状态
 ros2 topic echo /effort_controller/commands
@@ -248,7 +244,6 @@ master (主分支)
   └── feature/ros2_components   ✅ 当前分支 (包含以下功能)
         ├── Kalman滤波器        ✅ 已完成
         ├── 串口通信接口        ✅ 已完成 (hardware_interface_node)
-        ├── SocketCAN接口       ✅ 已完成 (can_interface_node)
         ├── 级联PID控制器       ✅ 已完成 (可选启用)
         ├── 参数热重载          ✅ 已完成 (reload_params.sh)
         └── 数字孪生可视化      ✅ 已完成 (visualization_only模式)
@@ -352,19 +347,11 @@ Planning Scene 实时更新 → 触发重规划
 | 方案 | 硬件 | 延迟 | 优势 | 劣势 |
 |------|------|------|------|------|
 | **UART** | USB-TTL (CH340) | ~2ms | 简单、成本低 | 易丢包 |
-| **CAN** ⭐ | PEAK PCAN | <1ms | 抗干扰强、实时性好 | 成本稍高 |
-
-**CAN帧设计**:
-```
-力矩指令: CAN ID 0x101-0x106 (6关节)
-状态反馈: CAN ID 0x201-0x206
-数据: [torque_high, torque_low, checksum]
-```
 
 ### 协议要点
 - 频率: 200Hz (与控制同步)
 - 校验: CRC16
-- 波特率: 921600 (UART) / 1Mbps (CAN)
+- 波特率: 921600
 
 ---
 
@@ -498,9 +485,9 @@ git merge feature/obstacle-avoidance
 
 ---
 
-**最后更新**: 2026-01-08
+**最后更新**: 2026-01-10
 **当前分支**: feature/ros2_components
-**状态**: 三模式架构完成 ✅ | Kalman/级联PID/串口/CAN 全部实现
+**状态**: 双模式架构完成 ✅ | Kalman/级联PID/串口 全部实现
 **下一步**: 视觉伺服 → 动态避障
 
 ---
