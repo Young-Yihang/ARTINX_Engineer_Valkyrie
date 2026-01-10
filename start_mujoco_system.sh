@@ -117,6 +117,22 @@ setup_environment() {
     log_success "环境设置完成"
 }
 
+# ========== 编译项目 ==========
+build_workspace() {
+    log_info "编译项目..."
+    cd "$WORKSPACE_DIR"
+
+    colcon build --packages-select ARV_V1_MODEL ARV_V1_MOVEIT --cmake-args -DCMAKE_BUILD_TYPE=Release
+    
+    if [ $? -eq 0 ]; then
+        log_success "编译成功！"
+        source install/setup.bash
+    else
+        log_error "编译失败，请检查错误信息"
+        exit 1
+    fi
+}
+
 # ========== 启动节点（在新终端中） ==========
 start_node() {
     local node_name=$1
@@ -165,6 +181,7 @@ start_serial_mode() {
 # ========== 主函数 ==========
 main() {
     setup_environment
+    build_workspace
 
     while true; do
         show_menu
