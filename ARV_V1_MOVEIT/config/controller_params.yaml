@@ -79,3 +79,24 @@
         vel_Ki: 5.0
         vel_Kd: 0.0
         vel_limit: 2.0
+
+    # ========== Safety Parameters ==========
+    safety:
+      # Per-joint torque limits (Nm) - Optional override of URDF effort limits
+      # Set to -1 or omit to use URDF values automatically
+      # Example override (uncomment to use):
+      # max_torque_per_joint:
+      #   joint_1: 50.0  # Override URDF value
+      #   joint_2: -1    # Use URDF value (20 Nm)
+      #   joint_3: -1    # Use URDF value (20 Nm)
+      #   joint_4: -1    # Use URDF value (1.2 Nm - seems low!)
+      #   joint_5: -1    # Use URDF value (7 Nm)
+      #   joint_6: -1    # Use URDF value (1 Nm - seems low!)
+
+      # Global fallback if neither config nor URDF specified
+      max_torque_default: 20.0              # Nm - conservative default
+
+      joint_state_timeout_ms: 100     # Max time without sensor update before emergency stop
+      max_control_period_ms: 10       # Detect slow control loop (200Hz = 5ms nominal)
+      max_velocity_sanity: 20.0       # rad/s - reject sensor glitches (20 rad/s = ~1910 RPM)
+      max_position_error: 0.8         # rad - emergency stop threshold for position tracking error

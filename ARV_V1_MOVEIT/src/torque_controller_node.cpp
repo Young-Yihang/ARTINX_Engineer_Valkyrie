@@ -165,6 +165,40 @@ public: // 构造函数log
         this->declare_parameter("kalman.print_interval", 1000); // 默认 1000 次打印一次
         kalman_print_interval_ = this->get_parameter("kalman.print_interval").as_int();
 
+        // ========== Load Safety Parameters ==========
+        this->declare_parameter("safety.max_torque_default", 20.0);
+        this->declare_parameter("safety.joint_state_timeout_ms", 100);
+        this->declare_parameter("safety.max_control_period_ms", 10);
+        this->declare_parameter("safety.max_velocity_sanity", 20.0);
+        this->declare_parameter("safety.max_position_error", 0.8);
+
+        max_torque_default_ = this->get_parameter("safety.max_torque_default").as_double();
+        joint_state_timeout_sec_ = this->get_parameter("safety.joint_state_timeout_ms").as_int() / 1000.0;
+        max_control_period_sec_ = this->get_parameter("safety.max_control_period_ms").as_int() / 1000.0;
+        max_velocity_sanity_ = this->get_parameter("safety.max_velocity_sanity").as_double();
+        max_position_error_ = this->get_parameter("safety.max_position_error").as_double();
+
+        // Load per-joint torque limits (prefer config, fallback to URDF, then default)
+        max_torque_per_joint_.resize(6, max_torque_default_);  // Initialize with default
+
+        // First try to load from URDF (this happens in initializeDynamics)
+        // We'll extract limits from URDF after it's loaded
+
+        // Then override with config if specified
+        for (int i = 1; i <= 6; i++)
+        {
+            std::string param_name = "safety.max_torque_per_joint.joint_" + std::to_string(i);
+            this->declare_parameter(param_name, -1.0);  // -1 means "use URDF value"
+            double config_limit = this->get_parameter(param_name).as_double();
+            if (config_limit > 0)  // If explicitly set in config
+            {
+                max_torque_per_joint_[i-1] = config_limit;
+            }
+        }
+
+        RCLCPP_INFO(this->get_logger(), "[SAFETY] Timeout: %.0f ms, Velocity sanity: %.1f rad/s",
+                    joint_state_timeout_sec_ * 1000.0, max_velocity_sanity_);
+
         // ========== 级联PID初始化 ==========
         this->declare_parameter("use_cascade_pid", false); // 默认启用
         cascade_pid_enabled_ = this->get_parameter("use_cascade_pid").as_bool();
@@ -261,6 +295,16 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_; // 力矩发布者
     double control_frequency_;                                                  // 控制频率 (Hz)
 
+    // ========== Safety Parameters ==========
+    rclcpp::Time last_joint_state_time_;      // Last time joint state was received
+    rclcpp::Time last_control_loop_time_;     // Last control loop execution time
+    double joint_state_timeout_sec_ = 0.1;    // 100ms timeout
+    double max_control_period_sec_ = 0.01;    // 10ms (200Hz = 5ms nominal)
+    std::vector<double> max_torque_per_joint_;// Nm - per joint torque limits
+    double max_torque_default_ = 20.0;        // Nm - fallback torque limit
+    double max_velocity_sanity_ = 20.0;       // rad/s - sensor sanity check
+    double max_position_error_ = 0.8;         // rad - emergency stop threshold
+
     // Action 回调函数
     rclcpp_action::GoalResponse handleGoal(
         const rclcpp_action::GoalUUID &uuid,
@@ -273,6 +317,32 @@ private:
         const std::shared_ptr<GoalHandleFJT> goal_handle);
 
     void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg); // 关节状态回调
+
+    // ========== Safety Functions ==========
+    void emergencyStop(const std::string& reason) {
+        RCLCPP_ERROR(this->get_logger(), "[EMERGENCY STOP] %s", reason.c_str());
+
+        // 1. Send zero torque immediately
+        std_msgs::msg::Float64MultiArray safe_msg;
+        safe_msg.data.resize(6, 0.0);
+        torque_pub_->publish(safe_msg);
+
+        // 2. Abort trajectory if executing
+        if (is_executing_ && current_goal_handle_) {
+            auto result = std::make_shared<FollowJointTrajectory::Result>();
+            result->error_code = FollowJointTrajectory::Result::PATH_TOLERANCE_VIOLATED;
+            result->error_string = "Emergency stop: " + reason;
+            current_goal_handle_->abort(result);
+            is_executing_ = false;
+            current_goal_handle_.reset();
+        }
+
+        // 3. Clear target (prevents PD control from trying to move)
+        has_target_ = false;
+
+        // 4. Reset state to prevent resume
+        state_received_ = false;
+    }
 
     bool initializeDynamics(); // 动力学初始化
 
@@ -401,12 +471,44 @@ void TorqueControllerActionServer::jointStateCallback(
         return;
     }
 
+    // ========== SAFETY: Validate sensor data for NaN/Inf and sanity ==========
+    for (size_t i = 0; i < 6; i++)
+    {
+        // Check for NaN or Inf
+        if (!std::isfinite(msg->position[i]) || !std::isfinite(msg->velocity[i]))
+        {
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "[SAFETY] Non-finite sensor data on joint %zu (pos=%.2f, vel=%.2f), rejecting!",
+                i, msg->position[i], msg->velocity[i]);
+            return;  // Reject entire message
+        }
+
+        // Sanity check: position within expanded limits (warn but accept)
+        if (std::abs(msg->position[i]) > 2 * M_PI)
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                "[SAFETY] Joint %zu position out of range: %.2f rad", i, msg->position[i]);
+        }
+
+        // Sanity check: velocity spike detection
+        if (std::abs(msg->velocity[i]) > max_velocity_sanity_)
+        {
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "[SAFETY] Joint %zu velocity spike: %.2f rad/s (limit: %.1f), rejecting!",
+                i, msg->velocity[i], max_velocity_sanity_);
+            return;  // Reject entire message - likely sensor glitch
+        }
+    }
+
     // 提取位置和速度
     for (size_t i = 0; i < 6; i++)
     {
         q_actual_(i) = msg->position[i];
         q_dot_actual_(i) = msg->velocity[i];
     }
+
+    // Update timestamp for timeout detection
+    last_joint_state_time_ = this->now();
 
     // ========== 卡尔曼滤波处理 ==========
     // 注意：卡尔曼滤波器只用于速度滤波，位置保持原始测量值（编码器精度高）
@@ -498,6 +600,38 @@ bool TorqueControllerActionServer::initializeDynamics()
         RCLCPP_ERROR(this->get_logger(), "[ERROR] URDF parsing failed");
         return false;
     }
+
+    // ========== SAFETY: Extract joint effort limits from URDF ==========
+    std::vector<std::string> joint_names = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"};
+    for (size_t i = 0; i < 6; i++)
+    {
+        auto joint = urdf_model.getJoint(joint_names[i]);
+        if (joint && joint->limits)
+        {
+            double urdf_limit = joint->limits->effort;
+            // Only use URDF limit if not overridden in config (config value <= 0)
+            if (max_torque_per_joint_[i] <= 0)
+            {
+                max_torque_per_joint_[i] = urdf_limit;
+                RCLCPP_INFO(this->get_logger(), "[SAFETY] Joint %s: Using URDF effort limit: %.1f Nm",
+                            joint_names[i].c_str(), urdf_limit);
+            }
+            else
+            {
+                RCLCPP_INFO(this->get_logger(), "[SAFETY] Joint %s: Using config override: %.1f Nm (URDF: %.1f Nm)",
+                            joint_names[i].c_str(), max_torque_per_joint_[i], urdf_limit);
+            }
+        }
+        else
+        {
+            RCLCPP_WARN(this->get_logger(), "[SAFETY] Joint %s: No URDF limit found, using default: %.1f Nm",
+                        joint_names[i].c_str(), max_torque_per_joint_[i]);
+        }
+    }
+
+    RCLCPP_INFO(this->get_logger(), "[SAFETY] Final torque limits (Nm): [%.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
+                max_torque_per_joint_[0], max_torque_per_joint_[1], max_torque_per_joint_[2],
+                max_torque_per_joint_[3], max_torque_per_joint_[4], max_torque_per_joint_[5]);
 
     // 3. 提取 KDL 树
     KDL::Tree kdl_tree;
@@ -685,11 +819,41 @@ void TorqueControllerActionServer::computeFeedbackTorque(
     for (size_t i = 0; i < 6; i++)
     {
         tau_fb(i) = Kp_(i) * error_p(i) + Kd_(i) * error_v(i);
+
+        // ========== SAFETY: Torque saturation (hardware protection) ==========
+        double joint_limit = (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
+        if (tau_fb(i) > joint_limit)
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "[SAFETY] Joint %zu feedback torque saturated: %.2f -> %.2f Nm",
+                i, tau_fb(i), joint_limit);
+            tau_fb(i) = joint_limit;
+        }
+        else if (tau_fb(i) < -joint_limit)
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "[SAFETY] Joint %zu feedback torque saturated: %.2f -> -%.2f Nm",
+                i, tau_fb(i), joint_limit);
+            tau_fb(i) = -joint_limit;
+        }
     }
 }
 
 void TorqueControllerActionServer::controlLoop()
 {
+    // ========== SAFETY: Monitor control loop timing ==========
+    rclcpp::Time now = this->now();
+    if (control_loop_count_ > 0)  // Skip first iteration
+    {
+        double period = (now - last_control_loop_time_).seconds();
+        if (period > max_control_period_sec_)
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                "[SAFETY] Control loop slow: %.1f ms (expected 5ms @ 200Hz)", period * 1000.0);
+        }
+    }
+    last_control_loop_time_ = now;
+
     // ========== 新增：周期性打印卡尔曼增益 ==========
     control_loop_count_++;
 
@@ -721,6 +885,27 @@ void TorqueControllerActionServer::controlLoop()
             return; // 还没收到状态，无法计算
         }
 
+        // ========== SAFETY: Check joint state timeout ==========
+        double time_since_last_state = (this->now() - last_joint_state_time_).seconds();
+        if (time_since_last_state > joint_state_timeout_sec_)
+        {
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "[SAFETY] Joint state timeout: %.3fs since last update (limit: %.0f ms)",
+                time_since_last_state, joint_state_timeout_sec_ * 1000.0);
+
+            // Send zero torque for safety
+            std_msgs::msg::Float64MultiArray safe_msg;
+            safe_msg.data.resize(6, 0.0);
+            torque_pub_->publish(safe_msg);
+
+            // Abort any active trajectory
+            if (current_goal_handle_)
+            {
+                emergencyStop("Joint state timeout");
+            }
+            return;
+        }
+
         // 计算重力补偿
         KDL::JntArray tau_gravity(6);
         dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
@@ -742,6 +927,27 @@ void TorqueControllerActionServer::controlLoop()
         for (size_t i = 0; i < 6; i++)
         {
             torque_msg.data[i] = tau_gravity(i) + tau_pd(i);
+
+            // ========== SAFETY: NaN/Inf check before publishing ==========
+            if (!std::isfinite(torque_msg.data[i]))
+            {
+                RCLCPP_ERROR(this->get_logger(),
+                    "[SAFETY] Non-finite torque detected on joint %zu in idle mode (gravity=%.2f, pd=%.2f)",
+                    i, tau_gravity(i), tau_pd(i));
+                emergencyStop("Non-finite torque in idle mode");
+                return;
+            }
+
+            // ========== SAFETY: Final torque saturation ==========
+            double joint_limit = (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
+            if (torque_msg.data[i] > joint_limit)
+            {
+                torque_msg.data[i] = joint_limit;
+            }
+            else if (torque_msg.data[i] < -joint_limit)
+            {
+                torque_msg.data[i] = -joint_limit;
+            }
         }
         torque_pub_->publish(torque_msg);
 
@@ -791,6 +997,17 @@ void TorqueControllerActionServer::controlLoop()
         for (size_t i = 0; i < 6; i++)
         {
             hold_torque.data[i] = tau_gravity(i) + tau_pd(i);
+
+            // ========== SAFETY: NaN/Inf check and saturation ==========
+            if (!std::isfinite(hold_torque.data[i]))
+            {
+                RCLCPP_ERROR(this->get_logger(),
+                    "[SAFETY] Non-finite torque at trajectory completion on joint %zu", i);
+                emergencyStop("Non-finite torque at trajectory completion");
+                return;
+            }
+            double joint_limit = (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
+            hold_torque.data[i] = std::max(-joint_limit, std::min(joint_limit, hold_torque.data[i]));
         }
         torque_pub_->publish(hold_torque);
 
@@ -842,7 +1059,26 @@ void TorqueControllerActionServer::controlLoop()
     torque_msg.data.resize(6);
     for (size_t i = 0; i < 6; i++)
     {
-        torque_msg.data[i] = tau_total(i);
+        // ========== SAFETY: NaN/Inf check before publishing ==========
+        if (!std::isfinite(tau_total(i)))
+        {
+            RCLCPP_ERROR(this->get_logger(),
+                "[SAFETY] Non-finite torque detected on joint %zu during trajectory (ff=%.2f, fb=%.2f)",
+                i, tau_ff(i), tau_fb(i));
+            emergencyStop("Non-finite torque during trajectory execution");
+            return;
+        }
+
+        // ========== SAFETY: Final torque saturation ==========
+        double joint_limit = (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
+        torque_msg.data[i] = std::max(-joint_limit, std::min(joint_limit, tau_total(i)));
+
+        if (std::abs(tau_total(i)) > joint_limit)
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "[SAFETY] Joint %zu total torque saturated: %.2f -> %.2f Nm",
+                i, tau_total(i), torque_msg.data[i]);
+        }
     }
     torque_pub_->publish(torque_msg);
 
@@ -984,7 +1220,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
                             R_pos, R_vel);
             }
         }
-        // ========== 新增：级联PID参数 ==========
+        // ========== 新增：级联PID参数 ==========cascade_pid_
         else if (name.find("cascade_pid.joint_") == 0 && cascade_pid_enabled_)
         {
             // 解析参数名: cascade_pid.joint_1.pos_Kp

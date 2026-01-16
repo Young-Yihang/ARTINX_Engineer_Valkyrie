@@ -1,5 +1,7 @@
 
 #include "dynamics_computer.hpp"
+#include <cmath>  // For std::isfinite
+#include <iostream>  // For std::cerr
 
 DynamicsComputer::DynamicsComputer(const KDL::Chain &chain,
                                    const KDL::Vector &gravity)
@@ -42,6 +44,21 @@ void DynamicsComputer::computeFeedforwardTorque(
 
         // 加上 C 和 G
         tau_ff(i) += C(i) + G(i);
+
+        // ========== SAFETY: Check for NaN/Inf in dynamics computation ==========
+        if (!std::isfinite(tau_ff(i)))
+        {
+            // Log error but return zero torque as safe fallback
+            // Note: We use std::cerr here as we don't have access to ROS logger
+            std::cerr << "[SAFETY] Dynamics solver produced non-finite torque on joint "
+                      << i << " (M*qdd + C + G = NaN/Inf), returning zero" << std::endl;
+            std::cerr << "  Inputs: q[" << i << "]=" << q(i)
+                      << ", qd[" << i << "]=" << qd(i)
+                      << ", qdd[" << i << "]=" << qdd(i) << std::endl;
+            std::cerr << "  Components: C[" << i << "]=" << C(i)
+                      << ", G[" << i << "]=" << G(i) << std::endl;
+            tau_ff(i) = 0.0;  // Safe fallback
+        }
     }
 }
 
@@ -51,6 +68,17 @@ void DynamicsComputer::computeGravityTorque(
 {
     // 直接计算重力项 G(q)
     dyn_param_->JntToGravity(q, tau_ff);
+
+    // ========== SAFETY: Check for NaN/Inf in gravity computation ==========
+    for (size_t i = 0; i < q.rows(); i++)
+    {
+        if (!std::isfinite(tau_ff(i)))
+        {
+            std::cerr << "[SAFETY] Gravity computation produced non-finite torque on joint "
+                      << i << ", returning zero" << std::endl;
+            tau_ff(i) = 0.0;  // Safe fallback
+        }
+    }
 }
 
 void DynamicsComputer::getMassMatrix(const KDL::JntArray& q, 
