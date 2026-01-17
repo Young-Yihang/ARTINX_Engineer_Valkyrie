@@ -1,8 +1,8 @@
 #include "cascade_pid.hpp"
 
 // CascadePid: 外环P(位置)→内环PI(速度)→力矩
-CascadePid::CascadePid(const PidGains& pos_gains,
-                       const PidGains& vel_gains,
+CascadePid::CascadePid(const PidGains &pos_gains,
+                       const PidGains &vel_gains,
                        double max_vel,
                        double max_integral_pos,
                        double max_integral_vel)
@@ -24,7 +24,7 @@ CascadePid::CascadePid(const PidGains& pos_gains,
 double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, double dt)
 {
     // ========== 外环: 位置PID -> 期望速度 ==========
-    
+
     // 1. 计算位置误差
     pos_error_ = pos_ref - pos_fdb;
 
@@ -33,7 +33,7 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
 
     // 3. 位置积分项 (条件积分抗饱和)
     //    只有在误差较小时才积分,防止大误差时积分饱和
-    const double integral_threshold = 0.1;  // 0.1 rad ≈ 5.7°
+    const double integral_threshold = 0.1; // 0.1 rad ≈ 5.7°
     if (std::abs(pos_error_) < integral_threshold)
     {
         pos_integral_ += pos_error_ * dt;
@@ -44,7 +44,7 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
 
     // 4. 位置微分项 (基于误差的微分)
     double pos_d = 0.0;
-    if (dt > 1e-6)  // 避免除零
+    if (dt > 1e-6) // 避免除零
     {
         double pos_error_derivative = (pos_error_ - pos_error_prev_) / dt;
         pos_d = pos_gains_.kd * pos_error_derivative;
@@ -55,7 +55,7 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
 
     // 6. 速度饱和保护
     ref_vel_fb = clamp(ref_vel_fb, -max_vel_, max_vel_);
-    
+
     // 7. 最终期望速度 = 反馈值（无前馈时）
     ref_vel_ = ref_vel_fb;
 
@@ -63,7 +63,7 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
     pos_error_prev_ = pos_error_;
 
     // ========== 内环: 速度PID -> 控制力矩 ==========
-    
+
     // 1. 计算速度误差
     vel_error_ = ref_vel_ - vel_fdb;
 
@@ -71,7 +71,7 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
     double vel_p = vel_gains_.kp * vel_error_;
 
     // 3. 速度积分项 (条件积分抗饱和)
-    const double vel_integral_threshold = 0.5;  // 0.5 rad/s
+    const double vel_integral_threshold = 0.5; // 0.5 rad/s
     if (std::abs(vel_error_) < vel_integral_threshold)
     {
         vel_integral_ += vel_error_ * dt;
@@ -82,7 +82,7 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
 
     // 4. 速度微分项 (基于误差的微分)
     double vel_d = 0.0;
-    if (dt > 1e-6)  // 避免除零
+    if (dt > 1e-6) // 避免除零
     {
         double vel_error_derivative = (vel_error_ - vel_error_prev_) / dt;
         vel_d = vel_gains_.kd * vel_error_derivative;
@@ -110,12 +110,12 @@ void CascadePid::reset()
     ref_vel_ = 0.0;
 }
 
-void CascadePid::setPositionGains(const PidGains& gains)
+void CascadePid::setPositionGains(const PidGains &gains)
 {
     pos_gains_ = gains;
 }
 
-void CascadePid::setVelocityGains(const PidGains& gains)
+void CascadePid::setVelocityGains(const PidGains &gains)
 {
     vel_gains_ = gains;
 }
@@ -138,15 +138,15 @@ MultiJointCascadePid::MultiJointCascadePid(size_t num_joints)
 }
 
 void MultiJointCascadePid::setJointParams(size_t joint_idx,
-                                          const PidGains& pos_gains,
-                                          const PidGains& vel_gains,
+                                          const PidGains &pos_gains,
+                                          const PidGains &vel_gains,
                                           double max_vel,
                                           double max_integral_pos,
                                           double max_integral_vel)
 {
     if (joint_idx >= controllers_.size())
     {
-        return;  // 索引越界保护
+        return; // 索引越界保护
     }
 
     // 重新构造该关节的控制器
@@ -154,11 +154,11 @@ void MultiJointCascadePid::setJointParams(size_t joint_idx,
                                          max_integral_pos, max_integral_vel);
 }
 
-void MultiJointCascadePid::compute(const std::vector<double>& pos_ref,
-                                   const std::vector<double>& pos_fdb,
-                                   const std::vector<double>& vel_fdb,
+void MultiJointCascadePid::compute(const std::vector<double> &pos_ref,
+                                   const std::vector<double> &pos_fdb,
+                                   const std::vector<double> &vel_fdb,
                                    double dt,
-                                   std::vector<double>& torque_out)
+                                   std::vector<double> &torque_out)
 {
     // 确保输出向量大小正确
     torque_out.resize(controllers_.size());
@@ -172,13 +172,13 @@ void MultiJointCascadePid::compute(const std::vector<double>& pos_ref,
 
 void MultiJointCascadePid::resetAll()
 {
-    for (auto& controller : controllers_)
+    for (auto &controller : controllers_)
     {
         controller.reset();
     }
 }
 
-CascadePid& MultiJointCascadePid::getJointController(size_t joint_idx)
+CascadePid &MultiJointCascadePid::getJointController(size_t joint_idx)
 {
     return controllers_[joint_idx];
 }

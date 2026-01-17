@@ -13,7 +13,7 @@ class DynamicsComputer
 {
 public:
     // 日志回调函数类型定义
-    using LogCallback = std::function<void(const std::string&)>;
+    using LogCallback = std::function<void(const std::string &)>;
 
     DynamicsComputer(const KDL::Chain &chain, // 构造函数，传入重力向量和KDL运动链
                      const KDL::Vector &gravity = KDL::Vector(0.0, 0.0, -9.81));

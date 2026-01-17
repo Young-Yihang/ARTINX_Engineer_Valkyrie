@@ -21,8 +21,8 @@ public:
         // 1. 声明参数
         this->declare_parameter("serial_port", "/dev/ttyACM0");
         this->declare_parameter("baud_rate", 921600);
-        this->declare_parameter("publish_rate", 200.0); // 100Hz 发布频率
-        this->declare_parameter("simulation_mode", false);  // 新增：仿真模式参数
+        this->declare_parameter("publish_rate", 200.0);    // 100Hz 发布频率
+        this->declare_parameter("simulation_mode", false); // 新增：仿真模式参数
 
         // 2. 获取参数
         std::string port = this->get_parameter("serial_port").as_string();
@@ -32,8 +32,9 @@ public:
 
         RCLCPP_INFO(this->get_logger(), "[INIT] Serial port: %s, Baud: %d",
                     port.c_str(), baud);
-        
-        if (simulation_mode_) {
+
+        if (simulation_mode_)
+        {
             RCLCPP_INFO(this->get_logger(), "[SIMULATION MODE] Serial TX only, no RX feedback");
         }
 
@@ -49,11 +50,14 @@ public:
 
         // 5. 启动收发线程
         running_ = true;
-        
-        if (simulation_mode_) {
+
+        if (simulation_mode_)
+        {
             // 仿真模式：不启动串口接收线程，等待MuJoCo反馈
             RCLCPP_INFO(this->get_logger(), "[OK] Simulation mode - Serial TX only, waiting for MuJoCo feedback");
-        } else {
+        }
+        else
+        {
             // 真机模式：启动串口接收线程
             receive_thread_ = std::thread(&HardwareInterfaceNode::receiveLoop, this);
             RCLCPP_INFO(this->get_logger(), "[OK] Hardware mode - Serial RX/TX enabled");
@@ -91,7 +95,7 @@ private:
     // ========== 成员变量 ==========
     int num_joints_;
     std::atomic<bool> running_;
-    bool simulation_mode_;  // 新增：是否为仿真模式（不从串口读取）
+    bool simulation_mode_; // 新增：是否为仿真模式（不从串口读取）
 
     // 串口
     std::string device_name_;
@@ -197,7 +201,9 @@ private:
                 {
                     serial_port_->close();
                 }
-                catch (...) {}
+                catch (...)
+                {
+                }
                 return false;
             }
 
@@ -290,7 +296,9 @@ private:
             {
                 serial_port_->close();
             }
-            catch (...) {}
+            catch (...)
+            {
+            }
         }
     }
 
@@ -323,62 +331,62 @@ private:
                 switch (state)
                 {
                 case WAIT_SOF:
+                {
+                    uint8_t byte = 0;
+                    if (!readExact(&byte, 1))
                     {
-                        uint8_t byte = 0;
-                        if (!readExact(&byte, 1))
-                        {
-                            state = WAIT_SOF;
-                            break;
-                        }
-
-                        if (byte == SerialProtocol::SOF)
-                        {
-                            buffer.clear();
-                            buffer.push_back(byte);
-                            state = READ_LEN;
-                        }
+                        state = WAIT_SOF;
+                        break;
                     }
-                    break;
+
+                    if (byte == SerialProtocol::SOF)
+                    {
+                        buffer.clear();
+                        buffer.push_back(byte);
+                        state = READ_LEN;
+                    }
+                }
+                break;
 
                 case READ_LEN:
+                {
+                    uint8_t len_bytes[2] = {0, 0};
+                    if (!readExact(len_bytes, 2))
                     {
-                        uint8_t len_bytes[2] = {0, 0};
-                        if (!readExact(len_bytes, 2))
-                        {
-                            state = WAIT_SOF;
-                            break;
-                        }
-                        buffer.push_back(len_bytes[0]);
-                        buffer.push_back(len_bytes[1]);
-
-                        data_len = len_bytes[0] | (len_bytes[1] << 8);
-                        state = READ_HEADER_CRC;
+                        state = WAIT_SOF;
+                        break;
                     }
-                    break;
+                    buffer.push_back(len_bytes[0]);
+                    buffer.push_back(len_bytes[1]);
+
+                    data_len = len_bytes[0] | (len_bytes[1] << 8);
+                    state = READ_HEADER_CRC;
+                }
+                break;
 
                 case READ_HEADER_CRC:
+                {
+                    uint8_t byte = 0;
+                    if (!readExact(&byte, 1))
                     {
-                        uint8_t byte = 0;
-                        if (!readExact(&byte, 1))
-                        {
-                            state = WAIT_SOF;
-                            break;
-                        }
-                        buffer.push_back(byte);
-
-                        // Validate Header CRC8 (SOF + Len_L + Len_H)
-                        uint8_t expected_crc = SerialProtocol::Get_CRC8_Check_Sum(buffer.data(), 3, 0xFF);
-                        if (byte == expected_crc)
-                        {
-                            state = READ_BODY;
-                        }
-                        else
-                        {
-                            RCLCPP_WARN(this->get_logger(), "[RX] Header CRC Fail");
-                            state = WAIT_SOF;
-                        }
+                        state = WAIT_SOF;
+                        break;
                     }
-                    break;
+                    buffer.push_back(byte);
+
+                    // Validate Header CRC8 (SOF + Len_L + Len_H)
+                    uint8_t expected_crc = SerialProtocol::Get_CRC8_Check_Sum(buffer.data(), 3, 0xFF);
+                    if (byte == expected_crc)
+                    {
+                        state = READ_BODY;
+                    }
+                    else
+                    {
+                        RCLCPP_WARN(this->get_logger(), "[RX] Header CRC Fail");
+                        state = WAIT_SOF;
+                    }
+                }
+                break;
 
                 case READ_BODY:
                     // Body size = DataLen + 2 (CRC16)
@@ -421,7 +429,9 @@ private:
                         serial_port_->close();
                     }
                 }
-                catch (...) {}
+                catch (...)
+                {
+                }
                 state = WAIT_SOF;
             }
         }

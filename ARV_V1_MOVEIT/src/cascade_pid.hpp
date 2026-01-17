@@ -10,9 +10,9 @@
  */
 struct PidGains
 {
-    double kp;  // 比例增益
-    double ki;  // 积分增益
-    double kd;  // 微分增益
+    double kp; // 比例增益
+    double ki; // 积分增益
+    double kd; // 微分增益
 
     PidGains() : kp(0.0), ki(0.0), kd(0.0) {}
     PidGains(double p, double i, double d) : kp(p), ki(i), kd(d) {}
@@ -20,7 +20,7 @@ struct PidGains
 
 /**
  * @brief 单关节级联PID: 外环P(位置→速度), 内环PI(速度→力矩)
- */
+ *
  *   - 速度饱和保护
  *   - 微分滤波 (可选,降低噪声影响)
  */
@@ -35,8 +35,8 @@ public:
      * @param max_integral_pos 位置环积分限幅
      * @param max_integral_vel 速度环积分限幅
      */
-    CascadePid(const PidGains& pos_gains,
-               const PidGains& vel_gains,
+    CascadePid(const PidGains &pos_gains,
+               const PidGains &vel_gains,
                double max_vel,
                double max_integral_pos = 1e10,
                double max_integral_vel = 1e10);
@@ -59,12 +59,12 @@ public:
     /**
      * @brief 设置位置环增益
      */
-    void setPositionGains(const PidGains& gains);
+    void setPositionGains(const PidGains &gains);
 
     /**
      * @brief 设置速度环增益
      */
-    void setVelocityGains(const PidGains& gains);
+    void setVelocityGains(const PidGains &gains);
 
     /**
      * @brief 设置速度饱和限制
@@ -88,24 +88,24 @@ public:
 
 private:
     // ========== 位置环(外环)参数 ==========
-    PidGains pos_gains_;         // 位置环PID增益
-    double pos_error_;           // 位置误差 e_p = ref - fdb
-    double pos_error_prev_;      // 上一次位置误差 (用于微分)
-    double pos_integral_;        // 位置误差积分
-    double max_integral_pos_;    // 位置积分限幅
+    PidGains pos_gains_;      // 位置环PID增益
+    double pos_error_;        // 位置误差 e_p = ref - fdb
+    double pos_error_prev_;   // 上一次位置误差 (用于微分)
+    double pos_integral_;     // 位置误差积分
+    double max_integral_pos_; // 位置积分限幅
 
     // ========== 速度环(内环)参数 ==========
-    PidGains vel_gains_;         // 速度环PID增益
-    double vel_error_;           // 速度误差 e_v = ref - fdb
-    double vel_error_prev_;      // 上一次速度误差 (用于微分)
-    double vel_integral_;        // 速度误差积分
-    double max_integral_vel_;    // 速度积分限幅
+    PidGains vel_gains_;      // 速度环PID增益
+    double vel_error_;        // 速度误差 e_v = ref - fdb
+    double vel_error_prev_;   // 上一次速度误差 (用于微分)
+    double vel_integral_;     // 速度误差积分
+    double max_integral_vel_; // 速度积分限幅
 
     // ========== 饱和限制 ==========
-    double max_vel_;             // 速度饱和限制 (rad/s)
+    double max_vel_; // 速度饱和限制 (rad/s)
 
     // ========== 内部状态 ==========
-    double ref_vel_;             // 外环输出的参考速度 (rad/s)
+    double ref_vel_; // 外环输出的参考速度 (rad/s)
 
     /**
      * @brief 限幅函数
@@ -118,7 +118,7 @@ private:
 
 /**
  * @brief 多关节的级联PID控制器
- * 
+ *
  * 管理6个关节的级联PID控制器
  */
 class MultiJointCascadePid
@@ -138,8 +138,8 @@ public:
      * @param max_vel 速度限制
      */
     void setJointParams(size_t joint_idx,
-                        const PidGains& pos_gains,
-                        const PidGains& vel_gains,
+                        const PidGains &pos_gains,
+                        const PidGains &vel_gains,
                         double max_vel,
                         double max_integral_pos = 1e10,
                         double max_integral_vel = 1e10);
@@ -152,11 +152,11 @@ public:
      * @param dt 控制周期 (s)
      * @param torque_out 输出力矩向量 (6维)
      */
-    void compute(const std::vector<double>& pos_ref,
-                 const std::vector<double>& pos_fdb,
-                 const std::vector<double>& vel_fdb,
+    void compute(const std::vector<double> &pos_ref,
+                 const std::vector<double> &pos_fdb,
+                 const std::vector<double> &vel_fdb,
                  double dt,
-                 std::vector<double>& torque_out);
+                 std::vector<double> &torque_out);
 
     /**
      * @brief 重置所有关节的积分器
@@ -166,10 +166,10 @@ public:
     /**
      * @brief 获取单个关节的控制器 (用于调试)
      */
-    CascadePid& getJointController(size_t joint_idx);
+    CascadePid &getJointController(size_t joint_idx);
 
 private:
-    std::vector<CascadePid> controllers_;  // 每个关节一个级联PID
+    std::vector<CascadePid> controllers_; // 每个关节一个级联PID
 };
 
 #endif // CASCADE_PID_HPP
