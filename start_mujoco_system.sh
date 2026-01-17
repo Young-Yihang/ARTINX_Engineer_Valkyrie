@@ -1,19 +1,5 @@
 #!/bin/bash
-
-################################################################################
-# ARV_V1 机械臂控制系统 - 交互式启动脚本
-#
-# 功能：
-#   1. 纯仿真模式 - MuJoCo物理仿真
-#   2. 串口真机 + 数字孪生
-#
-# 使用方法：
-#   chmod +x start_mujoco_system.sh
-#   ./start_mujoco_system.sh
-#
-# Author: ARV V1 Team
-# Date: 2026-01-08
-################################################################################
+# ARV_V1启动脚本: 仿真模式 / 串口真机+孪生模式
 
 set -e
 
@@ -159,8 +145,9 @@ start_node() {
 # ========== 模式1: 纯仿真 ==========
 start_sim_mode() {
     log_info "启动纯仿真模式..."
+    local config_path="$WORKSPACE_DIR/src/ARV_V1_MOVEIT/config/controller_params.yaml"
     start_node "MoveIt+RViz" "ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py" 0
-    start_node "TorqueController" "ros2 run ARV_V1_MOVEIT torque_controller_node" 0
+    start_node "TorqueController" "ros2 run ARV_V1_MOVEIT torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
     start_node "MuJoCo(仿真)" "ros2 run ARV_V1_MOVEIT mujoco_interface_node" 0
 }
@@ -169,8 +156,9 @@ start_sim_mode() {
 start_serial_mode() {
     detect_serial_device || exit 1
     log_info "启动串口真机模式 (设备: $DETECTED_SERIAL_DEVICE)..."
+    local config_path="$WORKSPACE_DIR/src/ARV_V1_MOVEIT/config/controller_params.yaml"
     start_node "MoveIt+RViz" "ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py" 0
-    start_node "TorqueController" "ros2 run ARV_V1_MOVEIT torque_controller_node" 0
+    start_node "TorqueController" "ros2 run ARV_V1_MOVEIT torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
     start_node "SerialInterface" "ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 0
     start_node "MuJoCo(孪生)" "ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true" 0

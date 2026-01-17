@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-ARV_V1 性能记录与评估工具
+ARV_V1 性能记录与评估工具 (Cascade P+PI)
 订阅 /joint_states 和 action feedback，实时计算控制性能指标
-用法: python3 record_metrics.py [--duration 10]
+用法: python3 record_metrics.py [--duration 10] [--show-params]
 """
 import rclpy
 from rclpy.node import Node
@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import List
 import csv
 from datetime import datetime
+import subprocess
 
 @dataclass
 class JointData:
@@ -36,9 +37,10 @@ class Metrics:
     mean_pos_error: float = 0.0
 
 class MetricsRecorder(Node):
-    def __init__(self, duration: float = 10.0):
+    def __init__(self, duration: float = 10.0, show_params: bool = False):
         super().__init__('metrics_recorder')
         self.duration = duration
+        self.show_params = show_params
         self.start_time = None
         self.joint_data = [JointData() for _ in range(6)]
         self.torques = [[] for _ in range(6)]
@@ -108,8 +110,14 @@ class MetricsRecorder(Node):
         samples = len(self.joint_data[0].positions)
 
         print("\n" + "="*70)
-        print(f"  ARV_V1 控制性能报告 | 采样: {samples} | 时长: {self.duration:.1f}s")
+        print(f"  ARV_V1 控制性能报告 (Cascade P+PI) | 采样: {samples} | 时长: {self.duration:.1f}s")
         print("="*70)
+        
+        # 如果需要显示参数
+        if self.show_params:
+            self._print_cascade_params()
+            print("-"*70)
+        
         print(f"{'关节':<6} {'RMSE位置(rad)':<14} {'最大误差':<12} {'RMSE速度':<12} {'力矩饱和':<10}")
         print("-"*70)
 
@@ -130,10 +138,38 @@ class MetricsRecorder(Node):
         if total_sat > 0:
             print(f"  \033[91m[警告]\033[0m 力矩饱和 {total_sat} 次，考虑降低增益")
         if avg_rmse > 0.01:
-            print(f"  \033[93m[建议]\033[0m RMSE较大，可尝试增大Kp")
+            print(f"  \033[93m[建议]\033[0m RMSE较大，可尝试增大 pos_Kp 或 vel_Kp")
         elif avg_rmse < 0.001:
             print(f"  \033[92m[良好]\033[0m 跟踪精度优秀")
         print("="*70)
+
+    def _print_cascade_params(self):
+        """打印当前级联PID参数"""
+        print("\n当前Cascade P+PI参数:")
+        print(f"  {'关节':<8} {'pos_Kp':<10} {'vel_Kp':<10} {'vel_Ki':<10} {'vel_limit':<10}")
+        
+        for i in range(1, 7):
+            pos_kp = self._ros2_param_get(f"cascade_pid.joint_{i}.pos_Kp")
+            vel_kp = self._ros2_param_get(f"cascade_pid.joint_{i}.vel_Kp")
+            vel_ki = self._ros2_param_get(f"cascade_pid.joint_{i}.vel_Ki")
+            vel_limit = self._ros2_param_get(f"cascade_pid.joint_{i}.vel_limit")
+            
+            print(f"  J{i:<7} {pos_kp:<10.2f} {vel_kp:<10.2f} {vel_ki:<10.4f} {vel_limit:<10.2f}")
+    
+    def _ros2_param_get(self, param_name: str) -> float:
+        """获取ROS2参数值"""
+        try:
+            result = subprocess.run(
+                ['ros2', 'param', 'get', '/torque_controller_action_server', param_name],
+                capture_output=True, text=True, timeout=2
+            )
+            if result.returncode == 0:
+                # 输出格式: "Double value is: 3.0"
+                value_str = result.stdout.strip().split(':')[-1].strip()
+                return float(value_str)
+        except:
+            pass
+        return 0.0
 
     def save_csv(self):
         """保存原始数据到CSV"""
@@ -155,10 +191,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--duration', '-d', type=float, default=10.0, help='记录时长(秒)')
     parser.add_argument('--save', '-s', action='store_true', help='保存CSV')
+    parser.add_argument('--show-params', '-p', action='store_true', help='显示Cascade P+PI参数')
     args = parser.parse_args()
 
     rclpy.init()
-    node = MetricsRecorder(args.duration)
+    node = MetricsRecorder(args.duration, args.show_params)
 
     end_time = time.time() + args.duration
     while time.time() < end_time:

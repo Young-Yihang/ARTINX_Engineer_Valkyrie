@@ -1,16 +1,4 @@
-// ============================================================
-// MuJoCo 接口节点 (MuJoCo Interface Node)
-//
-// 双模式运行：
-//   1. 物理仿真模式 (默认): 订阅力矩命令，运行物理仿真，发布关节状态
-//   2. 数字孪生模式 (visualization_only=true): 订阅关节状态，仅3D可视化
-//
-// 话题：
-//   仿真模式: 订阅 /effort_controller/commands, 发布 /joint_states
-//   孪生模式: 订阅 /joint_states, 不发布
-//
-// Stage: SIM2REAL - MuJoCo仿真/数字孪生
-// ============================================================
+// MuJoCo节点: 仿真模式(力矩→状态) / 孪生模式(状态→视觉化)
 
 #include "rclcpp/rclcpp.hpp"
 #include <sensor_msgs/msg/joint_state.hpp>

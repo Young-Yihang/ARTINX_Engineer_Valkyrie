@@ -1,25 +1,9 @@
-# 力矩控制器参数配置文件
-# 使用方法: 修改后执行 ./reload_params.sh 热重载到运行中的节点
+# 级联P+PI控制器参数 | 修改后执行 ./reload_params.sh 热重载
+# PD转Cascade: vel_Kp≈Kd_single, pos_Kp≈Kp_single/vel_Kp, vel_Ki从0.1*vel_Kp起调
 
 /torque_controller_action_server:
   ros__parameters:
-    # ========== PD 增益 ==========
-    Kp:
-      joint_1: 30.0
-      joint_2: 50.0
-      joint_3: 30.0
-      joint_4: 10.0
-      joint_5: 1.0
-      joint_6: 1.0
-    Kd:
-      joint_1: 1.0
-      joint_2: 1.0
-      joint_3: 1.0
-      joint_4: 0.3
-      joint_5: 1.0
-      joint_6: 1.0
-
-    # ========== 卡尔曼滤波器 ==========
+    # ========== 卡尔曼滤波器（速度滤波，降低噪声）==========
     kalman:
       enabled: true
       Q_pos: 1.0e-5    # 过程噪声：位置
@@ -27,70 +11,67 @@
       R_pos: 1.0e-3    # 测量噪声：位置
       R_vel: 2.5e-2    # 测量噪声：速度
 
-    # ========== 级联PID控制器 ==========
-    use_cascade_pid: false
-
+    # 级联P+PI: 外环P(位置→速度), 内环PI(速度→力矩)
     cascade_pid:
       joint_1:
-        pos_Kp: 10.0
-        pos_Ki: 0.0
-        pos_Kd: 1.0
-        vel_Kp: 50.0
-        vel_Ki: 5.0
-        vel_Kd: 0.0
-        vel_limit: 2.0
+        # 外环（位置）：只用P
+        pos_Kp: 3.0    # 从30降低10倍，避免振荡
+        pos_Ki: 0.0    # 外环不用积分
+        pos_Kd: 0.0    # 外环不用微分
+        # 内环（速度）：使用PI
+        vel_Kp: 7.0    # 从旧Kd_single=1.0转换
+        vel_Ki: 0.5    # 启用积分，改善速度跟随（保守值）
+        vel_Kd: 0.0    # 内环不用微分
+        vel_limit: 10.0 # 速度限幅 rad/s
+      
       joint_2:
-        pos_Kp: 10.0
+        pos_Kp: 5.0    # 降低10倍
         pos_Ki: 0.0
-        pos_Kd: 1.0
-        vel_Kp: 50.0
-        vel_Ki: 5.0
+        pos_Kd: 0.0
+        vel_Kp: 7.0
+        vel_Ki: 0.5    # 启用积分，改善速度跟随
         vel_Kd: 0.0
-        vel_limit: 2.0
+        vel_limit: 10.0
+      
       joint_3:
-        pos_Kp: 10.0
+        pos_Kp: 3.0    # 降低10倍
         pos_Ki: 0.0
-        pos_Kd: 1.0
-        vel_Kp: 50.0
-        vel_Ki: 5.0
+        pos_Kd: 0.0
+        vel_Kp: 6.0
+        vel_Ki: 0.5    # 启用积分，改善速度跟随
         vel_Kd: 0.0
-        vel_limit: 2.0
+        vel_limit: 10.0
+      
       joint_4:
-        pos_Kp: 10.0
+        pos_Kp: 1.5    # 进一步降低，消除振荡和饱和
         pos_Ki: 0.0
-        pos_Kd: 1.0
-        vel_Kp: 50.0
-        vel_Ki: 5.0
+        pos_Kd: 0.0
+        vel_Kp: 6.3
+        vel_Ki: 0.3    # 启用积分，改善速度跟随（保守）
         vel_Kd: 0.0
-        vel_limit: 2.0
+        vel_limit: 10.0
+      
       joint_5:
-        pos_Kp: 10.0
+        pos_Kp: 0.05    # 进一步降低，消除振荡和饱和
         pos_Ki: 0.0
-        pos_Kd: 1.0
-        vel_Kp: 50.0
-        vel_Ki: 5.0
+        pos_Kd: 0.0
+        vel_Kp: 1.0
+        vel_Ki: 0.1    # 启用积分，改善速度跟随（非常保守）
         vel_Kd: 0.0
-        vel_limit: 2.0
+        vel_limit: 10.0
+      
       joint_6:
-        pos_Kp: 10.0
+        pos_Kp: 0.05    # 进一步降低，消除振荡和饱和
         pos_Ki: 0.0
-        pos_Kd: 1.0
-        vel_Kp: 50.0
-        vel_Ki: 5.0
+        pos_Kd: 0.0
+        vel_Kp: 1.0
+        vel_Ki: 0.1    # 启用积分，改善速度跟随（非常保守）
         vel_Kd: 0.0
-        vel_limit: 2.0
+        vel_limit: 10.0
 
     # ========== Safety Parameters ==========
     safety:
-      # Per-joint torque limits (Nm) - Optional override of URDF effort limits
-      # Set to -1 or omit to use URDF values automatically
-      # Example override (uncomment to use):
-      # max_torque_per_joint:
-      #   joint_1: 50.0  # Override URDF value
-      #   joint_2: -1    # Use URDF value (20 Nm)
-      #   joint_3: -1    # Use URDF value (20 Nm)
-      #   joint_4: -1    # Use URDF value (1.2 Nm - seems low!)
-      #   joint_5: -1    # Use URDF value (7 Nm)
+      # 单关节力矩限制(Nm), 设-1使用URDF值
       #   joint_6: -1    # Use URDF value (1 Nm - seems low!)
 
       # Global fallback if neither config nor URDF specified

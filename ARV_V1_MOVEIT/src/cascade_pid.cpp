@@ -1,9 +1,6 @@
 #include "cascade_pid.hpp"
 
-// ============================================================================
-// CascadePid 实现
-// ============================================================================
-
+// CascadePid: 外环P(位置)→内环PI(速度)→力矩
 CascadePid::CascadePid(const PidGains& pos_gains,
                        const PidGains& vel_gains,
                        double max_vel,
@@ -53,13 +50,16 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
         pos_d = pos_gains_.kd * pos_error_derivative;
     }
 
-    // 5. 外环输出 = 期望速度
-    ref_vel_ = pos_p + pos_i + pos_d;
+    // 5. 外环输出 = 期望速度（反馈值）
+    double ref_vel_fb = pos_p + pos_i + pos_d;
 
     // 6. 速度饱和保护
-    ref_vel_ = clamp(ref_vel_, -max_vel_, max_vel_);
+    ref_vel_fb = clamp(ref_vel_fb, -max_vel_, max_vel_);
+    
+    // 7. 最终期望速度 = 反馈值（无前馈时）
+    ref_vel_ = ref_vel_fb;
 
-    // 7. 更新历史误差
+    // 8. 更新历史误差
     pos_error_prev_ = pos_error_;
 
     // ========== 内环: 速度PID -> 控制力矩 ==========
@@ -125,10 +125,7 @@ void CascadePid::setMaxVelocity(double max_vel)
     max_vel_ = max_vel;
 }
 
-// ============================================================================
-// MultiJointCascadePid 实现
-// ============================================================================
-
+// MultiJointCascadePid: 6关节级联PID管理器
 MultiJointCascadePid::MultiJointCascadePid(size_t num_joints)
 {
     // 为每个关节创建一个级联PID控制器

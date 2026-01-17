@@ -1,17 +1,4 @@
-// ============================================================
-// 硬件接口节点 (Hardware Interface Node)
-//
-// 职责:
-//   - 订阅 /effort_controller/commands 获取力矩指令
-//   - 通过串口发送力矩到下位机
-//   - 从串口接收关节状态 (位置、速度)
-//   - 发布到 /joint_states 供闭环控制和数字孪生可视化
-//
-// Stage: SIM2REAL - 串口通信
-// Author: ARV V1 Team
-// Date: 2025-11-04 (Updated: 2026-01-08 统一话题)
-// ============================================================
-
+// 硬件接口节点: 串口发送力矩指令, 接收关节状态发布至/joint_states
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ARV_V1 PD/PID 调参工具 - 交互式六关节调参 + 性能评估
-用法: python3 tune_pd.py
+ARV_V1 Cascade P+PI 调参工具 - 交互式六关节调参 + 性能评估
+用法: python3 tune_pd.py (兼容旧名称，实际调整cascade PID)
 """
 import subprocess
 import sys
@@ -29,91 +29,137 @@ class TunerCLI:
         self.recording = False
         self.data_buffer = []
         self.metrics = [JointMetrics() for _ in range(6)]
+        self._node_check_cache = None  # 缓存节点在线状态
         signal.signal(signal.SIGINT, lambda s,f: self._exit())
 
     def _exit(self):
         self.running = False
         print("\n退出调参工具")
         sys.exit(0)
+    
+    def _check_node_online(self) -> bool:
+        """检查节点是否在线（带缓存）"""
+        if self._node_check_cache is not None:
+            return self._node_check_cache
+        try:
+            result = subprocess.run(
+                ["ros2", "node", "list"], 
+                capture_output=True, text=True, timeout=1
+            )
+            self._node_check_cache = NODE.replace("/","") in result.stdout
+            return self._node_check_cache
+        except:
+            return False
 
     def ros2_param_get(self, param: str) -> Optional[float]:
-        """获取ROS2参数"""
+        """获取ROS2参数（快速版）"""
+        if not self._check_node_online():
+            print(f"[错误] 节点 {NODE} 未运行")
+            return None
         try:
             result = subprocess.run(
                 ["ros2", "param", "get", NODE, param],
-                capture_output=True, text=True, timeout=3
+                capture_output=True, text=True, timeout=3.0  # ros2命令本身需要2秒左右
             )
             if result.returncode == 0:
                 # 解析输出: "Double value is: 30.0"
                 line = result.stdout.strip()
                 if "value is:" in line:
                     return float(line.split(":")[-1].strip())
+        except subprocess.TimeoutExpired:
+            print(f"[超时] 参数 {param} 获取超时")
+            self._node_check_cache = None  # 清除缓存，下次重新检查
         except Exception as e:
-            print(f"[错误] 获取参数失败: {e}")
+            print(f"[错误] 获取参数 {param} 失败: {e}")
         return None
 
     def ros2_param_set(self, param: str, value: float) -> bool:
-        """设置ROS2参数"""
+        """设置ROS2参数（快速版）"""
+        if not self._check_node_online():
+            print(f"[错误] 节点 {NODE} 未运行")
+            return False
         try:
             result = subprocess.run(
                 ["ros2", "param", "set", NODE, param, str(value)],
-                capture_output=True, text=True, timeout=3
+                capture_output=True, text=True, timeout=3.0  # ros2命令本身需要2秒左右
             )
             return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            print(f"[超时] 参数 {param} 设置超时")
+            self._node_check_cache = None  # 清除缓存
+            return False
         except Exception as e:
-            print(f"[错误] 设置参数失败: {e}")
+            print(f"[错误] 设置参数 {param} 失败: {e}")
             return False
 
     def get_all_gains(self) -> dict:
-        """获取所有PD增益"""
-        gains = {"Kp": [], "Kd": []}
+        """获取所有Cascade P+PI增益（优化版：显示进度）"""
+        gains = {"pos_Kp": [], "vel_Kp": [], "vel_Ki": [], "vel_limit": []}
+        print("读取参数中", end="", flush=True)
         for i in range(1, 7):
-            kp = self.ros2_param_get(f"Kp.joint_{i}")
-            kd = self.ros2_param_get(f"Kd.joint_{i}")
-            gains["Kp"].append(kp if kp else 0.0)
-            gains["Kd"].append(kd if kd else 0.0)
+            print(".", end="", flush=True)
+            pos_kp = self.ros2_param_get(f"cascade_pid.joint_{i}.pos_Kp")
+            vel_kp = self.ros2_param_get(f"cascade_pid.joint_{i}.vel_Kp")
+            vel_ki = self.ros2_param_get(f"cascade_pid.joint_{i}.vel_Ki")
+            vel_limit = self.ros2_param_get(f"cascade_pid.joint_{i}.vel_limit")
+            gains["pos_Kp"].append(pos_kp if pos_kp else 0.0)
+            gains["vel_Kp"].append(vel_kp if vel_kp else 0.0)
+            gains["vel_Ki"].append(vel_ki if vel_ki else 0.0)
+            gains["vel_limit"].append(vel_limit if vel_limit else 0.0)
+        print(" 完成")
         return gains
 
     def print_current_gains(self):
         """显示当前增益"""
         gains = self.get_all_gains()
-        print("\n" + "="*60)
-        print("当前 PD 增益:")
-        print("-"*60)
-        print(f"  关节:  J1      J2      J3      J4      J5      J6")
-        print(f"  Kp: {gains['Kp'][0]:7.1f} {gains['Kp'][1]:7.1f} {gains['Kp'][2]:7.1f} "
-              f"{gains['Kp'][3]:7.1f} {gains['Kp'][4]:7.1f} {gains['Kp'][5]:7.1f}")
-        print(f"  Kd: {gains['Kd'][0]:7.2f} {gains['Kd'][1]:7.2f} {gains['Kd'][2]:7.2f} "
-              f"{gains['Kd'][3]:7.2f} {gains['Kd'][4]:7.2f} {gains['Kd'][5]:7.2f}")
-        print("="*60)
+        print("\n" + "="*70)
+        print("当前 Cascade P+PI 增益 (外环P → 内环PI):")
+        print("-"*70)
+        print(f"  关节:    J1      J2      J3      J4      J5      J6")
+        print(f"  pos_Kp: {gains['pos_Kp'][0]:6.1f}  {gains['pos_Kp'][1]:6.1f}  {gains['pos_Kp'][2]:6.1f}  "
+              f"{gains['pos_Kp'][3]:6.1f}  {gains['pos_Kp'][4]:6.1f}  {gains['pos_Kp'][5]:6.1f}")
+        print(f"  vel_Kp: {gains['vel_Kp'][0]:6.2f}  {gains['vel_Kp'][1]:6.2f}  {gains['vel_Kp'][2]:6.2f}  "
+              f"{gains['vel_Kp'][3]:6.2f}  {gains['vel_Kp'][4]:6.2f}  {gains['vel_Kp'][5]:6.2f}")
+        print(f"  vel_Ki: {gains['vel_Ki'][0]:6.2f}  {gains['vel_Ki'][1]:6.2f}  {gains['vel_Ki'][2]:6.2f}  "
+              f"{gains['vel_Ki'][3]:6.2f}  {gains['vel_Ki'][4]:6.2f}  {gains['vel_Ki'][5]:6.2f}")
+        print("="*70)
 
-    def set_joint_gain(self, joint: int, kp: float = None, kd: float = None):
-        """设置单关节增益"""
-        if kp is not None:
-            if self.ros2_param_set(f"Kp.joint_{joint}", kp):
-                print(f"  [OK] Kp.joint_{joint} = {kp}")
+    def set_joint_gain(self, joint: int, pos_kp: float = None, vel_kp: float = None, vel_ki: float = None):
+        """设置单关节Cascade PID增益"""
+        if pos_kp is not None:
+            param = f"cascade_pid.joint_{joint}.pos_Kp"
+            if self.ros2_param_set(param, pos_kp):
+                print(f"  [OK] {param} = {pos_kp}")
             else:
-                print(f"  [失败] Kp.joint_{joint}")
-        if kd is not None:
-            if self.ros2_param_set(f"Kd.joint_{joint}", kd):
-                print(f"  [OK] Kd.joint_{joint} = {kd}")
+                print(f"  [失败] {param}")
+        if vel_kp is not None:
+            param = f"cascade_pid.joint_{joint}.vel_Kp"
+            if self.ros2_param_set(param, vel_kp):
+                print(f"  [OK] {param} = {vel_kp}")
             else:
-                print(f"  [失败] Kd.joint_{joint}")
+                print(f"  [失败] {param}")
+        if vel_ki is not None:
+            param = f"cascade_pid.joint_{joint}.vel_Ki"
+            if self.ros2_param_set(param, vel_ki):
+                print(f"  [OK] {param} = {vel_ki}")
+                print(f"  [失败] {param}")
 
-    def set_all_gains(self, kp_list: List[float], kd_list: List[float]):
+    def set_all_gains(self, pos_kp_list: List[float], vel_kp_list: List[float], vel_ki_list: List[float] = None):
         """批量设置所有增益"""
         print("\n批量设置增益...")
+        if vel_ki_list is None:
+            vel_ki_list = [0.0] * 6  # 默认不使用积分
         for i in range(6):
-            self.set_joint_gain(i+1, kp_list[i], kd_list[i])
+            self.set_joint_gain(i+1, pos_kp_list[i], vel_kp_list[i], vel_ki_list[i])
         print("完成!")
 
     def menu(self):
         """主菜单"""
         print("\n" + "="*50)
-        print("  ARV_V1 PD 调参工具")
+        print("  ARV_V1 Cascade P+PI 调参工具")
         print("="*50)
         print("  [1] 查看当前增益")
-        print("  [2] 调单关节 Kp/Kd")
+        print("  [2] 调单关节 pos_Kp/vel_Kp/vel_Ki")
         print("  [3] 批量调所有关节")
         print("  [4] 快速增益模板")
         print("  [5] 启动性能记录 (需另开终端)")
@@ -148,11 +194,13 @@ class TunerCLI:
             if j < 1 or j > 6:
                 print("[无效关节]")
                 return
-            kp_str = input(f"新 Kp (当前值回车跳过): ").strip()
-            kd_str = input(f"新 Kd (当前值回车跳过): ").strip()
-            kp = float(kp_str) if kp_str else None
-            kd = float(kd_str) if kd_str else None
-            self.set_joint_gain(j, kp, kd)
+            kp_str = input(f"新 pos_Kp 外环位置增益 (回车跳过): ").strip()
+            vel_kp_str = input(f"新 vel_Kp 内环速度增益 (回车跳过): ").strip()
+            vel_ki_str = input(f"新 vel_Ki 内环积分增益 (回车跳过): ").strip()
+            pos_kp = float(kp_str) if kp_str else None
+            vel_kp = float(vel_kp_str) if vel_kp_str else None
+            vel_ki = float(vel_ki_str) if vel_ki_str else None
+            self.set_joint_gain(j, pos_kp, vel_kp, vel_ki)
         except ValueError:
             print("[输入错误]")
 
@@ -161,37 +209,44 @@ class TunerCLI:
         self.print_current_gains()
         print("\n输入6个值，空格分隔 (回车跳过该行):")
         try:
-            kp_str = input("Kp [J1-J6]: ").strip()
-            kd_str = input("Kd [J1-J6]: ").strip()
-            if kp_str:
-                kp_list = [float(x) for x in kp_str.split()]
-                if len(kp_list) == 6:
-                    for i, kp in enumerate(kp_list):
-                        self.set_joint_gain(i+1, kp=kp)
-            if kd_str:
-                kd_list = [float(x) for x in kd_str.split()]
-                if len(kd_list) == 6:
-                    for i, kd in enumerate(kd_list):
-                        self.set_joint_gain(i+1, kd=kd)
+            pos_kp_str = input("pos_Kp [J1-J6]: ").strip()
+            vel_kp_str = input("vel_Kp [J1-J6]: ").strip()
+            vel_ki_str = input("vel_Ki [J1-J6]: ").strip()
+            if pos_kp_str:
+                pos_kp_list = [float(x) for x in pos_kp_str.split()]
+                if len(pos_kp_list) == 6:
+                    for i, kp in enumerate(pos_kp_list):
+                        self.set_joint_gain(i+1, pos_kp=kp)
+            if vel_kp_str:
+                vel_kp_list = [float(x) for x in vel_kp_str.split()]
+                if len(vel_kp_list) == 6:
+                    for i, kp in enumerate(vel_kp_list):
+                        self.set_joint_gain(i+1, vel_kp=kp)
+            if vel_ki_str:
+                vel_ki_list = [float(x) for x in vel_ki_str.split()]
+                if len(vel_ki_list) == 6:
+                    for i, ki in enumerate(vel_ki_list):
+                        self.set_joint_gain(i+1, vel_ki=ki)
         except ValueError:
             print("[输入格式错误]")
 
     def _apply_template(self):
         """预设模板"""
         templates = {
-            "1": ("保守(低增益)", [20,30,20,8,0.5,0.5], [0.5,0.5,0.5,0.2,0.5,0.5]),
-            "2": ("标准(当前默认)", [30,50,30,10,1,1], [1,1,1,0.3,1,1]),
-            "3": ("激进(高增益)", [50,80,50,15,2,2], [1.5,1.5,1.5,0.5,1.5,1.5]),
+            "1": ("超保守(极低增益)", [0.5,1.0,0.5,0.2,0.1,0.1], [1.0,1.0,1.0,0.3,1.0,1.0], [0]*6),
+            "2": ("保守(当前)", [3.0,5.0,3.0,0.5,0.2,0.2], [1.0,1.0,1.0,0.3,1.0,1.0], [0]*6),
+            "3": ("中等(PD等效)", [30,50,30,33.3,1,1], [1.0,1.0,1.0,0.3,1.0,1.0], [0]*6),
         }
-        print("\n增益模板:")
-        for k, (name, kp, kd) in templates.items():
+        print("\n增益模板 (Cascade P+PI):")
+        for k, (name, pos_kp, vel_kp, vel_ki) in templates.items():
             print(f"  [{k}] {name}")
-            print(f"      Kp: {kp}")
-            print(f"      Kd: {kd}")
+            print(f"      pos_Kp: {pos_kp}")
+            print(f"      vel_Kp: {vel_kp}")
+            print(f"      vel_Ki: {vel_ki}")
         choice = input("选择模板 [1-3]: ").strip()
         if choice in templates:
-            _, kp, kd = templates[choice]
-            self.set_all_gains(kp, kd)
+            _, pos_kp, vel_kp, vel_ki = templates[choice]
+            self.set_all_gains(pos_kp, vel_kp, vel_ki)
 
     def _start_recording_hint(self):
         """性能记录提示"""
@@ -211,8 +266,11 @@ class TunerCLI:
 
 if __name__ == "__main__":
     print("检查 ROS2 节点...")
-    result = subprocess.run(["ros2", "node", "list"], capture_output=True, text=True)
+    result = subprocess.run(["ros2", "node", "list"], capture_output=True, text=True, timeout=2)
     if NODE.replace("/","") not in result.stdout:
         print(f"[警告] 节点 {NODE} 未运行!")
         print("请先启动: ./start_mujoco_system.sh")
+        sys.exit(1)
+    else:
+        print(f"[OK] 节点 {NODE} 在线")
     TunerCLI().run()

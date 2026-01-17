@@ -6,9 +6,7 @@
 #include <cstring>
 #include <array>
 
-// SEASKY Protocol Implementation
-// Format:
-// [SOF(1)] [DataLen(2)] [CRC8(1)] [CmdID(2)] [Flags(2)] [Payload(N)] [CRC16(2)]
+// SEASKY协议: [SOF(1)][Len(2)][CRC8(1)][CmdID(2)][Flags(2)][Payload(N)][CRC16(2)]
 // DataLen = sizeof(CmdID) + sizeof(Flags) + sizeof(Payload)
 
 namespace SerialProtocol

@@ -5,9 +5,7 @@ controller_manager:
   ros__parameters:
     update_rate: 200  # Hz - 控制器更新频率（匹配 torque_controller_node 的 200 Hz）
 
-    # ========== 删除 ARM_controller ==========
-    # MoveIt 将直接使用 torque_controller_node 的 Action Server
-    # ARM_controller 不再需要
+    # MoveIt直接使用torque_controller_node Action Server
     
     # 力矩控制器（接收 torque_controller_node 的力矩命令）
     effort_controller:

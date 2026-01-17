@@ -1,7 +1,7 @@
 
 #include "dynamics_computer.hpp"
 #include <cmath>  // For std::isfinite
-#include <iostream>  // For std::cerr
+#include <sstream> // For std::ostringstream
 
 DynamicsComputer::DynamicsComputer(const KDL::Chain &chain,
                                    const KDL::Vector &gravity)
@@ -48,15 +48,18 @@ void DynamicsComputer::computeFeedforwardTorque(
         // ========== SAFETY: Check for NaN/Inf in dynamics computation ==========
         if (!std::isfinite(tau_ff(i)))
         {
-            // Log error but return zero torque as safe fallback
-            // Note: We use std::cerr here as we don't have access to ROS logger
-            std::cerr << "[SAFETY] Dynamics solver produced non-finite torque on joint "
-                      << i << " (M*qdd + C + G = NaN/Inf), returning zero" << std::endl;
-            std::cerr << "  Inputs: q[" << i << "]=" << q(i)
-                      << ", qd[" << i << "]=" << qd(i)
-                      << ", qdd[" << i << "]=" << qdd(i) << std::endl;
-            std::cerr << "  Components: C[" << i << "]=" << C(i)
-                      << ", G[" << i << "]=" << G(i) << std::endl;
+            if (error_logger_)
+            {
+                std::ostringstream oss;
+                oss << "[SAFETY] Dynamics solver produced non-finite torque on joint "
+                    << i << " (M*qdd + C + G = NaN/Inf), returning zero. "
+                    << "Inputs: q[" << i << "]=" << q(i)
+                    << ", qd[" << i << "]=" << qd(i)
+                    << ", qdd[" << i << "]=" << qdd(i)
+                    << ". Components: C[" << i << "]=" << C(i)
+                    << ", G[" << i << "]=" << G(i);
+                error_logger_(oss.str());
+            }
             tau_ff(i) = 0.0;  // Safe fallback
         }
     }
@@ -74,8 +77,13 @@ void DynamicsComputer::computeGravityTorque(
     {
         if (!std::isfinite(tau_ff(i)))
         {
-            std::cerr << "[SAFETY] Gravity computation produced non-finite torque on joint "
-                      << i << ", returning zero" << std::endl;
+            if (error_logger_)
+            {
+                std::ostringstream oss;
+                oss << "[SAFETY] Gravity computation produced non-finite torque on joint "
+                    << i << ", returning zero";
+                error_logger_(oss.str());
+            }
             tau_ff(i) = 0.0;  // Safe fallback
         }
     }
