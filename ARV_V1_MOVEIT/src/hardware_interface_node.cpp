@@ -21,7 +21,7 @@ public:
         // 1. 声明参数
         this->declare_parameter("serial_port", "/dev/ttyACM0");
         this->declare_parameter("baud_rate", 921600);
-        this->declare_parameter("publish_rate", 200.0);    // 100Hz 发布频率
+        this->declare_parameter("publish_rate", 200.0); 
         this->declare_parameter("simulation_mode", false); // 新增：仿真模式参数
 
         // 2. 获取参数
