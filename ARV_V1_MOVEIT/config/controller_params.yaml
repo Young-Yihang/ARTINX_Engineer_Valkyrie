@@ -72,7 +72,14 @@
     # ========== Safety Parameters ==========
     safety:
       # 单关节力矩限制(Nm), 设-1使用URDF值
-      #   joint_6: -1    # Use URDF value (1 Nm - seems low!)
+      # 策略：使用URDF标称值的80-90%作为工作限制，平衡性能和安全
+      max_torque_per_joint:
+        joint_1: 20.0   
+        joint_2: 20.0   
+        joint_3: 20.0   
+        joint_4: 1.2   
+        joint_5: 7.0   
+        joint_6: 1.0
 
       # Global fallback if neither config nor URDF specified
       max_torque_default: 20.0              # Nm - conservative default

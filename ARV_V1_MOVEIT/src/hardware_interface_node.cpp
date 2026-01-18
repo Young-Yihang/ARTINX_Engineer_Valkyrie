@@ -23,7 +23,7 @@ public:
         this->declare_parameter("baud_rate", 921600);
         this->declare_parameter("publish_rate", 200.0); 
         this->declare_parameter("simulation_mode", false); // 新增：仿真模式参数
-        this->declare_parameter("force_zero_torque", false); // 新增：强制零力矩开关
+        this->declare_parameter("force_zero_torque", true); // 新增：强制零力矩开关
 
         // 2. 获取参数
         std::string port = this->get_parameter("serial_port").as_string();
@@ -39,17 +39,21 @@ public:
             RCLCPP_INFO(this->get_logger(), "[SIMULATION MODE] Serial TX only, no RX feedback");
         }
 
-        // 3. 初始化串口
+        // 3. 初始化串口（失败不退出，依赖自动重连）
         if (!initSerial(port, baud))
         {
-            RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to open serial port");
-            return;
+            RCLCPP_WARN(this->get_logger(), "[WARN] Initial serial open failed: %s", port.c_str());
+            RCLCPP_INFO(this->get_logger(), "[INFO] Node will continue running and auto-reconnect when device available");
+        }
+        else
+        {
+            RCLCPP_INFO(this->get_logger(), "[OK] Serial port opened: %s @ %d baud", port.c_str(), baud);
         }
 
         // 4. 初始化 ROS2 通信
         initROS2Communication();
 
-        // 5. 启动收发线程
+        // 5. 启动收发线程（无论串口是否打开）
         running_ = true;
 
         if (simulation_mode_)
@@ -59,9 +63,9 @@ public:
         }
         else
         {
-            // 真机模式：启动串口接收线程
+            // 真机模式：启动串口接收线程（会自动重连）
             receive_thread_ = std::thread(&HardwareInterfaceNode::receiveLoop, this);
-            RCLCPP_INFO(this->get_logger(), "[OK] Hardware mode - Serial RX/TX enabled");
+            RCLCPP_INFO(this->get_logger(), "[OK] Hardware mode - Serial RX/TX enabled (auto-reconnect every 200ms)");
         }
 
         RCLCPP_INFO(this->get_logger(), "[OK] Hardware interface node started");

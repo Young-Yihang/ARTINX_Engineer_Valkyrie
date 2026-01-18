@@ -154,7 +154,14 @@ start_sim_mode() {
 
 # ========== 模式2: 串口 + 数字孪生 ==========
 start_serial_mode() {
-    detect_serial_device || exit 1
+    # 尝试检测串口，但失败也不退出
+    if detect_serial_device; then
+        log_success "使用检测到的串口: $DETECTED_SERIAL_DEVICE"
+    else
+        log_warning "串口检测失败，使用默认设备 /dev/ttyACM0（节点会自动重连）"
+        export DETECTED_SERIAL_DEVICE="/dev/ttyACM0"
+    fi
+    
     log_info "启动串口真机模式 (设备: $DETECTED_SERIAL_DEVICE)..."
     local config_path="$WORKSPACE_DIR/src/ARV_V1_MOVEIT/config/controller_params.yaml"
     start_node "MoveIt+RViz" "ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py" 0
