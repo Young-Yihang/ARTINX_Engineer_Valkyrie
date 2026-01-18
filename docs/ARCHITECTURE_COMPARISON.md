@@ -260,6 +260,22 @@ public:
 |------|---------|------|
 | **方案 A** | ✅ 只发送，不接收 | `simulation_mode=true` 时关闭接收线程<br>反馈由MuJoCo物理仿真提供 |
 
+**启动示例**:
+```bash
+# 模式1: 纯仿真 (无串口)
+ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py
+ros2 run ARV_V1_MOVEIT torque_controller_node
+ros2 run ARV_V1_MOVEIT mujoco_interface_node
+
+# 模式2: 仿真+串口测试 (方案A - 串口只发送)
+ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py
+ros2 run ARV_V1_MOVEIT torque_controller_node
+ros2 run ARV_V1_MOVEIT mujoco_interface_node  # 物理仿真提供反馈
+ros2 run ARV_V1_MOVEIT hardware_interface_node \
+  --ros-args -p simulation_mode:=true -p serial_port:=/dev/ttyACM0
+  # ↑ 串口只发送，不接收
+```
+
 ---
 
 ### 2. 真机模式下 MuJoCo 能否作为数字孪生？
@@ -273,6 +289,19 @@ public:
 - 真机运动 → 串口反馈 → Hardware Interface 发布 `/joint_states`
 - MuJoCo 订阅 `/joint_states` → 直接设置关节状态 → 3D显示同步
 - **MuJoCo不再做物理仿真**，纯粹作为可视化器
+
+**启动示例**:
+```bash
+# 模式3: 真机+数字孪生 (方案B - 真机模式)
+ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py
+ros2 run ARV_V1_MOVEIT torque_controller_node
+ros2 run ARV_V1_MOVEIT hardware_interface_node \
+  --ros-args -p simulation_mode:=false -p serial_port:=/dev/ttyACM0
+  # ↑ 串口双向通信，发布真实反馈到 /joint_states
+ros2 run ARV_V1_MOVEIT mujoco_interface_node \
+  --ros-args -p visualization_only:=true
+  # ↑ 订阅 /joint_states，同步显示真机状态（数字孪生）
+```
 
 ---
 

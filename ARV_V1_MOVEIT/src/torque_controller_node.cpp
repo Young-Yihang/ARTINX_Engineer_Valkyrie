@@ -1,4 +1,67 @@
-// 解算核心部分
+// ========================================
+// 力矩控制节点 - 基于KDL的完整动力学前馈+级联P+PI反馈
+// ========================================
+//
+// [系统架构]
+// - 外环: 位置P → 期望速度
+// - 内环: 速度PI → 输出力矩
+// - 前馈: τ_ff = M(q)q̈ + C(q,q̇) + G(q) (完整动力学模型)
+// - 反馈: τ_fb = 级联P+PI(位置误差, 速度误差)
+// - 总力矩: τ = τ_ff + τ_fb
+//
+// [安全机制总览]
+// 1. 关节状态超时保护 (joint_state_timeout_sec = 100ms)
+//    - 触发: 100ms未收到/joint_states消息
+//    - 响应: 发布重力补偿力矩维持位置 (不紧急停止)
+//    - 恢复: 自动恢复，数据到达后继续控制
+//
+// 2. 力矩饱和限幅 (max_torque_per_joint)
+//    - 优先级: config > URDF > 默认20Nm
+//    - 应用: 前馈、反馈、总力矩三处独立限幅
+//    - 日志: 触发时每秒打印一次警告
+//
+// 3. 传感器数据校验
+//    - NaN/Inf检测: 拒绝整条消息，不更新时间戳
+//    - 速度尖峰检测: 限幅处理而非拒绝 (避免timeout)
+//    - 位置范围检查: 仅警告，不拒绝 (允许超过±2π)
+//
+// 4. 紧急停止 (emergencyStop)
+//    - 触发条件:
+//      a) 动力学计算NaN/Inf (前馈或重力项)
+//      b) 关节状态timeout且无法计算重力补偿
+//      c) 传感器数据包含NaN/Inf
+//    - 响应流程:
+//      a) 立即发送零力矩
+//      b) 中止当前轨迹 (PATH_TOLERANCE_VIOLATED)
+//      c) 清零积分器 (防止积分饱和)
+//      d) 保留has_target_(维持保持模式目标)
+//    - 不触发紧急停止的情况:
+//      - 速度尖峰: 限幅处理
+//      - timeout: 发送重力补偿维持位置
+//
+// 5. 控制循环频率监控
+//    - 期望: 200Hz (5ms周期)
+//    - 阈值: max_control_period_sec = 10ms
+//    - 超时: 打印警告但继续运行 (不停机)
+//
+// 6. Kalman滤波器抗噪声
+//    - 启用: kalman.enabled = true (默认)
+//    - 策略: 仅滤波速度，位置保持编码器原始精度
+//    - 动态调参: 支持运行时修改Q/R矩阵
+//
+// [参数动态调节]
+// - cascade_pid.joint_X.pos_Kp/Ki/Kd: 外环位置PID
+// - cascade_pid.joint_X.vel_Kp/Ki/Kd: 内环速度PID
+// - cascade_pid.joint_X.vel_limit: 速度饱和限制
+// - kalman.Q_pos/Q_vel: 过程噪声协方差
+// - kalman.R_pos/R_vel: 测量噪声协方差
+// - kalman.enabled: 滤波器开关
+//
+// [使用示例]
+// ros2 param set /torque_controller_action_server cascade_pid.joint_1.pos_Kp 15.0
+// ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
+// ========================================
+
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>

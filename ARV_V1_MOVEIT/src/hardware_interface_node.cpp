@@ -471,7 +471,7 @@ private:
         // 2. 发布 ROS2 消息
         auto msg = sensor_msgs::msg::JointState();
         msg.header.stamp = this->now();
-        msg.name = {"joint1", "joint2", "joint3", "joint4", "joint5", "joint6"};
+        msg.name = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"};
 
         msg.position.resize(6);
         msg.velocity.resize(6);
