@@ -36,6 +36,7 @@ namespace SerialProtocol
     {
         std::array<float, NUM_JOINTS> positions;
         std::array<float, NUM_JOINTS> velocities;
+        std::array<uint32_t, NUM_JOINTS> islive;  // 每关节存活状态标志（暂不使用）
     };
 
     // CRC Helpers - delegate to centralized Crc implementation
@@ -83,6 +84,16 @@ namespace SerialProtocol
     {
         float value;
         std::memcpy(&value, buffer + offset, 4);
+        offset += 4;
+        return value;
+    }
+
+    inline uint32_t read_uint32(const uint8_t *buffer, size_t &offset)
+    {
+        uint32_t value = buffer[offset] | 
+                        (static_cast<uint32_t>(buffer[offset + 1]) << 8) |
+                        (static_cast<uint32_t>(buffer[offset + 2]) << 16) |
+                        (static_cast<uint32_t>(buffer[offset + 3]) << 24);
         offset += 4;
         return value;
     }

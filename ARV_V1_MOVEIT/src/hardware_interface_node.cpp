@@ -464,11 +464,16 @@ private:
         {
             float positions[6];
             float velocities[6];
+            uint32_t islive[6];  // 存活状态（暂不使用）
 
+            // 新协议格式：每关节交替读取 Position, Speed, IsLive
+            // Payload: [Pos0, Spd0, IsLive0, Pos1, Spd1, IsLive1, ...]
             for (int i = 0; i < 6; ++i)
+            {
                 positions[i] = SerialProtocol::read_float(packet.data(), offset);
-            for (int i = 0; i < 6; ++i)
                 velocities[i] = SerialProtocol::read_float(packet.data(), offset);
+                islive[i] = SerialProtocol::read_uint32(packet.data(), offset);  // 读取但暂不使用
+            }
 
             updateAndPublishJointStates(positions, velocities);
         }
