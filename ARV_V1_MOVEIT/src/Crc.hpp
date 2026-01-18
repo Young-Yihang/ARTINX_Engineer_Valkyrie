@@ -1,7 +1,7 @@
 #ifndef CRC_HPP
 #define CRC_HPP
 
-#include "main.h"
+#include <cstdint>
 
 class Crc
 {

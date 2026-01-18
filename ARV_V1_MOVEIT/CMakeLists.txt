@@ -170,6 +170,7 @@ ament_target_dependencies(mujoco_interface_node
 # 硬件接口节点 (Sim2Real)
 add_executable(hardware_interface_node
   src/hardware_interface_node.cpp
+  src/Crc.cpp
 )
 
 # 链接库
