@@ -103,13 +103,13 @@ public: // 构造函数log
                                        KalmanFilter1D(1.0 / 200.0)  // Joint 6
                                    },
                                    q_dot_filtered_(6),
-                                   kalman_filter_enabled_(true) // 默认启用卡尔曼滤波
+                                   kalman_filter_enabled_(false)
 
   {
     RCLCPP_INFO(this->get_logger(), "[START] Torque controller node starting (Cascade P+PI Control)");
 
     // ========== 卡尔曼滤波器开关参数 ==========
-    this->declare_parameter("kalman.enabled", true); // 默认启用
+    this->declare_parameter("kalman.enabled", false); // 默认禁用
     kalman_filter_enabled_ = this->get_parameter("kalman.enabled").as_bool();
 
     RCLCPP_INFO(this->get_logger(), "[INFO] Kalman filter state: %s",

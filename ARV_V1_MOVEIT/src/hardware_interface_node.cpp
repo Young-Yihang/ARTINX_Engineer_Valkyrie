@@ -23,6 +23,7 @@ public:
         this->declare_parameter("baud_rate", 921600);
         this->declare_parameter("publish_rate", 200.0); 
         this->declare_parameter("simulation_mode", false); // 新增：仿真模式参数
+        this->declare_parameter("force_zero_torque", false); // 新增：强制零力矩开关
 
         // 2. 获取参数
         std::string port = this->get_parameter("serial_port").as_string();
@@ -249,7 +250,21 @@ private:
             return;
         }
 
-        // 1. 缓存力矩数据
+        // 1. 检查是否强制零力矩模式
+        if (this->get_parameter("force_zero_torque").as_bool())
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                 "[SAFETY] Force zero torque mode enabled - sending all zeros");
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            for (int i = 0; i < num_joints_; ++i)
+            {
+                current_torques_[i] = 0.0f;
+            }
+            sendTorqueCommand();
+            return;
+        }
+
+        // 2. 缓存力矩数据
         {
             std::lock_guard<std::mutex> lock(data_mutex_);
             for (int i = 0; i < num_joints_; ++i)
@@ -258,7 +273,7 @@ private:
             }
         }
 
-        // 2. 打包并发送
+        // 3. 打包并发送
         sendTorqueCommand();
     }
 
