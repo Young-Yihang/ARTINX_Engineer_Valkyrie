@@ -16,6 +16,9 @@ find_package(trajectory_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(serial_driver REQUIRED)
+find_package(yaml-cpp REQUIRED)
+find_package(arv_v1_interfaces REQUIRED)
+
 # ========== MuJoCo手动配置 ==========
 # 设置MuJoCo安装路径
 set(MUJOCO_DIR "$ENV{MUJOCO_PATH}")
@@ -195,6 +198,38 @@ ament_target_dependencies(hardware_interface_node
   serial_driver
 )
 
+# -------------------------------------------
+# 轨迹管理节点 (Phase 1)
+add_executable(trajectory_manager_node
+  src/trajectory_manager_node.cpp
+)
+
+# 链接库
+target_link_libraries(trajectory_manager_node
+  ${rclcpp_LIBRARIES}
+  ${rclcpp_action_LIBRARIES}
+  yaml-cpp
+)
+
+# 头文件路径
+target_include_directories(trajectory_manager_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${rclcpp_INCLUDE_DIRS}
+  ${rclcpp_action_INCLUDE_DIRS}
+)
+
+# ROS2 依赖
+ament_target_dependencies(trajectory_manager_node
+  rclcpp
+  rclcpp_action
+  sensor_msgs
+  std_msgs
+  trajectory_msgs
+  control_msgs
+  arv_v1_interfaces
+)
+
 # ============= 4. 安装 =============
 
 # 安装可执行文件和库
@@ -203,6 +238,7 @@ install(TARGETS
   torque_controller_node
   mujoco_interface_node
   hardware_interface_node
+  trajectory_manager_node  # ← 轨迹管理节点
   DESTINATION lib/${PROJECT_NAME}
 )
 

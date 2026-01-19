@@ -1,0 +1,9 @@
+# LoadTrajectory.srv - 加载并执行轨迹
+# 请求
+string name                              # 轨迹名称
+bool execute                             # 是否立即执行
+---
+# 响应
+bool success
+string message
+float64 duration                         # 轨迹时长(秒)

@@ -1,0 +1,10 @@
+# SaveTrajectory.srv - 保存轨迹到文件
+# 请求
+string name                              # 轨迹名称
+string description                       # 描述(可选)
+trajectory_msgs/JointTrajectory trajectory  # 要保存的轨迹
+---
+# 响应
+bool success
+string message
+string saved_path                        # 保存的文件路径

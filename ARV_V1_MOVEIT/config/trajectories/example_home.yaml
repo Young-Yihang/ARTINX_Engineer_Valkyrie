@@ -1,0 +1,28 @@
+meta:
+  name: "example_home"
+  description: "示例轨迹 - 回到home姿态"
+  saved_at: "2026-01-19T12:00:00"
+  duration_sec: 2.0
+
+joint_names:
+  - joint_1
+  - joint_2
+  - joint_3
+  - joint_4
+  - joint_5
+  - joint_6
+
+start_position: [0.0, 2.342, 0.989, 0.0, 0.0, 0.0]
+
+points:
+  - time: 0.0
+    positions: [0.0, 2.342, 0.989, 0.0, 0.0, 0.0]
+    velocities: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+  - time: 1.0
+    positions: [0.0, 2.342, 0.989, 0.0, 0.0, 0.0]
+    velocities: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+  - time: 2.0
+    positions: [0.0, 2.342, 0.989, 0.0, 0.0, 0.0]
+    velocities: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

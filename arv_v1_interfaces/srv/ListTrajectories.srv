@@ -1,0 +1,6 @@
+# ListTrajectories.srv - 列出已保存的轨迹
+# 请求 (无参数)
+---
+# 响应
+string[] names                           # 轨迹名称列表
+string[] descriptions                    # 对应描述列表

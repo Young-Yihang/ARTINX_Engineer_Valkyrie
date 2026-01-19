@@ -108,7 +108,7 @@ build_workspace() {
     log_info "编译项目..."
     cd "$WORKSPACE_DIR"
 
-    colcon build --packages-select ARV_V1_MODEL ARV_V1_MOVEIT --cmake-args -DCMAKE_BUILD_TYPE=Release
+    colcon build --packages-select arv_v1_interfaces ARV_V1_MODEL ARV_V1_MOVEIT --cmake-args -DCMAKE_BUILD_TYPE=Release
     
     if [ $? -eq 0 ]; then
         log_success "编译成功！"
@@ -150,6 +150,7 @@ start_sim_mode() {
     start_node "TorqueController" "ros2 run ARV_V1_MOVEIT torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
     start_node "MuJoCo(仿真)" "ros2 run ARV_V1_MOVEIT mujoco_interface_node" 0
+    start_node "TrajectoryManager" "ros2 run ARV_V1_MOVEIT trajectory_manager_node" 1
 }
 
 # ========== 模式2: 串口 + 数字孪生 ==========
@@ -161,7 +162,7 @@ start_serial_mode() {
         log_warning "串口检测失败，使用默认设备 /dev/ttyACM0（节点会自动重连）"
         export DETECTED_SERIAL_DEVICE="/dev/ttyACM0"
     fi
-    
+
     log_info "启动串口真机模式 (设备: $DETECTED_SERIAL_DEVICE)..."
     local config_path="$WORKSPACE_DIR/src/ARV_V1_MOVEIT/config/controller_params.yaml"
     start_node "MoveIt+RViz" "ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py" 0
@@ -169,6 +170,7 @@ start_serial_mode() {
     sleep 3
     start_node "SerialInterface" "ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 0
     start_node "MuJoCo(孪生)" "ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true" 0
+    start_node "TrajectoryManager" "ros2 run ARV_V1_MOVEIT trajectory_manager_node" 1
 }
 
 
@@ -192,10 +194,21 @@ main() {
     echo ""
     log_success "所有节点已启动！"
     echo ""
-    echo -e "${YELLOW}提示:${NC}"
+    echo -e "${YELLOW}常用命令:${NC}"
     echo "  - 停止所有节点: ./stop_all_nodes.sh"
     echo "  - 查看话题: ros2 topic list"
     echo "  - 查看关节状态: ros2 topic echo /joint_states"
+    echo ""
+    echo -e "${YELLOW}轨迹管理服务:${NC}"
+    echo "  列出轨迹: ros2 service call /list_trajectories arv_v1_interfaces/srv/ListTrajectories"
+    echo ""
+    echo "  保存最近执行的轨迹 (先在RViz中Plan&Execute):"
+    echo "    ros2 service call /save_last_trajectory arv_v1_interfaces/srv/SaveLastTrajectory \\"
+    echo "        \"{name: 'my_traj', description: '我的轨迹'}\""
+    echo ""
+    echo "  加载并执行轨迹:"
+    echo "    ros2 service call /load_trajectory arv_v1_interfaces/srv/LoadTrajectory \\"
+    echo "        \"{name: 'my_traj', execute: true}\""
     echo ""
 
     log_info "按 Ctrl+C 退出此脚本（节点继续运行）"

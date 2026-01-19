@@ -1,0 +1,9 @@
+# SaveLastTrajectory.srv - 保存最近执行的轨迹
+# 请求
+string name                              # 轨迹名称
+string description                       # 描述(可选)
+---
+# 响应
+bool success
+string message
+string saved_path                        # 保存的文件路径
