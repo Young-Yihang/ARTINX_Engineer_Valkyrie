@@ -103,6 +103,11 @@ public:
         }
         RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo interface node initialization completed");
 
+        // ========== 步骤5.5: 启动健康监控定时器 (5Hz) ==========
+        health_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(5000),
+            std::bind(&MuJoCoInterfaceNode::healthCheck, this));
+
         // ========== 步骤6: 初始化并启动可视化 ==========
         render_running_ = false;
         window_ = nullptr;
@@ -188,6 +193,11 @@ private:
     // ========== 启动安全相关 ==========
     std::atomic<bool> received_first_command_;
 
+    // ========== Health monitoring ==========
+    std::atomic<uint64_t> sim_step_count_{0};
+    std::atomic<uint64_t> command_rx_count_{0};
+    rclcpp::TimerBase::SharedPtr health_timer_;
+
     // ========== 关节名称 ==========
     const std::vector<std::string> joint_names_ = {
         "joint_1", "joint_2", "joint_3",
@@ -220,6 +230,7 @@ private:
     void publishJointStates();
     bool initializeVisualization();
     void renderLoop();
+    void healthCheck();
 };
 
 // ========== 成员函数实现 ==========
@@ -378,6 +389,8 @@ void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray:
         RCLCPP_INFO(this->get_logger(), "[OK] First torque command received, MuJoCo simulation started");
     }
 
+    command_rx_count_++;
+
     for (size_t i = 0; i < 6; i++)
     {
         data_->ctrl[i] = msg->data[i];
@@ -422,6 +435,7 @@ void MuJoCoInterfaceNode::simulationStep()
 
     std::lock_guard<std::mutex> lock(sim_mutex_);
     mj_step(model_, data_);
+    sim_step_count_++;
     publishJointStates();
 }
 
@@ -699,6 +713,49 @@ void MuJoCoInterfaceNode::keyCallback(GLFWwindow *window, int key, int scancode,
         glfwSetWindowShouldClose(window, GLFW_TRUE);
         break;
     }
+}
+
+void MuJoCoInterfaceNode::healthCheck()
+{
+    static uint64_t last_step_count = 0;
+    static uint64_t last_cmd_count = 0;
+
+    uint64_t current_steps = sim_step_count_.load();
+    uint64_t current_cmds = command_rx_count_.load();
+
+    double step_rate = (current_steps - last_step_count) / 5.0;  // 5 sec interval
+    double cmd_rate = (current_cmds - last_cmd_count) / 5.0;
+
+    if (visualization_only_)
+    {
+        RCLCPP_INFO(this->get_logger(),
+                    "[HEALTH] Mode: DIGITAL TWIN | Render: %s",
+                    render_running_.load() ? "OK" : "STOPPED");
+    }
+    else
+    {
+        if (!received_first_command_.load())
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "[HEALTH] Mode: SIMULATION | Waiting for first command...");
+        }
+        else if (paused_)
+        {
+            RCLCPP_INFO(this->get_logger(),
+                        "[HEALTH] Mode: SIMULATION | Status: PAUSED | Render: %s",
+                        render_running_.load() ? "OK" : "STOPPED");
+        }
+        else
+        {
+            RCLCPP_INFO(this->get_logger(),
+                        "[HEALTH] Mode: SIMULATION | Sim: %.1f Hz | Cmd RX: %.1f Hz | Render: %s",
+                        step_rate, cmd_rate,
+                        render_running_.load() ? "OK" : "STOPPED");
+        }
+    }
+
+    last_step_count = current_steps;
+    last_cmd_count = current_cmds;
 }
 
 // ========== main函数 ==========

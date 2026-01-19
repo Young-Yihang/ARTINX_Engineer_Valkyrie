@@ -137,8 +137,7 @@ public: // 构造函数log
     RCLCPP_INFO(this->get_logger(), "   Q_pos=%.1e, Q_vel=%.1e", Q_pos, Q_vel);
     RCLCPP_INFO(this->get_logger(), "   R_pos=%.1e, R_vel=%.1e", R_pos, R_vel);
 
-    this->declare_parameter("kalman.print_interval", 1000); // 默认 1000 次打印一次
-    kalman_print_interval_ = this->get_parameter("kalman.print_interval").as_int();
+    // Kalman print removed for cleaner output
 
     // ========== Load Safety Parameters (BEFORE initializeDynamics) ==========
     this->declare_parameter("safety.max_torque_default", 20.0);
@@ -288,6 +287,7 @@ private:
   KDL::JntArray q_target_;     // 目标关节位置（规划终点） [6]
   std::mutex state_mutex_;     // 保护 q_actual_, q_dot_actual_, state_received_, last_joint_state_time_
   std::mutex action_mutex_;    // 保护 is_executing_, has_target_, current_goal_handle_
+  std::mutex filter_mutex_;    // ========== 修复数据竞争 #2: 保护 joint_filters_ ==========
   bool state_received_;        // 是否收到过状态
   bool has_target_;            // 是否有目标位置
 
@@ -300,9 +300,8 @@ private:
   KDL::JntArray q_dot_filtered_;
   bool kalman_filter_enabled_; // 卡尔曼滤波开关
 
-  // 卡尔曼增益观察
-  size_t control_loop_count_ = 0;       // 控制循环计数器
-  size_t kalman_print_interval_ = 1000; // 每 1000 次打印一次（1000/200Hz = 5秒）
+  // Health monitoring
+  size_t control_loop_count_ = 0; // Control loop counter for health reporting
 
   rclcpp::TimerBase::SharedPtr control_timer_;                                // 控制循环定时器
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_; // 力矩发布者
@@ -450,7 +449,22 @@ void TorqueControllerActionServer::handleAccepted(
     return;
   }
 
-  // 线程安全：修改 action 相关状态需要加锁
+  // ========== 修复死锁 #1: 避免嵌套锁 - 先拷贝数据再加锁 ==========
+  // 策略: 分离锁的生命周期,避免 action_mutex_ 和 state_mutex_ 同时持有
+
+  // Step 1: 拷贝当前位置到局部变量 (只持有state_mutex_)
+  KDL::JntArray q_current(6);
+  bool has_state = false;
+  {
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    if (state_received_)
+    {
+      q_current = q_actual_;
+      has_state = true;
+    }
+  } // state_mutex_ 立即释放
+
+  // Step 2: 现在可以安全地持有 action_mutex_ 而不会死锁
   {
     std::lock_guard<std::mutex> action_lock(action_mutex_);
 
@@ -477,16 +491,16 @@ void TorqueControllerActionServer::handleAccepted(
     double total_duration = last_point.time_from_start.sec + last_point.time_from_start.nanosec * 1e-9;
 
     // ========== 智能积分器清零策略 ==========
-    // 检查位置连续性：比较轨迹起点和当前位置
+    // 检查位置连续性：比较轨迹起点和当前位置 (使用局部拷贝q_current)
     bool position_continuous = true;
     double max_pos_jump = 0.0;
 
-    if (first_point.positions.size() == 6)
+    if (first_point.positions.size() == 6 && has_state)
     {
-      std::lock_guard<std::mutex> state_lock(state_mutex_);
+      // 使用局部拷贝 q_current 而非 q_actual_, 避免再次加锁
       for (size_t i = 0; i < 6; i++)
       {
-        double pos_error = std::abs(first_point.positions[i] - q_actual_(i));
+        double pos_error = std::abs(first_point.positions[i] - q_current(i));
         max_pos_jump = std::max(max_pos_jump, pos_error);
         if (pos_error > 0.05) // 阈值：5度（0.087 rad）或更保守的0.05 rad
         {
@@ -533,8 +547,8 @@ void TorqueControllerActionServer::handleAccepted(
 void TorqueControllerActionServer::jointStateCallback(
     const sensor_msgs::msg::JointState::SharedPtr msg)
 {
-  // 线程安全：加锁
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  // ========== 修复死锁 #1: 使用unique_lock手动控制锁生命周期 ==========
+  std::unique_lock<std::mutex> state_lock(state_mutex_);
 
   // 验证数据
   if (msg->position.size() != 6 || msg->velocity.size() != 6)
@@ -598,10 +612,13 @@ void TorqueControllerActionServer::jointStateCallback(
   // ========== 关键：即使有velocity spike也更新时间戳，避免误判timeout ==========
   last_joint_state_time_ = this->now();
 
-  // ========== 卡尔曼滤波处理 ==========
+  // ========== 修复数据竞争 #2: Kalman滤波处理 (添加filter_mutex_保护) ==========
   // 注意：卡尔曼滤波器只用于速度滤波，位置保持原始测量值（编码器精度高）
   if (kalman_filter_enabled_)
   {
+    // 获取 filter_mutex_ 保护 joint_filters_ 的访问
+    std::lock_guard<std::mutex> filter_lock(filter_mutex_);
+
     // 启用滤波：使用卡尔曼滤波器过滤速度
     for (size_t i = 0; i < 6; i++)
     {
@@ -621,7 +638,7 @@ void TorqueControllerActionServer::jointStateCallback(
       // q_actual_(i) 已经在上面设置为 msg->position[i]，保持不变
       q_dot_filtered_(i) = joint_filters_[i].getVelocity();
     }
-  }
+  } // filter_mutex_ 自动释放
   else
   {
     // 禁用滤波：直接使用原始测量值
@@ -632,45 +649,53 @@ void TorqueControllerActionServer::jointStateCallback(
     }
   }
 
-  // 首次接收数据：保存启动姿态作为初始目标
-  if (!state_received_)
+  // ========== 修复死锁 #1: 首次接收数据时避免嵌套锁 ==========
+  // 策略: 先在 state_mutex_ 下拷贝数据和标记, 然后释放锁, 再获取 action_mutex_
+  bool is_first_state = !state_received_;
+  KDL::JntArray q_startup(6);
+
+  if (is_first_state)
   {
     RCLCPP_INFO(this->get_logger(), "[OK] First joint state data received");
 
-    // 保存启动姿态作为初始目标位置（线程安全 - 已经持有state_mutex_）
-    if (!has_target_)
-    {
-      // 需要访问has_target_（在action_mutex保护下），暂时解锁state_mutex_
-      // 为了避免死锁，先拷贝数据再加锁
-      KDL::JntArray q_startup(6);
-      q_startup = q_actual_;
-
-      // 现在可以安全地在另一个作用域加锁action_mutex_
-      {
-        std::lock_guard<std::mutex> action_lock(action_mutex_);
-        if (!has_target_)
-        {
-          q_target_ = q_startup;
-          has_target_ = true;
-        }
-      }
-
-      RCLCPP_INFO(this->get_logger(), "[INFO] Saving startup pose as initial target:");
-      RCLCPP_INFO(this->get_logger(), "   q_target=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-                  q_target_(0), q_target_(1), q_target_(2),
-                  q_target_(3), q_target_(4), q_target_(5));
-    }
-    // ========== 调试：打印卡尔曼增益 ==========
-    RCLCPP_INFO(this->get_logger(), "📝  First Kalman gain (Joint 1):");
-    auto K = joint_filters_[0].getKalmanGain();
-    RCLCPP_INFO(this->get_logger(), "   K = [%.4f, %.4f]", K(0, 0), K(0, 1));
-    RCLCPP_INFO(this->get_logger(), "       [%.4f, %.4f]", K(1, 0), K(1, 1));
+    // 拷贝启动位置 (仍在state_mutex_保护下)
+    q_startup = q_actual_;
 
     // ========== 关键：在所有初始化完成后才标记state_received_ ==========
     // 确保状态机闭环：只有当数据完整处理后才设置标志
     state_received_ = true;
 
     RCLCPP_INFO(this->get_logger(), "[STATE] state_received=true, ready for control");
+  }
+
+  // 打印首次Kalman增益 (在所有锁释放后,避免嵌套锁)
+  if (is_first_state && kalman_filter_enabled_)
+  {
+    // 需要 filter_mutex_ 来安全访问 joint_filters_[0]
+    std::lock_guard<std::mutex> filter_lock(filter_mutex_);
+    RCLCPP_INFO(this->get_logger(), "📝  First Kalman gain (Joint 1):");
+    auto K = joint_filters_[0].getKalmanGain();
+    RCLCPP_INFO(this->get_logger(), "   K = [%.4f, %.4f]", K(0, 0), K(0, 1));
+    RCLCPP_INFO(this->get_logger(), "       [%.4f, %.4f]", K(1, 0), K(1, 1));
+  }
+
+  // 释放 state_mutex_ (通过手动unlock)
+  state_lock.unlock();
+
+  // 现在可以安全地获取 action_mutex_ 而不会死锁
+  if (is_first_state)
+  {
+    std::lock_guard<std::mutex> action_lock(action_mutex_);
+    if (!has_target_)
+    {
+      q_target_ = q_startup;
+      has_target_ = true;
+
+      RCLCPP_INFO(this->get_logger(), "[INFO] Saving startup pose as initial target:");
+      RCLCPP_INFO(this->get_logger(), "   q_target=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+                  q_target_(0), q_target_(1), q_target_(2),
+                  q_target_(3), q_target_(4), q_target_(5));
+    }
   }
 }
 
@@ -961,26 +986,22 @@ void TorqueControllerActionServer::controlLoop()
   }
   last_control_loop_time_ = now;
 
-  // ========== 新增：周期性打印卡尔曼增益 ==========
+  // ========== Health monitoring ==========
   control_loop_count_++;
 
-  if (kalman_filter_enabled_ &&
-      control_loop_count_ % kalman_print_interval_ == 0)
+  // Print health status every 5 seconds (1000 loops at 200Hz)
+  if (control_loop_count_ % 1000 == 0)
   {
-    RCLCPP_INFO(this->get_logger(), "=== Kalman Gain Observation (Loop #%zu) ===",
-                control_loop_count_);
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    double time_since_state = state_received_ ?
+      (this->now() - last_joint_state_time_).seconds() : -1.0;
 
-    for (size_t i = 0; i < 6; i++)
-    {
-      auto K = joint_filters_[i].getKalmanGain();
-      RCLCPP_INFO(this->get_logger(),
-                  "Joint %zu: K = [[%.4f, %.4f], [%.4f, %.4f]]",
-                  i + 1,
-                  K(0, 0), K(0, 1),
-                  K(1, 0), K(1, 1));
-    }
-
-    RCLCPP_INFO(this->get_logger(), "==========================================");
+    RCLCPP_INFO(this->get_logger(),
+                "[HEALTH] Loop #%zu | Mode: %s | State age: %.1f ms | Kalman: %s",
+                control_loop_count_,
+                is_executing_ ? "EXECUTING" : "HOLD",
+                time_since_state * 1000.0,
+                kalman_filter_enabled_ ? "ON" : "OFF");
   }
 
   // 检查是否正在执行轨迹（线程安全）
@@ -1319,10 +1340,14 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
         double Q_pos = this->get_parameter("kalman.Q_pos").as_double();
         double Q_vel = this->get_parameter("kalman.Q_vel").as_double();
 
-        for (auto &filter : joint_filters_)
+        // ========== 修复数据竞争 #2: 修改 joint_filters_ 前获取 filter_mutex_ ==========
         {
-          filter.setProcessNoise(Q_pos, Q_vel);
-        }
+          std::lock_guard<std::mutex> filter_lock(filter_mutex_);
+          for (auto &filter : joint_filters_)
+          {
+            filter.setProcessNoise(Q_pos, Q_vel);
+          }
+        } // filter_mutex_ 自动释放
 
         RCLCPP_INFO(this->get_logger(), "[CONFIG] Process noise updated: Q_pos=%.1e, Q_vel=%.1e",
                     Q_pos, Q_vel);
@@ -1336,10 +1361,14 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
         double R_pos = this->get_parameter("kalman.R_pos").as_double();
         double R_vel = this->get_parameter("kalman.R_vel").as_double();
 
-        for (auto &filter : joint_filters_)
+        // ========== 修复数据竞争 #2: 修改 joint_filters_ 前获取 filter_mutex_ ==========
         {
-          filter.setMeasurementNoise(R_pos, R_vel);
-        }
+          std::lock_guard<std::mutex> filter_lock(filter_mutex_);
+          for (auto &filter : joint_filters_)
+          {
+            filter.setMeasurementNoise(R_pos, R_vel);
+          }
+        } // filter_mutex_ 自动释放
 
         RCLCPP_INFO(this->get_logger(), "[CONFIG] Measurement noise updated: R_pos=%.1e, R_vel=%.1e",
                     R_pos, R_vel);
@@ -1390,11 +1419,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
                     joint_idx + 1, loop_type.c_str(), gain_type.c_str(), new_value);
       }
     }
-    else if (name == "kalman.print_interval")
-    {
-      kalman_print_interval_ = param.as_int();
-      RCLCPP_INFO(this->get_logger(), "[CONFIG] Kalman print interval updated: %zu", kalman_print_interval_);
-    }
+    // kalman.print_interval parameter removed
   }
 
   return result;
