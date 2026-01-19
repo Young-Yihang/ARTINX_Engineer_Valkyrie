@@ -1,66 +1,7 @@
-// ========================================
-// 力矩控制节点 - 基于KDL的完整动力学前馈+级联P+PI反馈
-// ========================================
-//
-// [系统架构]
-// - 外环: 位置P → 期望速度
-// - 内环: 速度PI → 输出力矩
-// - 前馈: τ_ff = M(q)q̈ + C(q,q̇) + G(q) (完整动力学模型)
-// - 反馈: τ_fb = 级联P+PI(位置误差, 速度误差)
-// - 总力矩: τ = τ_ff + τ_fb
-//
-// [安全机制总览]
-// 1. 关节状态超时保护 (joint_state_timeout_sec = 100ms)
-//    - 触发: 100ms未收到/joint_states消息
-//    - 响应: 发布重力补偿力矩维持位置 (不紧急停止)
-//    - 恢复: 自动恢复，数据到达后继续控制
-//
-// 2. 力矩饱和限幅 (max_torque_per_joint)
-//    - 优先级: config > URDF > 默认20Nm
-//    - 应用: 前馈、反馈、总力矩三处独立限幅
-//    - 日志: 触发时每秒打印一次警告
-//
-// 3. 传感器数据校验
-//    - NaN/Inf检测: 拒绝整条消息，不更新时间戳
-//    - 速度尖峰检测: 限幅处理而非拒绝 (避免timeout)
-//    - 位置范围检查: 仅警告，不拒绝 (允许超过±2π)
-//
-// 4. 紧急停止 (emergencyStop)
-//    - 触发条件:
-//      a) 动力学计算NaN/Inf (前馈或重力项)
-//      b) 关节状态timeout且无法计算重力补偿
-//      c) 传感器数据包含NaN/Inf
-//    - 响应流程:
-//      a) 立即发送零力矩
-//      b) 中止当前轨迹 (PATH_TOLERANCE_VIOLATED)
-//      c) 清零积分器 (防止积分饱和)
-//      d) 保留has_target_(维持保持模式目标)
-//    - 不触发紧急停止的情况:
-//      - 速度尖峰: 限幅处理
-//      - timeout: 发送重力补偿维持位置
-//
-// 5. 控制循环频率监控
-//    - 期望: 200Hz (5ms周期)
-//    - 阈值: max_control_period_sec = 10ms
-//    - 超时: 打印警告但继续运行 (不停机)
-//
-// 6. Kalman滤波器抗噪声
-//    - 启用: kalman.enabled = true (默认)
-//    - 策略: 仅滤波速度，位置保持编码器原始精度
-//    - 动态调参: 支持运行时修改Q/R矩阵
-//
-// [参数动态调节]
-// - cascade_pid.joint_X.pos_Kp/Ki/Kd: 外环位置PID
-// - cascade_pid.joint_X.vel_Kp/Ki/Kd: 内环速度PID
-// - cascade_pid.joint_X.vel_limit: 速度饱和限制
-// - kalman.Q_pos/Q_vel: 过程噪声协方差
-// - kalman.R_pos/R_vel: 测量噪声协方差
-// - kalman.enabled: 滤波器开关
-//
-// [使用示例]
-// ros2 param set /torque_controller_action_server cascade_pid.joint_1.pos_Kp 15.0
-// ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
-// ========================================
+// 力矩控制节点 - 完整动力学前馈 + 级联P+PI反馈
+// 控制律: τ = M(q)q̈ + C(q,q̇) + G(q) + 级联PID(位置误差, 速度误差)
+// 安全机制: 超时保护(100ms)、力矩限幅、NaN检测、紧急停止自动恢复
+// 参数调节: ros2 param set /torque_controller_action_server cascade_pid.joint_X.pos_Kp 15.0
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
@@ -109,14 +50,14 @@ public: // 构造函数log
   {
     RCLCPP_INFO(this->get_logger(), "[START] Torque controller node starting (Cascade P+PI Control)");
 
-    // ========== 卡尔曼滤波器开关参数 ==========
+    // 卡尔曼滤波器参数
     this->declare_parameter("kalman.enabled", false); // 默认禁用
     kalman_filter_enabled_ = this->get_parameter("kalman.enabled").as_bool();
 
     RCLCPP_INFO(this->get_logger(), "[INFO] Kalman filter state: %s",
                 kalman_filter_enabled_ ? "[OK] Enabled" : "[DISABLED]");
 
-    // ========== 新增：声明卡尔曼滤波器参数（必须在读取之前声明）==========
+    // 声明卡尔曼滤波器参数
     this->declare_parameter("kalman.Q_pos", 1e-5);   // 过程噪声：位置
     this->declare_parameter("kalman.Q_vel", 1e-4);   // 过程噪声：速度
     this->declare_parameter("kalman.R_pos", 1e-3);   // 测量噪声：位置
@@ -275,48 +216,41 @@ public: // 构造函数log
   }
 
 private:
-  rclcpp_action::Server<FollowJointTrajectory>::SharedPtr action_server_; // 服务器对象实例指针
+  rclcpp_action::Server<FollowJointTrajectory>::SharedPtr action_server_;
 
-  trajectory_msgs::msg::JointTrajectory current_trajectory_; // 当前执行的轨迹
-  rclcpp::Time trajectory_start_time_;                       // 轨迹开始时间
-  std::shared_ptr<GoalHandleFJT> current_goal_handle_;       // 当前目标句柄
-  std::atomic<bool> is_executing_;                           // 是否正在执行 (atomic for thread-safety)
+  trajectory_msgs::msg::JointTrajectory current_trajectory_;
+  rclcpp::Time trajectory_start_time_;
+  std::shared_ptr<GoalHandleFJT> current_goal_handle_;
+  std::atomic<bool> is_executing_;  // 原子操作，避免竞态
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
-  KDL::JntArray q_actual_;     // 当前关节位置 [6]
-  KDL::JntArray q_dot_actual_; // 当前关节速度 [6]
-  KDL::JntArray q_target_;     // 目标关节位置（规划终点） [6]
-  std::mutex state_mutex_;     // 保护 q_actual_, q_dot_actual_, state_received_, last_joint_state_time_
-  std::mutex action_mutex_;    // 保护 is_executing_, has_target_, current_goal_handle_
-  std::mutex filter_mutex_;    // ========== 修复数据竞争 #2: 保护 joint_filters_ ==========
-  bool state_received_;        // 是否收到过状态
-  bool has_target_;            // 是否有目标位置
+  KDL::JntArray q_actual_, q_dot_actual_, q_target_;
+  std::mutex state_mutex_;    // 保护状态变量
+  std::mutex action_mutex_;   // 保护执行标志和目标句柄
+  std::mutex filter_mutex_;   // 保护滤波器
+  bool state_received_, has_target_;
 
-  KDL::Chain kdl_chain_;                               // 运动链实例
-  std::unique_ptr<DynamicsComputer> dynamic_computer_; // 动力学解算器实例
-
-  std::unique_ptr<MultiJointCascadePid> cascade_pid_; // 级联 P+PI 控制器
+  KDL::Chain kdl_chain_;
+  std::unique_ptr<DynamicsComputer> dynamic_computer_;
+  std::unique_ptr<MultiJointCascadePid> cascade_pid_;
 
   std::array<KalmanFilter1D, 6> joint_filters_;
   KDL::JntArray q_dot_filtered_;
-  bool kalman_filter_enabled_; // 卡尔曼滤波开关
+  bool kalman_filter_enabled_;
 
-  // Health monitoring
-  size_t control_loop_count_ = 0; // Control loop counter for health reporting
+  size_t control_loop_count_ = 0;
+  rclcpp::TimerBase::SharedPtr control_timer_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_;
+  double control_frequency_;
 
-  rclcpp::TimerBase::SharedPtr control_timer_;                                // 控制循环定时器
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_; // 力矩发布者
-  double control_frequency_;                                                  // 控制频率 (Hz)
-
-  // ========== Safety Parameters ==========
-  rclcpp::Time last_joint_state_time_;       // Last time joint state was received
-  rclcpp::Time last_control_loop_time_;      // Last control loop execution time
-  double joint_state_timeout_sec_ = 0.1;     // 100ms timeout
-  double max_control_period_sec_ = 0.01;     // 10ms (200Hz = 5ms nominal)
-  std::vector<double> max_torque_per_joint_; // Nm - per joint torque limits
-  double max_torque_default_ = 20.0;         // Nm - fallback torque limit
-  double max_velocity_sanity_ = 20.0;        // rad/s - sensor sanity check
-  double max_position_error_ = 0.8;          // rad - emergency stop threshold
+  // 安全参数
+  rclcpp::Time last_joint_state_time_, last_control_loop_time_;
+  double joint_state_timeout_sec_ = 0.1;     // 100ms
+  double max_control_period_sec_ = 0.01;     // 10ms
+  std::vector<double> max_torque_per_joint_;
+  double max_torque_default_ = 20.0;
+  double max_velocity_sanity_ = 20.0;
+  double max_position_error_ = 0.8;
 
   // Action 回调函数
   rclcpp_action::GoalResponse handleGoal(
@@ -331,7 +265,7 @@ private:
 
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg); // 关节状态回调
 
-  // ========== Safety Functions ==========
+  // 安全函数
   void emergencyStop(const std::string &reason)
   {
     RCLCPP_ERROR(this->get_logger(), "[EMERGENCY STOP] %s", reason.c_str());
@@ -351,119 +285,62 @@ private:
     }
   }
 
-  /**
-   * @brief Complete cleanup after execution failure
-   * CRITICAL: Must be called with action_mutex_ held
-   *
-   * This method performs a comprehensive state reset to ensure the node
-   * can accept new trajectory goals after a failure. It addresses the
-   * bug where incomplete cleanup caused the node to become unusable.
-   *
-   * Recovery steps:
-   * 1. Clear trajectory state (trajectory_msgs and start time)
-   * 2. Safely abort goal handle (check status first)
-   * 3. Clear execution flag
-   * 4. Reset cascade PID integrators
-   * 5. Re-initialize Kalman filters
-   * 6. Send gravity compensation torque
-   *
-   * @param reason Description of why recovery is needed (for logging)
-   */
+  // 执行失败后完整清理: 清空轨迹、中止目标、复位积分器和滤波器、发送重力补偿
+  // 注意: 必须在持有 action_mutex_ 时调用
   void executionRecoveryCeremony(const std::string& reason)
   {
-    RCLCPP_ERROR(this->get_logger(), "[RECOVERY] Initiating recovery: %s", reason.c_str());
+    RCLCPP_ERROR(this->get_logger(), "[RECOVERY] %s", reason.c_str());
 
-    // Step 1: Clear trajectory state
     current_trajectory_ = trajectory_msgs::msg::JointTrajectory();
     trajectory_start_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
-    RCLCPP_INFO(this->get_logger(), "[RECOVERY] Trajectory state cleared");
 
-    // Step 2: Safely abort goal handle (check status before abort)
     if (current_goal_handle_)
     {
-      auto status = current_goal_handle_->get_status();
-      if (status == rclcpp_action::GoalStatus::STATUS_EXECUTING ||
-          status == rclcpp_action::GoalStatus::STATUS_ACCEPTED)
+      if (current_goal_handle_->is_active())
       {
         auto result = std::make_shared<FollowJointTrajectory::Result>();
         result->error_code = FollowJointTrajectory::Result::PATH_TOLERANCE_VIOLATED;
         result->error_string = "Recovery: " + reason;
         current_goal_handle_->abort(result);
-        RCLCPP_INFO(this->get_logger(), "[RECOVERY] Goal handle aborted");
-      }
-      else
-      {
-        RCLCPP_WARN(this->get_logger(),
-          "[RECOVERY] Skipping abort, goal already completed (status=%d)", (int)status);
       }
       current_goal_handle_.reset();
     }
 
-    // Step 3: Clear execution flag
     is_executing_.store(false, std::memory_order_release);
-    RCLCPP_INFO(this->get_logger(), "[RECOVERY] Execution flag cleared");
 
-    // Step 4: Reset cascade PID integrators
-    if (cascade_pid_)
-    {
-      cascade_pid_->resetAll();
-      RCLCPP_INFO(this->get_logger(), "[RECOVERY] PID integrators reset");
-    }
+    if (cascade_pid_) cascade_pid_->resetAll();
 
-    // Step 5: Re-initialize Kalman filters to current state
     if (kalman_filter_enabled_)
     {
       std::lock_guard<std::mutex> filter_lock(filter_mutex_);
       std::lock_guard<std::mutex> state_lock(state_mutex_);
-
       for (size_t i = 0; i < 6; i++)
       {
         joint_filters_[i].initialize(q_actual_(i), q_dot_actual_(i));
       }
-      RCLCPP_INFO(this->get_logger(), "[RECOVERY] Kalman filters re-initialized");
     }
 
-    // Step 6: Preserve hold target (intentionally NOT reset)
-    // has_target_ and q_target_ maintain position for hold mode
-    RCLCPP_INFO(this->get_logger(),
-      "[RECOVERY] Hold mode target preserved: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-      q_target_(0), q_target_(1), q_target_(2),
-      q_target_(3), q_target_(4), q_target_(5));
-
-    // Step 7: Send gravity compensation immediately to maintain position
+    // 发送重力补偿保持位置
     {
       std::lock_guard<std::mutex> state_lock(state_mutex_);
       if (state_received_)
       {
         KDL::JntArray tau_gravity(6);
-        if (dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity))
-        {
-          std_msgs::msg::Float64MultiArray torque_msg;
-          torque_msg.data.resize(6);
-          for (size_t i = 0; i < 6; i++)
-          {
-            torque_msg.data[i] = tau_gravity(i);
+        dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
 
-            // Apply torque limits
-            double limit = (i < max_torque_per_joint_.size())
-              ? max_torque_per_joint_[i] : max_torque_default_;
-            torque_msg.data[i] = std::clamp(torque_msg.data[i], -limit, limit);
-          }
-          torque_pub_->publish(torque_msg);
-          RCLCPP_INFO(this->get_logger(), "[RECOVERY] Gravity compensation sent");
-        }
-        else
+        std_msgs::msg::Float64MultiArray torque_msg;
+        torque_msg.data.resize(6);
+        for (size_t i = 0; i < 6; i++)
         {
-          RCLCPP_WARN(this->get_logger(),
-            "[RECOVERY] Gravity computation failed, sending zero torque");
-          std_msgs::msg::Float64MultiArray zero_msg;
-          zero_msg.data.resize(6, 0.0);
-          torque_pub_->publish(zero_msg);
+          double limit = (i < max_torque_per_joint_.size())
+            ? max_torque_per_joint_[i] : max_torque_default_;
+          torque_msg.data[i] = std::clamp(tau_gravity(i), -limit, limit);
         }
+        torque_pub_->publish(torque_msg);
       }
     }
 
-    RCLCPP_INFO(this->get_logger(), "[RECOVERY] Complete - Node ready for new goals");
+    RCLCPP_INFO(this->get_logger(), "[RECOVERY] Complete - Ready for new goals");
   }
 
   bool initializeDynamics(); // 动力学初始化
@@ -549,12 +426,9 @@ void TorqueControllerActionServer::handleAccepted(
     return;
   }
 
-  // ========== 修复死锁 #1: 避免嵌套锁 - 先拷贝数据再加锁 ==========
-  // 策略: 分离锁的生命周期,避免 action_mutex_ 和 state_mutex_ 同时持有
-
-  // Step 1: 拷贝当前位置到局部变量 (只持有state_mutex_)
+  // 避免嵌套锁: 先拷贝状态数据，再持有action锁
   KDL::JntArray q_current(6);
-  bool has_state = false;
+  has_state = false;  // Reset and reuse the has_state variable from above
   {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
     if (state_received_)
@@ -562,9 +436,7 @@ void TorqueControllerActionServer::handleAccepted(
       q_current = q_actual_;
       has_state = true;
     }
-  } // state_mutex_ 立即释放
-
-  // Step 2: 现在可以安全地持有 action_mutex_ 而不会死锁
+  }
   {
     std::lock_guard<std::mutex> action_lock(action_mutex_);
 
