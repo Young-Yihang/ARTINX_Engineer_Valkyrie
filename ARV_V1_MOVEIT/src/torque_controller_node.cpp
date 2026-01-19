@@ -67,6 +67,7 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <string>
 #include <mutex>
+#include <atomic>
 #include <fstream>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
@@ -279,7 +280,7 @@ private:
   trajectory_msgs::msg::JointTrajectory current_trajectory_; // 当前执行的轨迹
   rclcpp::Time trajectory_start_time_;                       // 轨迹开始时间
   std::shared_ptr<GoalHandleFJT> current_goal_handle_;       // 当前目标句柄
-  bool is_executing_;                                        // 是否正在执行
+  std::atomic<bool> is_executing_;                           // 是否正在执行 (atomic for thread-safety)
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   KDL::JntArray q_actual_;     // 当前关节位置 [6]
@@ -340,30 +341,129 @@ private:
     safe_msg.data.resize(6, 0.0);
     torque_pub_->publish(safe_msg);
 
-    // 2. Abort trajectory if executing (need lock for thread safety)
+    // 2. Execute complete recovery ceremony
     {
       std::lock_guard<std::mutex> action_lock(action_mutex_);
-      if (is_executing_ && current_goal_handle_)
+      if (is_executing_.load(std::memory_order_acquire) && current_goal_handle_)
+      {
+        executionRecoveryCeremony(reason);
+      }
+    }
+  }
+
+  /**
+   * @brief Complete cleanup after execution failure
+   * CRITICAL: Must be called with action_mutex_ held
+   *
+   * This method performs a comprehensive state reset to ensure the node
+   * can accept new trajectory goals after a failure. It addresses the
+   * bug where incomplete cleanup caused the node to become unusable.
+   *
+   * Recovery steps:
+   * 1. Clear trajectory state (trajectory_msgs and start time)
+   * 2. Safely abort goal handle (check status first)
+   * 3. Clear execution flag
+   * 4. Reset cascade PID integrators
+   * 5. Re-initialize Kalman filters
+   * 6. Send gravity compensation torque
+   *
+   * @param reason Description of why recovery is needed (for logging)
+   */
+  void executionRecoveryCeremony(const std::string& reason)
+  {
+    RCLCPP_ERROR(this->get_logger(), "[RECOVERY] Initiating recovery: %s", reason.c_str());
+
+    // Step 1: Clear trajectory state
+    current_trajectory_ = trajectory_msgs::msg::JointTrajectory();
+    trajectory_start_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    RCLCPP_INFO(this->get_logger(), "[RECOVERY] Trajectory state cleared");
+
+    // Step 2: Safely abort goal handle (check status before abort)
+    if (current_goal_handle_)
+    {
+      auto status = current_goal_handle_->get_status();
+      if (status == rclcpp_action::GoalStatus::STATUS_EXECUTING ||
+          status == rclcpp_action::GoalStatus::STATUS_ACCEPTED)
       {
         auto result = std::make_shared<FollowJointTrajectory::Result>();
         result->error_code = FollowJointTrajectory::Result::PATH_TOLERANCE_VIOLATED;
-        result->error_string = "Emergency stop: " + reason;
+        result->error_string = "Recovery: " + reason;
         current_goal_handle_->abort(result);
-        is_executing_ = false;
-        current_goal_handle_.reset();
+        RCLCPP_INFO(this->get_logger(), "[RECOVERY] Goal handle aborted");
       }
-
-      // 保留has_target_维持模式目标，避免失控
+      else
+      {
+        RCLCPP_WARN(this->get_logger(),
+          "[RECOVERY] Skipping abort, goal already completed (status=%d)", (int)status);
+      }
+      current_goal_handle_.reset();
     }
 
-    // 保留state_received_，确保重力补偿有效
+    // Step 3: Clear execution flag
+    is_executing_.store(false, std::memory_order_release);
+    RCLCPP_INFO(this->get_logger(), "[RECOVERY] Execution flag cleared");
 
-    // 3. 清零积分器，避免积分饱和
+    // Step 4: Reset cascade PID integrators
     if (cascade_pid_)
     {
       cascade_pid_->resetAll();
-      RCLCPP_WARN(this->get_logger(), "[EMERGENCY] Cascade PID integrators reset");
+      RCLCPP_INFO(this->get_logger(), "[RECOVERY] PID integrators reset");
     }
+
+    // Step 5: Re-initialize Kalman filters to current state
+    if (kalman_filter_enabled_)
+    {
+      std::lock_guard<std::mutex> filter_lock(filter_mutex_);
+      std::lock_guard<std::mutex> state_lock(state_mutex_);
+
+      for (size_t i = 0; i < 6; i++)
+      {
+        joint_filters_[i].initialize(q_actual_(i), q_dot_actual_(i));
+      }
+      RCLCPP_INFO(this->get_logger(), "[RECOVERY] Kalman filters re-initialized");
+    }
+
+    // Step 6: Preserve hold target (intentionally NOT reset)
+    // has_target_ and q_target_ maintain position for hold mode
+    RCLCPP_INFO(this->get_logger(),
+      "[RECOVERY] Hold mode target preserved: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+      q_target_(0), q_target_(1), q_target_(2),
+      q_target_(3), q_target_(4), q_target_(5));
+
+    // Step 7: Send gravity compensation immediately to maintain position
+    {
+      std::lock_guard<std::mutex> state_lock(state_mutex_);
+      if (state_received_)
+      {
+        KDL::JntArray tau_gravity(6);
+        if (dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity))
+        {
+          std_msgs::msg::Float64MultiArray torque_msg;
+          torque_msg.data.resize(6);
+          for (size_t i = 0; i < 6; i++)
+          {
+            torque_msg.data[i] = tau_gravity(i);
+
+            // Apply torque limits
+            double limit = (i < max_torque_per_joint_.size())
+              ? max_torque_per_joint_[i] : max_torque_default_;
+            torque_msg.data[i] = std::clamp(torque_msg.data[i], -limit, limit);
+          }
+          torque_pub_->publish(torque_msg);
+          RCLCPP_INFO(this->get_logger(), "[RECOVERY] Gravity compensation sent");
+        }
+        else
+        {
+          RCLCPP_WARN(this->get_logger(),
+            "[RECOVERY] Gravity computation failed, sending zero torque");
+          std_msgs::msg::Float64MultiArray zero_msg;
+          zero_msg.data.resize(6, 0.0);
+          torque_pub_->publish(zero_msg);
+        }
+      }
+    }
+
+    RCLCPP_INFO(this->get_logger(), "[RECOVERY] Complete - Node ready for new goals");
   }
 
   bool initializeDynamics(); // 动力学初始化
@@ -401,7 +501,7 @@ rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
   bool currently_executing;
   {
     std::lock_guard<std::mutex> action_lock(action_mutex_);
-    currently_executing = is_executing_;
+    currently_executing = is_executing_.load(std::memory_order_acquire);
   }
 
   if (currently_executing)
@@ -468,7 +568,7 @@ void TorqueControllerActionServer::handleAccepted(
   {
     std::lock_guard<std::mutex> action_lock(action_mutex_);
 
-    if (is_executing_ && current_goal_handle_)
+    if (is_executing_.load(std::memory_order_acquire) && current_goal_handle_)
     {
       RCLCPP_WARN(this->get_logger(), "[WARN] Cancelling old trajectory, switching to new one");
 
@@ -483,7 +583,7 @@ void TorqueControllerActionServer::handleAccepted(
     current_trajectory_ = goal->trajectory;
     current_goal_handle_ = goal_handle;
     trajectory_start_time_ = this->now();
-    is_executing_ = true;
+    is_executing_.store(true, std::memory_order_release);
 
     // 打印轨迹信息
     const auto &first_point = current_trajectory_.points[0];
@@ -999,17 +1099,13 @@ void TorqueControllerActionServer::controlLoop()
     RCLCPP_INFO(this->get_logger(),
                 "[HEALTH] Loop #%zu | Mode: %s | State age: %.1f ms | Kalman: %s",
                 control_loop_count_,
-                is_executing_ ? "EXECUTING" : "HOLD",
+                is_executing_.load(std::memory_order_acquire) ? "EXECUTING" : "HOLD",
                 time_since_state * 1000.0,
                 kalman_filter_enabled_ ? "ON" : "OFF");
   }
 
-  // 检查是否正在执行轨迹（线程安全）
-  bool executing;
-  {
-    std::lock_guard<std::mutex> action_lock(action_mutex_);
-    executing = is_executing_;
-  }
+  // 检查是否正在执行轨迹（原子读取，无需锁）
+  bool executing = is_executing_.load(std::memory_order_acquire);
 
   if (!executing)
   {
@@ -1221,7 +1317,7 @@ void TorqueControllerActionServer::controlLoop()
     // 清理状态（但保留 q_target_ 和 has_target_）
     {
       std::lock_guard<std::mutex> action_lock(action_mutex_);
-      is_executing_ = false;
+      is_executing_.store(false, std::memory_order_release);
       current_goal_handle_.reset();
     }
     return;
@@ -1231,7 +1327,14 @@ void TorqueControllerActionServer::controlLoop()
   KDL::JntArray q_d(6), qd_d(6), qdd_d(6);
   if (!interpolateTrajectory(current_traj_copy, t_now, q_d, qd_d, qdd_d))
   {
-    RCLCPP_ERROR(this->get_logger(), "[ERROR] Trajectory interpolation failed");
+    RCLCPP_ERROR(this->get_logger(), "[ERROR] Trajectory interpolation failed at t=%.3fs", t_now);
+
+    // ✅ Fix: Trigger recovery ceremony to clean up state
+    std::lock_guard<std::mutex> action_lock(action_mutex_);
+    if (current_goal_handle_ && is_executing_.load(std::memory_order_acquire))
+    {
+      executionRecoveryCeremony("Interpolation failure");
+    }
     return;
   }
 
