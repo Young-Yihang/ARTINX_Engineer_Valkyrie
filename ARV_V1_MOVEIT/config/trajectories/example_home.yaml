@@ -1,6 +1,6 @@
 meta:
   name: "example_home"
-  description: "示例轨迹 - 回到home姿态"
+  description: "示例轨迹 - 回到home姿态 - 真的吗？这是任意位置回到home，还是从某个位置回到home的特定轨迹？"
   saved_at: "2026-01-19T12:00:00"
   duration_sec: 2.0
 
