@@ -1,17 +1,4 @@
-// ============================================================
-// 硬件接口节点 (Hardware Interface Node)
-//
-// 职责:
-//   - 订阅 /effort_controller/commands 获取力矩指令
-//   - 通过串口发送力矩到下位机
-//   - 从串口接收关节状态 (位置、速度)
-//   - 发布到 /hardware_joint_states 供闭环控制
-//
-// Stage: SIM2REAL
-// Author: ARV V1 Team
-// Date: 2025-11-04
-// ============================================================
-
+// 硬件接口节点: 串口发送力矩指令, 接收关节状态发布至/joint_states
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
@@ -34,8 +21,9 @@ public:
         // 1. 声明参数
         this->declare_parameter("serial_port", "/dev/ttyACM0");
         this->declare_parameter("baud_rate", 921600);
-        this->declare_parameter("publish_rate", 200.0); // 100Hz 发布频率
-        this->declare_parameter("simulation_mode", false);  // 新增：仿真模式参数
+        this->declare_parameter("publish_rate", 200.0); 
+        this->declare_parameter("simulation_mode", false); // 新增：仿真模式参数
+        this->declare_parameter("force_zero_torque", false); // 新增：强制零力矩开关（默认false允许正常控制）
 
         // 2. 获取参数
         std::string port = this->get_parameter("serial_port").as_string();
@@ -45,32 +33,55 @@ public:
 
         RCLCPP_INFO(this->get_logger(), "[INIT] Serial port: %s, Baud: %d",
                     port.c_str(), baud);
-        
-        if (simulation_mode_) {
-            RCLCPP_INFO(this->get_logger(), "[SIMULATION MODE] Using MuJoCo feedback, serial TX only");
+
+        if (simulation_mode_)
+        {
+            RCLCPP_INFO(this->get_logger(), "[SIMULATION MODE] Serial TX only, no RX feedback");
         }
 
-        // 3. 初始化串口
+        // 3. 初始化串口（失败不退出，依赖自动重连）
         if (!initSerial(port, baud))
         {
-            RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to open serial port");
-            return;
+            RCLCPP_WARN(this->get_logger(), "[WARN] Initial serial open failed: %s", port.c_str());
+            RCLCPP_INFO(this->get_logger(), "[INFO] Node will continue running and auto-reconnect when device available");
+        }
+        else
+        {
+            RCLCPP_INFO(this->get_logger(), "[OK] Serial port opened: %s @ %d baud", port.c_str(), baud);
         }
 
         // 4. 初始化 ROS2 通信
         initROS2Communication();
 
-        // 5. 启动收发线程
+        // 5. 启动收发线程（无论串口是否打开）
         running_ = true;
-        
-        if (simulation_mode_) {
+
+        if (simulation_mode_)
+        {
             // 仿真模式：不启动串口接收线程，等待MuJoCo反馈
             RCLCPP_INFO(this->get_logger(), "[OK] Simulation mode - Serial TX only, waiting for MuJoCo feedback");
-        } else {
-            // 真机模式：启动串口接收线程
-            receive_thread_ = std::thread(&HardwareInterfaceNode::receiveLoop, this);
-            RCLCPP_INFO(this->get_logger(), "[OK] Hardware mode - Serial RX/TX enabled");
         }
+        else
+        {
+            // 真机模式：启动串口接收线程（会自动重连）
+            receive_thread_ = std::thread(&HardwareInterfaceNode::receiveLoop, this);
+            RCLCPP_INFO(this->get_logger(), "[OK] Hardware mode - Serial RX/TX enabled (auto-reconnect every 200ms)");
+        }
+
+        // 6. 启动200Hz发送定时器（解耦架构：独立于解算层）
+        auto send_period = std::chrono::microseconds(5000); // 5ms = 200Hz
+        send_timer_ = this->create_wall_timer(
+            send_period,
+            std::bind(&HardwareInterfaceNode::sendLoop, this));
+        
+        last_torque_update_ = this->now(); // 初始化时间戳
+        RCLCPP_INFO(this->get_logger(), "[OK] Send timer started at 200Hz (decoupled from controller)");
+
+        // 7. 启动健康监控定时器 (5Hz)
+        last_rx_activity_.store(std::chrono::steady_clock::now());
+        health_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(5000),
+            std::bind(&HardwareInterfaceNode::healthCheck, this));
 
         RCLCPP_INFO(this->get_logger(), "[OK] Hardware interface node started");
     }
@@ -104,7 +115,7 @@ private:
     // ========== 成员变量 ==========
     int num_joints_;
     std::atomic<bool> running_;
-    bool simulation_mode_;  // 新增：是否为仿真模式（不从串口读取）
+    bool simulation_mode_; // 新增：是否为仿真模式（不从串口读取）
 
     // 串口
     std::string device_name_;
@@ -117,13 +128,25 @@ private:
     // ROS2 通信
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr torque_sub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
-    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr mujoco_feedback_sub_;  // 新增：订阅MuJoCo仿真反馈
+    rclcpp::TimerBase::SharedPtr send_timer_; // 新增：200Hz发送定时器
 
     // 数据缓存
     std::mutex data_mutex_;
-    float current_torques_[6] = {0};
     float current_positions_[6] = {0};
     float current_velocities_[6] = {0};
+    
+    // 力矩缓存（解耦架构）
+    std::mutex torque_cache_mutex_;
+    float cached_torques_[6] = {0};
+    rclcpp::Time last_torque_update_;
+    bool torque_data_valid_ = false;
+
+    // Health monitoring
+    std::atomic<std::chrono::steady_clock::time_point> last_rx_activity_;
+    std::atomic<uint64_t> rx_packet_count_{0};
+    std::atomic<uint64_t> tx_packet_count_{0};
+    std::atomic<uint64_t> rx_crc_errors_{0};
+    rclcpp::TimerBase::SharedPtr health_timer_;
 
     // ========== 初始化函数 ==========
 
@@ -185,12 +208,40 @@ private:
 
     bool readExact(uint8_t *dst, size_t len)
     {
+        // Safety check: reject unreasonable lengths
+        if (len == 0 || len > 4096)
+        {
+            RCLCPP_ERROR(this->get_logger(), "[SAFETY] Invalid read length: %zu", len);
+            return false;
+        }
+
         size_t received = 0;
         std::vector<uint8_t> tmp;
         tmp.reserve(256);
 
+        // Timeout protection
+        auto start_time = std::chrono::steady_clock::now();
+        auto last_activity = start_time;
+        constexpr auto TOTAL_TIMEOUT = std::chrono::milliseconds(500);
+        constexpr auto BYTE_TIMEOUT = std::chrono::milliseconds(200);
+
         while (running_ && received < len)
         {
+            // Check total timeout
+            auto now = std::chrono::steady_clock::now();
+            if (now - start_time > TOTAL_TIMEOUT)
+            {
+                RCLCPP_ERROR(this->get_logger(), "[TIMEOUT] Read total timeout (%zu/%zu bytes)", received, len);
+                return false;
+            }
+
+            // Check stall timeout (no data received)
+            if (now - last_activity > BYTE_TIMEOUT)
+            {
+                RCLCPP_ERROR(this->get_logger(), "[TIMEOUT] Read stall timeout (%zu/%zu bytes)", received, len);
+                return false;
+            }
+
             if (!serial_port_ || !serial_port_->is_open())
             {
                 return false;
@@ -211,7 +262,9 @@ private:
                 {
                     serial_port_->close();
                 }
-                catch (...) {}
+                catch (...)
+                {
+                }
                 return false;
             }
 
@@ -219,6 +272,9 @@ private:
             {
                 continue;
             }
+
+            // Update activity timestamp when data received
+            last_activity = std::chrono::steady_clock::now();
 
             if (n > need)
             {
@@ -240,19 +296,11 @@ private:
             10,
             std::bind(&HardwareInterfaceNode::torqueCallback, this, std::placeholders::_1));
 
-        // 发布关节状态
+        // 发布关节状态到标准话题 (MoveIt/RViz/数字孪生都订阅此话题)
         joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
-            "/hardware_joint_states",
+            "/joint_states",
             10);
-        
-        // 仿真模式下订阅MuJoCo反馈
-        if (simulation_mode_) {
-            mujoco_feedback_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-                "/joint_states",
-                10,
-                std::bind(&HardwareInterfaceNode::mujocoFeedbackCallback, this, std::placeholders::_1));
-            RCLCPP_INFO(this->get_logger(), "[INIT] Subscribed to /joint_states for simulation feedback");
-        }
+        RCLCPP_INFO(this->get_logger(), "[INIT] Publishing to /joint_states");
     }
 
     // ========== 回调函数 ==========
@@ -265,41 +313,103 @@ private:
             return;
         }
 
-        // 1. 缓存力矩数据
+        // 解耦架构：仅缓存数据，不立即发送（由sendLoop定时器负责发送）
+        std::lock_guard<std::mutex> lock(torque_cache_mutex_);
+        for (int i = 0; i < num_joints_; ++i)
         {
-            std::lock_guard<std::mutex> lock(data_mutex_);
-            for (int i = 0; i < num_joints_; ++i)
-            {
-                current_torques_[i] = static_cast<float>(msg->data[i]);
-            }
+            cached_torques_[i] = static_cast<float>(msg->data[i]);
         }
-
-        // 2. 打包并发送
-        sendTorqueCommand();
-    }
-
-    // 新增：MuJoCo仿真反馈回调（仿真模式下使用）
-    void mujocoFeedbackCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
-    {
-        if (msg->position.size() < static_cast<size_t>(num_joints_) ||
-            msg->velocity.size() < static_cast<size_t>(num_joints_))
-        {
-            RCLCPP_WARN(this->get_logger(), "[WARN] Invalid MuJoCo feedback size");
-            return;
-        }
-
-        // 直接转发MuJoCo的反馈到/hardware_joint_states
-        float positions[6], velocities[6];
-        for (int i = 0; i < num_joints_; ++i) {
-            positions[i] = static_cast<float>(msg->position[i]);
-            velocities[i] = static_cast<float>(msg->velocity[i]);
-        }
+        last_torque_update_ = this->now();
+        torque_data_valid_ = true;
         
-        updateAndPublishJointStates(positions, velocities);
+        // 不再调用 sendTorqueCommand()！发送由定时器驱动
     }
 
     // ========== 串口收发函数 ==========
 
+    // 新增：200Hz定时发送循环（解耦架构核心）
+    void sendLoop()
+    {
+        if (!serial_port_ || !serial_port_->is_open())
+        {
+            return; // 串口未打开，等待自动重连
+        }
+
+        float torques_to_send[6];
+        bool data_fresh = false;
+        
+        // 1. 读取缓存的力矩数据
+        {
+            std::lock_guard<std::mutex> lock(torque_cache_mutex_);
+            
+            // 检查数据新鲜度（10ms超时阈值）
+            if (torque_data_valid_)
+            {
+                double age = (this->now() - last_torque_update_).seconds();
+                if (age > 0.01)
+                {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "[WARN] Torque data stale (%.1f ms old), continuing with cached values", age * 1000);
+                }
+                data_fresh = true;
+            }
+            else
+            {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "[WARN] No torque data received yet, sending zeros");
+            }
+            
+            // 应用 force_zero_torque 安全开关
+            if (this->get_parameter("force_zero_torque").as_bool())
+            {
+                std::fill(torques_to_send, torques_to_send + 6, 0.0f);
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                    "[SAFETY] Force zero torque mode enabled - sending all zeros");
+            }
+            else if (data_fresh)
+            {
+                std::copy(cached_torques_, cached_torques_ + 6, torques_to_send);
+            }
+            else
+            {
+                std::fill(torques_to_send, torques_to_send + 6, 0.0f);
+            }
+        }
+        
+        // 2. 构建并发送SEASKY数据包
+        SerialProtocol::TorqueCommand cmd;
+        for (int i = 0; i < 6; ++i)
+        {
+            cmd.torques[i] = torques_to_send[i];
+        }
+        
+        std::vector<uint8_t> packet = SerialProtocol::buildTorquePacket(cmd);
+
+        try
+        {
+            const size_t sent = serial_port_->send(packet);
+            if (sent != packet.size())
+            {
+                RCLCPP_WARN(this->get_logger(), "[WARN] Partial send: %zu/%zu", sent, packet.size());
+            }
+            else
+            {
+                tx_packet_count_++;
+            }
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "[ERROR] Send failed: %s", e.what());
+            try
+            {
+                serial_port_->close();
+            }
+            catch (...) {}
+        }
+    }
+
+    // 保留旧函数供兼容（但不再使用）
     void sendTorqueCommand()
     {
         if (!serial_port_ || !serial_port_->is_open())
@@ -309,9 +419,9 @@ private:
 
         SerialProtocol::TorqueCommand cmd;
         {
-            std::lock_guard<std::mutex> lock(data_mutex_);
+            std::lock_guard<std::mutex> lock(torque_cache_mutex_);
             for (int i = 0; i < 6; ++i)
-                cmd.torques[i] = current_torques_[i];
+                cmd.torques[i] = cached_torques_[i];
         }
 
         std::vector<uint8_t> packet = SerialProtocol::buildTorquePacket(cmd);
@@ -332,7 +442,9 @@ private:
             {
                 serial_port_->close();
             }
-            catch (...) {}
+            catch (...)
+            {
+            }
         }
     }
 
@@ -365,67 +477,79 @@ private:
                 switch (state)
                 {
                 case WAIT_SOF:
+                {
+                    uint8_t byte = 0;
+                    if (!readExact(&byte, 1))
                     {
-                        uint8_t byte = 0;
-                        if (!readExact(&byte, 1))
-                        {
-                            state = WAIT_SOF;
-                            break;
-                        }
-
-                        if (byte == SerialProtocol::SOF)
-                        {
-                            buffer.clear();
-                            buffer.push_back(byte);
-                            state = READ_LEN;
-                        }
+                        state = WAIT_SOF;
+                        break;
                     }
-                    break;
+
+                    // Update RX activity on every byte read
+                    last_rx_activity_.store(std::chrono::steady_clock::now());
+
+                    if (byte == SerialProtocol::SOF)
+                    {
+                        buffer.clear();
+                        buffer.push_back(byte);
+                        state = READ_LEN;
+                    }
+                }
+                break;
 
                 case READ_LEN:
+                {
+                    uint8_t len_bytes[2] = {0, 0};
+                    if (!readExact(len_bytes, 2))
                     {
-                        uint8_t len_bytes[2] = {0, 0};
-                        if (!readExact(len_bytes, 2))
-                        {
-                            state = WAIT_SOF;
-                            break;
-                        }
-                        buffer.push_back(len_bytes[0]);
-                        buffer.push_back(len_bytes[1]);
-
-                        data_len = len_bytes[0] | (len_bytes[1] << 8);
-                        state = READ_HEADER_CRC;
+                        state = WAIT_SOF;
+                        break;
                     }
-                    break;
+                    buffer.push_back(len_bytes[0]);
+                    buffer.push_back(len_bytes[1]);
+
+                    data_len = len_bytes[0] | (len_bytes[1] << 8);
+
+                    // Safety check: validate packet length
+                    if (data_len > 512)
+                    {
+                        RCLCPP_ERROR(this->get_logger(), "[SAFETY] Invalid packet length: %u, resync", data_len);
+                        state = WAIT_SOF;
+                        break;
+                    }
+
+                    state = READ_HEADER_CRC;
+                }
+                break;
 
                 case READ_HEADER_CRC:
+                {
+                    uint8_t byte = 0;
+                    if (!readExact(&byte, 1))
                     {
-                        uint8_t byte = 0;
-                        if (!readExact(&byte, 1))
-                        {
-                            state = WAIT_SOF;
-                            break;
-                        }
-                        buffer.push_back(byte);
-
-                        // Validate Header CRC8 (SOF + Len_L + Len_H)
-                        uint8_t expected_crc = SerialProtocol::Get_CRC8_Check_Sum(buffer.data(), 3, 0xFF);
-                        if (byte == expected_crc)
-                        {
-                            state = READ_BODY;
-                        }
-                        else
-                        {
-                            RCLCPP_WARN(this->get_logger(), "[RX] Header CRC Fail");
-                            state = WAIT_SOF;
-                        }
+                        state = WAIT_SOF;
+                        break;
                     }
-                    break;
+                    buffer.push_back(byte);
+
+                    // Validate Header CRC8 (SOF + Len_L + Len_H)
+                    uint8_t expected_crc = SerialProtocol::Get_CRC8_Check_Sum(buffer.data(), 3, 0xFF);
+                    if (byte == expected_crc)
+                    {
+                        state = READ_BODY;
+                    }
+                    else
+                    {
+                        RCLCPP_WARN(this->get_logger(), "[RX] Header CRC Fail");
+                        rx_crc_errors_++;
+                        state = WAIT_SOF;
+                    }
+                }
+                break;
 
                 case READ_BODY:
-                    // Body size = DataLen + 2 (CRC16)
-                    // Note: DataLen includes CmdID(2) + Flags(2) + Payload(N)
-                    size_t body_size = data_len + 2;
+                    // Body size = CmdID(2) + DataLen + CRC16(2)
+                    size_t body_size = 2 + data_len + 2;  // CmdID(2) + data_len + CRC16(2)
 
                     {
                         std::vector<uint8_t> body(body_size);
@@ -443,10 +567,12 @@ private:
                         if (received_crc == calculated_crc)
                         {
                             processPacket(buffer);
+                            rx_packet_count_++;
                         }
                         else
                         {
                             RCLCPP_WARN(this->get_logger(), "[RX] Body CRC Fail");
+                            rx_crc_errors_++;
                         }
                         state = WAIT_SOF;
                     }
@@ -463,7 +589,9 @@ private:
                         serial_port_->close();
                     }
                 }
-                catch (...) {}
+                catch (...)
+                {
+                }
                 state = WAIT_SOF;
             }
         }
@@ -481,11 +609,16 @@ private:
         {
             float positions[6];
             float velocities[6];
+            uint32_t islive[6];  // 存活状态（暂不使用）
 
+            // 新协议格式：每关节交替读取 Position, Speed, IsLive
+            // Payload: [Pos0, Spd0, IsLive0, Pos1, Spd1, IsLive1, ...]
             for (int i = 0; i < 6; ++i)
+            {
                 positions[i] = SerialProtocol::read_float(packet.data(), offset);
-            for (int i = 0; i < 6; ++i)
                 velocities[i] = SerialProtocol::read_float(packet.data(), offset);
+                islive[i] = SerialProtocol::read_uint32(packet.data(), offset);  // 读取但暂不使用
+            }
 
             updateAndPublishJointStates(positions, velocities);
         }
@@ -503,7 +636,7 @@ private:
         // 2. 发布 ROS2 消息
         auto msg = sensor_msgs::msg::JointState();
         msg.header.stamp = this->now();
-        msg.name = {"joint1", "joint2", "joint3", "joint4", "joint5", "joint6"};
+        msg.name = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"};
 
         msg.position.resize(6);
         msg.velocity.resize(6);
@@ -516,6 +649,62 @@ private:
         joint_state_pub_->publish(msg);
 
         // RCLCPP_DEBUG(this->get_logger(), "[RX] Published joint states");
+    }
+
+    void healthCheck()
+    {
+        static uint64_t last_rx_count = 0;
+        static uint64_t last_tx_count = 0;
+        static uint64_t last_crc_errors = 0;
+
+        uint64_t current_rx = rx_packet_count_.load();
+        uint64_t current_tx = tx_packet_count_.load();
+        uint64_t current_crc = rx_crc_errors_.load();
+
+        double rx_rate = (current_rx - last_rx_count) / 5.0;  // 5 sec interval
+        double tx_rate = (current_tx - last_tx_count) / 5.0;
+        uint64_t new_crc_errors = current_crc - last_crc_errors;
+
+        // Check RX thread health
+        auto now = std::chrono::steady_clock::now();
+        auto last_activity = last_rx_activity_.load();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_activity).count();
+
+        bool serial_ok = serial_port_ && serial_port_->is_open();
+
+        if (simulation_mode_)
+        {
+            RCLCPP_INFO(this->get_logger(),
+                        "[HEALTH] TX: %.1f Hz | Serial: SIMULATION MODE",
+                        tx_rate);
+        }
+        else
+        {
+            if (elapsed_ms > 1000 && serial_ok)
+            {
+                RCLCPP_WARN(this->get_logger(),
+                            "[HEALTH] RX thread inactive for %ld ms! Serial OK but no data",
+                            elapsed_ms);
+            }
+
+            std::string status = serial_ok ? "OK" : "CLOSED";
+            if (new_crc_errors > 0)
+            {
+                RCLCPP_WARN(this->get_logger(),
+                            "[HEALTH] TX: %.1f Hz | RX: %.1f Hz | Serial: %s | CRC errors: +%lu",
+                            tx_rate, rx_rate, status.c_str(), new_crc_errors);
+            }
+            else
+            {
+                RCLCPP_INFO(this->get_logger(),
+                            "[HEALTH] TX: %.1f Hz | RX: %.1f Hz | Serial: %s",
+                            tx_rate, rx_rate, status.c_str());
+            }
+        }
+
+        last_rx_count = current_rx;
+        last_tx_count = current_tx;
+        last_crc_errors = current_crc;
     }
 };
 

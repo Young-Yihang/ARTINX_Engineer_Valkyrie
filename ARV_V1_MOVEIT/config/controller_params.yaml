@@ -1,0 +1,90 @@
+# 级联P+PI控制器参数 | 修改后执行 ./reload_params.sh 热重载
+# PD转Cascade: vel_Kp≈Kd_single, pos_Kp≈Kp_single/vel_Kp, vel_Ki从0.1*vel_Kp起调
+
+/torque_controller_action_server:
+  ros__parameters:
+    # ========== 卡尔曼滤波器（速度滤波，降低噪声）==========
+    kalman:
+      enabled: true
+      Q_pos: 1.0e-5    # 过程噪声：位置
+      Q_vel: 1.0e-4    # 过程噪声：速度
+      R_pos: 1.0e-3    # 测量噪声：位置
+      R_vel: 2.5e-2    # 测量噪声：速度
+
+    # 级联P+PI: 外环P(位置→速度), 内环PI(速度→力矩)
+    cascade_pid:
+      joint_1:
+        # 外环（位置）：只用P
+        pos_Kp: 3.0    # 从30降低10倍，避免振荡
+        pos_Ki: 0.0    # 外环不用积分
+        pos_Kd: 0.0    # 外环不用微分
+        # 内环（速度）：使用PI
+        vel_Kp: 7.0    # 从旧Kd_single=1.0转换
+        vel_Ki: 0.5    # 启用积分，改善速度跟随（保守值）
+        vel_Kd: 0.0    # 内环不用微分
+        vel_limit: 10.0 # 速度限幅 rad/s
+      
+      joint_2:
+        pos_Kp: 5.0    # 降低10倍
+        pos_Ki: 0.0
+        pos_Kd: 0.0
+        vel_Kp: 7.0
+        vel_Ki: 0.5    # 启用积分，改善速度跟随
+        vel_Kd: 0.0
+        vel_limit: 10.0
+      
+      joint_3:
+        pos_Kp: 3.0    # 降低10倍
+        pos_Ki: 0.0
+        pos_Kd: 0.0
+        vel_Kp: 6.0
+        vel_Ki: 0.5    # 启用积分，改善速度跟随
+        vel_Kd: 0.0
+        vel_limit: 10.0
+      
+      joint_4:
+        pos_Kp: 1.5    # 进一步降低，消除振荡和饱和
+        pos_Ki: 0.0
+        pos_Kd: 0.0
+        vel_Kp: 6.3
+        vel_Ki: 0.3    # 启用积分，改善速度跟随（保守）
+        vel_Kd: 0.0
+        vel_limit: 10.0
+      
+      joint_5:
+        pos_Kp: 0.05    # 进一步降低，消除振荡和饱和
+        pos_Ki: 0.0
+        pos_Kd: 0.0
+        vel_Kp: 1.0
+        vel_Ki: 0.1    # 启用积分，改善速度跟随（非常保守）
+        vel_Kd: 0.0
+        vel_limit: 10.0
+      
+      joint_6:
+        pos_Kp: 0.05    # 进一步降低，消除振荡和饱和
+        pos_Ki: 0.0
+        pos_Kd: 0.0
+        vel_Kp: 1.0
+        vel_Ki: 0.1    # 启用积分，改善速度跟随（非常保守）
+        vel_Kd: 0.0
+        vel_limit: 10.0
+
+    # ========== Safety Parameters ==========
+    safety:
+      # 单关节力矩限制(Nm), 设-1使用URDF值
+      # 策略：使用URDF标称值的80-90%作为工作限制，平衡性能和安全
+      max_torque_per_joint:
+        joint_1: 20.0   
+        joint_2: 20.0   
+        joint_3: 20.0   
+        joint_4: 1.2   
+        joint_5: 7.0   
+        joint_6: 1.0
+
+      # Global fallback if neither config nor URDF specified
+      max_torque_default: 20.0              # Nm - conservative default
+
+      joint_state_timeout_ms: 100     # Max time without sensor update before emergency stop
+      max_control_period_ms: 10       # Detect slow control loop (200Hz = 5ms nominal)
+      max_velocity_sanity: 20.0       # rad/s - reject sensor glitches (20 rad/s = ~1910 RPM)
+      max_position_error: 0.8         # rad - emergency stop threshold for position tracking error

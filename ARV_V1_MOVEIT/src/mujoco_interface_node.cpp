@@ -1,5 +1,4 @@
-// 主要作用：订阅effort_controller/commands力矩信号（TORQUE——CONTROLLER发布）,200Hz
-// 同时作为MUJICO仿真器，发布反馈用话题 /Joint_state
+// MuJoCo节点: 仿真模式(力矩→状态) / 孪生模式(状态→视觉化)
 
 #include "rclcpp/rclcpp.hpp"
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -25,18 +24,35 @@ public:
                             model_(nullptr),
                             data_(nullptr),
                             sim_frequency_(200.0),
-                            received_first_command_(false)
+                            received_first_command_(false),
+                            visualization_only_(false)
     {
         RCLCPP_INFO(this->get_logger(), "[START] MuJoCo interface node starting");
 
+        // ========== 声明并获取运行模式参数 ==========
+        this->declare_parameter("visualization_only", false);
+        visualization_only_ = this->get_parameter("visualization_only").as_bool();
+
+        if (visualization_only_)
+        {
+            RCLCPP_INFO(this->get_logger(), "[MODE] Digital Twin - visualization only (subscribing /joint_states)");
+        }
+        else
+        {
+            RCLCPP_INFO(this->get_logger(), "[MODE] Physics Simulation (subscribing /effort_controller/commands)");
+        }
+
         // 动态获取包路径（编译时查表，零运行时开销）
-        try {
+        try
+        {
             pkg_share_dir_ = ament_index_cpp::get_package_share_directory("ARV_V1_MODEL");
             urdf_path_ = pkg_share_dir_ + "/urdf/ARV_V1_MODEL.urdf";
             mesh_dir_ = pkg_share_dir_ + "/meshes";
-            
+
             RCLCPP_INFO(this->get_logger(), "[OK] Package path: %s", pkg_share_dir_.c_str());
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception &e)
+        {
             RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to find ARV_V1_MODEL package: %s", e.what());
             throw;
         }
@@ -58,29 +74,39 @@ public:
         // ========== 步骤2: 设置初始位姿 ==========
         setInitialPose();
 
-        // ========== 步骤3: 订阅力矩命令 ==========
-        effort_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
-            "/effort_controller/commands",
-            10,
-            std::bind(&MuJoCoInterfaceNode::effortCallback, this, std::placeholders::_1));
+        // ========== 步骤3: 根据模式设置话题通信 ==========
+        if (visualization_only_)
+        {
+            // 数字孪生模式: 订阅 /joint_states，不发布
+            joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+                "/joint_states", 10,
+                std::bind(&MuJoCoInterfaceNode::jointStateCallback, this, std::placeholders::_1));
+            RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /joint_states (digital twin)");
+        }
+        else
+        {
+            // 物理仿真模式: 订阅力矩，发布关节状态
+            effort_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
+                "/effort_controller/commands", 10,
+                std::bind(&MuJoCoInterfaceNode::effortCallback, this, std::placeholders::_1));
+            RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /effort_controller/commands");
 
-        RCLCPP_INFO(this->get_logger(), "[OK] Subscription: /effort_controller/commands");
+            joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
+                "/joint_states", 10);
+            RCLCPP_INFO(this->get_logger(), "[OK] Publishing: /joint_states");
 
-        // ========== 步骤4: 创建关节状态发布者 ==========
-        joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
-            "/joint_states",
-            10);
-
-        RCLCPP_INFO(this->get_logger(), "[OK] Publishing: /joint_states");
-
-        // ========== 步骤5: 创建200Hz仿真定时器 ==========
-        auto period = std::chrono::duration<double, std::milli>(1000.0 / sim_frequency_);
-        sim_timer_ = this->create_wall_timer(
-            period,
-            std::bind(&MuJoCoInterfaceNode::simulationStep, this));
-
-        RCLCPP_INFO(this->get_logger(), "[INFO] Simulation frequency: %.1f Hz", sim_frequency_);
+            // 仿真模式: 200Hz定时器
+            auto period = std::chrono::duration<double, std::milli>(1000.0 / sim_frequency_);
+            sim_timer_ = this->create_wall_timer(period,
+                                                 std::bind(&MuJoCoInterfaceNode::simulationStep, this));
+            RCLCPP_INFO(this->get_logger(), "[INFO] Simulation frequency: %.1f Hz", sim_frequency_);
+        }
         RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo interface node initialization completed");
+
+        // ========== 步骤5.5: 启动健康监控定时器 (5Hz) ==========
+        health_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(5000),
+            std::bind(&MuJoCoInterfaceNode::healthCheck, this));
 
         // ========== 步骤6: 初始化并启动可视化 ==========
         render_running_ = false;
@@ -139,14 +165,18 @@ private:
 
     // ========== ROS2接口 ==========
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr effort_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_; // 数字孪生模式
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
     rclcpp::TimerBase::SharedPtr sim_timer_;
 
+    // ========== 运行模式 ==========
+    bool visualization_only_; // true=数字孪生模式，false=物理仿真模式
+
     // ========== 配置参数 ==========
-    std::string pkg_share_dir_;    // ARV_V1_MODEL 包共享目录
-    std::string urdf_path_;        // URDF 文件路径
-    std::string mesh_dir_;         // Mesh 文件目录
-    std::filesystem::path temp_dir_;  // 临时文件目录
+    std::string pkg_share_dir_;      // ARV_V1_MODEL 包共享目录
+    std::string urdf_path_;          // URDF 文件路径
+    std::string mesh_dir_;           // Mesh 文件目录
+    std::filesystem::path temp_dir_; // 临时文件目录
     double sim_frequency_;
 
     // ========== 可视化相关成员变量 ==========
@@ -162,6 +192,11 @@ private:
 
     // ========== 启动安全相关 ==========
     std::atomic<bool> received_first_command_;
+
+    // ========== Health monitoring ==========
+    std::atomic<uint64_t> sim_step_count_{0};
+    std::atomic<uint64_t> command_rx_count_{0};
+    rclcpp::TimerBase::SharedPtr health_timer_;
 
     // ========== 关节名称 ==========
     const std::vector<std::string> joint_names_ = {
@@ -190,10 +225,12 @@ private:
     bool loadMuJoCoModel();
     void setInitialPose();
     void effortCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg); // 数字孪生
     void simulationStep();
     void publishJointStates();
     bool initializeVisualization();
     void renderLoop();
+    void healthCheck();
 };
 
 // ========== 成员函数实现 ==========
@@ -219,10 +256,11 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel()
     // 插入MuJoCo编译器设置（使用动态获取的 mesh 目录）
     std::string mujoco_compiler =
         "\n  <mujoco>\n"
-        "    <compiler meshdir=\"" + mesh_dir_ + "\" strippath=\"false\"/>\n"
-        "    <option timestep=\"0.005\"/>\n"
-        "    <size nconmax=\"0\" njmax=\"0\"/>\n"
-        "  </mujoco>\n";
+        "    <compiler meshdir=\"" +
+        mesh_dir_ + "\" strippath=\"false\"/>\n"
+                    "    <option timestep=\"0.005\"/>\n"
+                    "    <size nconmax=\"0\" njmax=\"0\"/>\n"
+                    "  </mujoco>\n";
 
     size_t robot_pos = urdf_string.find("<robot");
     if (robot_pos == std::string::npos)
@@ -351,10 +389,32 @@ void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray:
         RCLCPP_INFO(this->get_logger(), "[OK] First torque command received, MuJoCo simulation started");
     }
 
+    command_rx_count_++;
+
     for (size_t i = 0; i < 6; i++)
     {
         data_->ctrl[i] = msg->data[i];
     }
+}
+
+// 数字孪生模式: 接收外部关节状态，更新MuJoCo显示
+void MuJoCoInterfaceNode::jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
+{
+    if (msg->position.size() < 6)
+    {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "[WARN] JointState size < 6, ignoring");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(sim_mutex_);
+    // 更新 MuJoCo qpos 用于3D渲染
+    for (size_t i = 0; i < 6 && i < msg->position.size(); ++i)
+    {
+        data_->qpos[i] = msg->position[i];
+    }
+    // 更新前向运动学（仅用于渲染，不做物理仿真）
+    mj_forward(model_, data_);
 }
 
 void MuJoCoInterfaceNode::simulationStep()
@@ -375,6 +435,7 @@ void MuJoCoInterfaceNode::simulationStep()
 
     std::lock_guard<std::mutex> lock(sim_mutex_);
     mj_step(model_, data_);
+    sim_step_count_++;
     publishJointStates();
 }
 
@@ -652,6 +713,49 @@ void MuJoCoInterfaceNode::keyCallback(GLFWwindow *window, int key, int scancode,
         glfwSetWindowShouldClose(window, GLFW_TRUE);
         break;
     }
+}
+
+void MuJoCoInterfaceNode::healthCheck()
+{
+    static uint64_t last_step_count = 0;
+    static uint64_t last_cmd_count = 0;
+
+    uint64_t current_steps = sim_step_count_.load();
+    uint64_t current_cmds = command_rx_count_.load();
+
+    double step_rate = (current_steps - last_step_count) / 5.0;  // 5 sec interval
+    double cmd_rate = (current_cmds - last_cmd_count) / 5.0;
+
+    if (visualization_only_)
+    {
+        RCLCPP_INFO(this->get_logger(),
+                    "[HEALTH] Mode: DIGITAL TWIN | Render: %s",
+                    render_running_.load() ? "OK" : "STOPPED");
+    }
+    else
+    {
+        if (!received_first_command_.load())
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "[HEALTH] Mode: SIMULATION | Waiting for first command...");
+        }
+        else if (paused_)
+        {
+            RCLCPP_INFO(this->get_logger(),
+                        "[HEALTH] Mode: SIMULATION | Status: PAUSED | Render: %s",
+                        render_running_.load() ? "OK" : "STOPPED");
+        }
+        else
+        {
+            RCLCPP_INFO(this->get_logger(),
+                        "[HEALTH] Mode: SIMULATION | Sim: %.1f Hz | Cmd RX: %.1f Hz | Render: %s",
+                        step_rate, cmd_rate,
+                        render_running_.load() ? "OK" : "STOPPED");
+        }
+    }
+
+    last_step_count = current_steps;
+    last_cmd_count = current_cmds;
 }
 
 // ========== main函数 ==========
