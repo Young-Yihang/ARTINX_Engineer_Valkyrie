@@ -3,6 +3,7 @@
 ## Project Overview
 
 **Project**: ARV_V1 6-DOF Robotic Arm Control System
+**Purpose**: For Robomaster robotic competition, shall be robust and easily recorded
 **Framework**: ROS2 Jazzy + MoveIt2 + MuJoCo
 **Architecture**: Multi-mode torque control with real-time constraints
 **Workspace**: `~/ros2_ws`
