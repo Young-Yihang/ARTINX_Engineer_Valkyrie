@@ -198,6 +198,13 @@ public: // 构造函数log
         10);
 
     RCLCPP_INFO(this->get_logger(), "[OK] Torque publisher created: /effort_controller/commands");
+
+    // ========== 创建轨迹转发发布者 ==========
+    // 用于将接收到的轨迹转发给 trajectory_manager_node 进行保存
+    trajectory_forward_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+        "/ARM_controller/joint_trajectory", 10);
+    RCLCPP_INFO(this->get_logger(), "[OK] Trajectory forward publisher created: /ARM_controller/joint_trajectory");
+
     RCLCPP_INFO(this->get_logger(), "[INFO] Control frequency: %.1f Hz", control_frequency_);
 
     auto period = std::chrono::duration<double, std::milli>(1000.0 / control_frequency_);
@@ -241,6 +248,7 @@ private:
   size_t control_loop_count_ = 0;
   rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_forward_pub_;  // 转发轨迹供trajectory_manager捕获
   double control_frequency_;
 
   // 安全参数
@@ -456,6 +464,10 @@ void TorqueControllerActionServer::handleAccepted(
     current_goal_handle_ = goal_handle;
     trajectory_start_time_ = this->now();
     is_executing_.store(true, std::memory_order_release);
+
+    // 转发轨迹到话题，供 trajectory_manager_node 捕获保存
+    trajectory_forward_pub_->publish(current_trajectory_);
+    RCLCPP_DEBUG(this->get_logger(), "[FORWARD] Trajectory published to /ARM_controller/joint_trajectory");
 
     // 打印轨迹信息
     const auto &first_point = current_trajectory_.points[0];

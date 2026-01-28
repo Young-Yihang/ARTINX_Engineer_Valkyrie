@@ -1,0 +1,9 @@
+# ExecuteAction.srv - 执行指定动作
+# 请求
+string action_name                       # 动作名称 (go_home, go_position_A, etc.)
+bool force                               # 是否强制执行（忽略状态检查）
+---
+# 响应
+bool success
+string message
+string new_state                         # 执行后的状态 (IDLE, READY, EXECUTING)

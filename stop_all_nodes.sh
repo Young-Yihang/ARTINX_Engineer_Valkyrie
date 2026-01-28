@@ -80,6 +80,38 @@ for node in "${nodes[@]}"; do
     fi
 done
 
+# 关闭由启动脚本创建的终端窗口
+echo -e "${GREEN}关闭相关终端窗口...${NC}"
+terminal_titles=(
+    "MoveIt+RViz"
+    "TorqueController"
+    "MuJoCo(仿真)"
+    "MuJoCo(孪生)"
+    "SerialInterface"
+    "TrajectoryManager"
+)
+
+for title in "${terminal_titles[@]}"; do
+    # 使用 wmctrl 关闭指定标题的窗口
+    if command -v wmctrl &> /dev/null; then
+        wmctrl -c "$title" 2>/dev/null && echo -e "关闭窗口: $title"
+    else
+        # 备用方案: 使用 xdotool
+        if command -v xdotool &> /dev/null; then
+            wid=$(xdotool search --name "$title" 2>/dev/null | head -1)
+            if [ -n "$wid" ]; then
+                xdotool windowclose "$wid" 2>/dev/null && echo -e "关闭窗口: $title"
+            fi
+        fi
+    fi
+done
+
+# 如果没有 wmctrl 或 xdotool，提示用户安装
+if ! command -v wmctrl &> /dev/null && ! command -v xdotool &> /dev/null; then
+    echo -e "${YELLOW}提示: 安装 wmctrl 或 xdotool 可自动关闭终端窗口${NC}"
+    echo -e "${YELLOW}  sudo apt install wmctrl${NC}"
+fi
+
 echo ""
 echo -e "${GREEN}=========================================="
 echo "  所有节点已停止"
