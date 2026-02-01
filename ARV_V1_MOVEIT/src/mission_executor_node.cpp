@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <rclcpp/rclcpp.hpp>
 #include <signal.h>
@@ -70,7 +71,14 @@ public:
 
     // 2. Dynamically load available missions
     fetchMissions();
-std::string input;
+  }
+
+  void run() {
+    while (rclcpp::ok()) {
+      drawUI();
+
+      // Read input based on mode
+      std::string input;
       if (input_mode_ == InputMode::COMMAND) {
         // Single character mode
         char key;
@@ -82,15 +90,14 @@ std::string input;
         std::getline(std::cin, input);
       }
 
-      handleInput(input
-  void run() {
-    while (rclcpp::ok()) {
-      drawUI();
+      handleInput(input);
+      
+      // Small delay to prevent CPU spinning
+      rclcpp::spin_some(this->get_node_base_interface());
+    }
+  }
 
-      // Blocking input for TUI interactiveness
-      char key;
-      std::cin >> key;
-
+private:
   // Service clients
   rclcpp::Client<LoadTrajectory>::SharedPtr load_client_;
   rclcpp::Client<SaveLastTrajectory>::SharedPtr save_client_;
@@ -115,24 +122,14 @@ std::string input;
   // Temporary input buffers
   std::string pending_name_;
   std::string pending_desc_;
-  std::string target_missionhis->get_node_base_interface());
-    }
-  }
-
-private:
-  rclcpp::Client<LoadTrajectory>::SharedPtr load_client_;
-  std::vector<Mission> missions_;
-  std::string current_status_ = "Ready";
-  std::mutex status_mutex_;
+  std::string target_mission_;
 
   void fetchMissions() {
-    auto list_client =
-        this->create_client<ListTrajectories>("/list_trajectories");
+    auto list_client = this->create_client<ListTrajectories>("/list_trajectories");
 
     if (!list_client->wait_for_service(2s)) {
-      RCLCPP_WARN(this->get_logger(),
-                  "List service unavailable, using defaults");
-      setupDefaultMissions();
+      RCLCPP_WARN(this->get_logger(), "List service unavailable");
+      missions_.clear();
       return;
     }
 
@@ -140,8 +137,7 @@ private:
     auto future = list_client->async_send_request(request);
 
     // Blocking wait for list (startup only)
-    if (rclcpp::spin_until_future_complete(this->get_node_base_interface(),
-                                           future) ==
+    if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), future) ==
         rclcpp::FutureReturnCode::SUCCESS) {
       auto response = future.get();
       missions_.clear();
@@ -155,15 +151,47 @@ private:
 
       // Map first 9 trajectories to keys '1'-'9'
       size_t count = std::min(response->names.size(), size_t(9));
+      for (size_t i = 0; i < count; ++i) {
+        Mission m;
+        m.name = response->names[i];
+        m.description = response->descriptions[i];
+        m.hotkey = '1' + i;
+        missions_.push_back(m);
+      }
+    }
+  }
+
+  void drawUI() {
+    // Clear screen and home cursor
     std::cout << "\033[2J\033[H";
 
     // Title with color
     std::cout << COLOR_CYAN << COLOR_BOLD;
-    std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║         ARV_V1 Mission Executor v2.0                         ║\n";
-    std::cout << "║  Dynamic Loader | Trajectory Saver | Mission Manager        ║\n";
-    std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
+    std::cout << "\n";
+    std::cout << "\n";
+    std::cout << "\n";
+    std::cout << "\n";
     std::cout << COLOR_RESET << "\n";
+    std::cout << "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀  ⠀⠀⠀⠀⠀⢀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠀⠀⠀⠀⠀⠀  ⠀⠀⠀⠀⠀⢀⣾⣿⣿⣿⣿⣦⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠀⠀⠀⠀⠀⠀  ⠀⠀⠀⠀⠀⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣶⣦⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠀⠀⠀⠀⠀  ⠀⠀⠀⠀⠀⣠⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣶⣶⣦⣤⣄⡀⠀⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠀⠀⠀⠀⠀  ⠀⠀⠀⢀⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠀⠀⠀⠀  ⠀⠀⢀⣴⣿⣿⣿⣿⣿⣿⠿⠁⣸⣿⣿⣿⣿⣿⡿⢻⣿⣿⣿⣿⣿⣿⣿⣿⣿⡏⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠀⠀⠀   ⠀⠀⠲⢿⣿⣿⠿⠿⠟⢋⠹⢰⠂⣿⣿⣿⣿⣿⡿⢃⡘⢿⣿⠿⣿⡿⢿⣿⣿⣿⠃⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠀⠀   ⠀⠀⠀⢠⣾⣿⡟⢠⡄⣀⣀⡀⠉⣆⣃⠹⣿⣿⡿⢡⣶⣽⣦⠁⢀⠀⡀⠈⣿⣿⠏⠀⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠀⢀⠤⠄⠒⠠⠤⢀⡉⠻⡇⢸⢁⣿⣿⡟⣼⣿⣿⣷⣬⣩⣄⠉⠙⠛⠿⢀⠈⠛⠁⠀⣽⣿⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠀⢀⠎⠁⠀⢀⡀⠀⠀⠀⠉⢢⡀⢸⣧⣛⣫⠴⠿⠿⠿⢿⣿⣿⡟⣸⣶⣦⠄⣀⠀⣲⣶⣿⢿⣿⠀⠀⠀" << std::endl;
+    std::cout << "⠀⢀⠇⢀⢀⣶⣿⣿⡇⠀⠀⠀⠀⠱⡀⠛⣁⠤⠖⠒⣒⣲⡤⣌⠙⢧⠻⣿⠟⣰⠏⣸⣿⣿⡏⢸⣿⠀⠀⠀" << std::endl;
+    std::cout << "⠀⡸⠀⡀⣾⣿⣿⢫⢠⠄⠀⠀⠀⠀⠑⠊⠀⠀⣾⣿⣿⡿⣛⣻⣷⡄⠹⣶⡾⢋⣴⣿⣿⣿⠇⣼⡏⠀⠀⠀" << std::endl;
+    std::cout << "⠀⡇⠀⠇⣿⣿⣿⢈⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⢻⣿⣿⣷⣻⣿⣯⣿⡄⢹⠄⠉⣹⣿⣿⡿⢠⣿⡇⠀⠀⠀" << std::endl;
+    std::cout << "⠀⢸⠀⠐⢜⢿⣿⢎⠄⠀⠀⠀⠀⠀⠀⠀⠀⠈⠸⢿⣿⣿⣿⣿⣿⣿⡇⠀⢀⣼⣿⣿⣿⢁⣾⣿⠀⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠈⢆⠀⠀⣑⣶⡦⣀⢄⠀⠀⠀⠀⡠⠔⢚⣉⣉⣉⣉⣉⣉⣉⠛⠻⠁⡘⠛⣿⣿⡿⢁⣾⣿⡇⠀⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠀⠈⢮⢿⣿⣿⣝⠿⢇⣧⣠⡀⣸⠀⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣶⣄⠁⢞⠿⢋⣴⣿⣿⣿⡇⠀⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠀⣰⣄⠑⢽⣿⣿⣿⣿⣿⣿⣿⢹⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⠀⠀⡿⣿⣿⠿⣿⣇⠀⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠰⢿⣿⣷⣤⡙⠻⢿⣿⣿⣿⣿⣿⡆⢹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠇⠀⠙⢏⡞⠀⠘⠺⠄⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠈⠉⠛⠻⠷⢤⠈⠉⠙⠛⠛⠓⠀⢿⣿⣿⣿⣿⣿⣿⠿⠟⢋⠽⠋⠀⠀⠀⠀⠁⠀⠀⠀⠀⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀" << std::endl;
 
     // Missions list
     if (missions_.empty()) {
@@ -178,7 +206,55 @@ private:
     }
 
     std::cout << "\n";
-    onst std::string& input) {
+    
+    // Commands
+    std::cout << COLOR_BOLD << "Commands:\n" << COLOR_RESET;
+    std::cout << "  [S]ave  [D]elete  [I]nfo  [R]efresh  [H]elp  [Q]uit\n\n";
+    
+    // Status with color
+    std::cout << "Status: ";
+    {
+      std::lock_guard<std::mutex> lock(status_mutex_);
+      if (current_status_.find("Error") != std::string::npos || 
+          current_status_.find("Failed") != std::string::npos) {
+        std::cout << COLOR_RED << current_status_ << COLOR_RESET;
+      } else if (current_status_.find("Success") != std::string::npos || 
+                 current_status_.find("Saved") != std::string::npos) {
+        std::cout << COLOR_GREEN << current_status_ << COLOR_RESET;
+      } else if (current_status_.find("Executing") != std::string::npos) {
+        std::cout << COLOR_CYAN << current_status_ << COLOR_RESET;
+      } else {
+        std::cout << current_status_;
+      }
+    }
+    std::cout << "\n";
+    
+    // Input prompt based on mode
+    switch (input_mode_) {
+      case InputMode::COMMAND:
+        std::cout << "\n> ";
+        break;
+      case InputMode::SAVE_NAME:
+        std::cout << "\n" << COLOR_YELLOW << "Enter trajectory name (no spaces): " << COLOR_RESET;
+        break;
+      case InputMode::SAVE_DESC:
+        std::cout << "\n" << COLOR_YELLOW << "Enter description: " << COLOR_RESET;
+        break;
+      case InputMode::DELETE_CONFIRM:
+        std::cout << "\n" << COLOR_RED << "Select mission to delete [1-9] or [C]ancel: " << COLOR_RESET;
+        break;
+      case InputMode::INFO_SELECT:
+        std::cout << "\n" << COLOR_CYAN << "Select mission for info [1-9] or [C]ancel: " << COLOR_RESET;
+        break;
+      case InputMode::OVERWRITE_CONFIRM:
+        std::cout << "\n" << COLOR_YELLOW << "Mission '" << pending_name_ << "' exists. Overwrite? [Y/N]: " << COLOR_RESET;
+        break;
+    }
+    
+    std::cout.flush();
+  }
+
+  void handleInput(const std::string& input) {
     switch (input_mode_) {
       case InputMode::COMMAND:
         handleCommand(input.empty() ? '\0' : input[0]);
@@ -240,6 +316,40 @@ private:
         std::lock_guard<std::mutex> lock(status_mutex_);
         current_status_ = "No missions to show info";
         return;
+      }
+      input_mode_ = InputMode::INFO_SELECT;
+      return;
+    }
+    
+    if (key == 'h' || key == 'H') {
+      showHelp();
+      return;
+    }
+    
+    // Check if it's a mission hotkey
+    for (const auto &m : missions_) {
+      if (m.hotkey == key) {
+        executeMission(m.name);
+        return;
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(status_mutex_);
+      current_status_ = "Unknown command. Press [H] for help";
+    }
+  }
+  
+  void executeMission(const std::string &name) {
+    auto request = std::make_shared<LoadTrajectory::Request>();
+    request->name = name;
+    request->execute = true;
+
+    {
+      std::lock_guard<std::mutex> lock(status_mutex_);
+      current_status_ = "Executing " + name + "...";
+    }
+
     auto future = load_client_->async_send_request(request);
 
     std::thread([this, future = std::move(future), name]() mutable {
@@ -485,102 +595,7 @@ private:
         return true;
       }
     }
-    return false
-    {
-      std::lock_guard<std::mutex> lock(status_mutex_);
-      current_status_ = "Unknown command. Press [H] for helpaved") != std::string::npos) {
-        std::cout << COLOR_GREEN << current_status_ << COLOR_RESET;
-      } else if (current_status_.find("Executing") != std::string::npos) {
-        std::cout << COLOR_CYAN << current_status_ << COLOR_RESET;
-      } else {
-        std::cout << current_status_;
-      }
-    }
-    
-
-  void drawUI() {
-    // ANSI Magic: \033[2J (Clear Screen) + \033[H (Home Cursor 0,0)
-    // This creates a "repaint" effect without scrolling history
-    std::cout << "\033[2J\033[H";
-
-    std::cout << "=== ARV_V1 Mission Executor ===\n";
-    std::cout << "Dynamic Loader | Persistent Client\n\n";
-    std::cout << "Available Missions:\n";
-
-    for (const auto &m : missions_) {
-      std::cout << "  [" << m.hotkey << "] " << std::setw(20) << std::left
-                << m.name << " : " << m.description << "\n";
-    }
-
-    std::cout << "\nControls: [R]efresh  [Q]uit\n";
-    std::cout << "Status: ";
-    {
-      std::lock_guard<std::mutex> lock(status_mutex_);
-      std::cout << current_status_;
-    }
-    std::cout << "\n> ";
-    std::cout.flush();
-  }
-
-  void handleInput(char key) {
-    if (key == 'q' || key == 'Q') {
-      rclcpp::shutdown();
-      return;
-    }
-    if (key == 'r' || key == 'R') {
-      {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        current_status_ = "Refreshing...";
-      }
-      fetchMissions();
-      {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        current_status_ = "List Refreshed";
-      }
-      return;
-    }
-
-    for (const auto &m : missions_) {
-      if (m.hotkey == key) {
-        executeMission(m.name);
-        return;
-      }
-    }
-
-    {
-      std::lock_guard<std::mutex> lock(status_mutex_);
-      current_status_ = "Unknown command";
-    }
-  }
-
-  void executeMission(const std::string &name) {
-    auto request = std::make_shared<LoadTrajectory::Request>();
-    request->name = name;
-    request->execute = true;
-
-    {
-      std::lock_guard<std::mutex> lock(status_mutex_);
-      current_status_ = "Executing " + name + "...";
-    }
-
-    // Async call (non-blocking)
-    auto future = load_client_->async_send_request(request);
-
-    // Background Result Handler (use move capture for future)
-    std::thread([this, future = std::move(future), name]() mutable {
-      try {
-        auto result = future.get();
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        if (result->success) {
-          current_status_ = "Success: " + name;
-        } else {
-          current_status_ = "Failed: " + result->message;
-        }
-      } catch (const std::exception &e) {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        current_status_ = "Error: " + std::string(e.what());
-      }
-    }).detach();
+    return false;
   }
 };
 
