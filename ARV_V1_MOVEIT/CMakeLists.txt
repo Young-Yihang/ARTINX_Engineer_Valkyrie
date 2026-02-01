@@ -233,13 +233,14 @@ ament_target_dependencies(trajectory_manager_node
 )
 
 # -------------------------------------------
-# Mission Executor Node (Application Layer)
+# Mission Executor Node (Application Layer v2.0)
 add_executable(mission_executor_node
   src/mission_executor_node.cpp
 )
 
 target_link_libraries(mission_executor_node
   ${rclcpp_LIBRARIES}
+  yaml-cpp  # For reading trajectory info
 )
 
 ament_target_dependencies(mission_executor_node

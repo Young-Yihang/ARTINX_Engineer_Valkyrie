@@ -1,8 +1,27 @@
-# Mission Executor 使用指南
+# Mission Executor v2.0 使用指南
 
 ## 概述
 
-`mission_executor_node` 是ARV_V1系统的应用层交互节点，提供基于终端的TUI（Text User Interface）界面，用于交互式任务选择和执行。
+`mission_executor_node` v2.0 是ARV_V1系统的应用层交互节点，提供基于终端的TUI（Text User Interface）界面，实现完整的轨迹生命周期管理：创建、执行、保存、删除、查看。
+
+---
+
+## 新增功能 (v2.0)
+
+### ✨ 核心功能
+- **[S] 保存轨迹**：交互式输入名称和描述，保存RViz执行的轨迹
+- **自动刷新**：保存后自动更新任务列表
+- **输入验证**：名称合法性检查、重复检测、覆盖确认
+
+### ✨ 增强功能
+- **[D] 删除轨迹**：选择任务编号删除对应轨迹文件
+- **[I] 查看详情**：显示轨迹元数据（时长、点数、保存时间等）
+- **[H] 帮助菜单**：完整的命令说明和使用流程
+
+### ✨ 用户体验
+- **彩色UI**：ANSI颜色编码，状态一目了然
+- **状态机输入**：智能切换单字符/行输入模式
+- **错误提示**：详细的错误信息和操作建议
 
 ---
 
@@ -70,19 +89,277 @@ std::mutex status_mutex_;  // 保护共享状态
 
 ## 使用方法
 
-### 启动方式
+### 完整工作流程
 
-#### 方式1：通过系统启动脚本（推荐）
-```bash
-cd ~/ros2_ws/src
-./start_mujoco_system.sh
-# 选择模式1或2，会自动启动mission_executor
+```
+1. 启动系统
+   → ./start_mujoco_system.sh
+
+2. 在RViz中规划轨迹
+   → Planning -> Plan & Execute
+
+3. 在MissionExecutor窗口按 [S] 保存
+   → 输入名称: my_trajectory
+   → 输入描述: 测试轨迹 (可选)
+   → 自动保存并刷新列表
+
+4. 按对应数字键重新执行
+   → 按 [1] 执行第一个任务
+
+5. 管理任务
+╔══════════════════════════════════════════════════════════════╗
+║         ARV_V1 Mission Executor v2.0                         ║
+║  Dynamic Loader | Trajectory Saver | Mission Manager        ║
+╚══════════════════════════════════════════════════════════════╝
+
+Available Missions:
+  [1] home_position        : 返回安全初始位置
+  [2] grab_cube            : 抓取立方体
+  [3] test_movement        : 测试运动
+
+Commands:
+  [1-9] Execute   [S]ave   [D]elete   [I]nfo   [R]efresh   [H]elp   [Q]uit
+
+Status: Success: grab_cube (5.2s)
+
+> 
 ```
 
-#### 方式2：手动启动
+**所有命令**：
+
+| 按键 | 功能 | 说明 |
+|------|------|------|
+| `1-9` | 执行任务 | 立即执行对应编号的轨迹 |
+| `S` | 保存轨迹 | 保存RViz最近执行的轨迹 |
+| `D` | 删除任务 | 删除指定编号的轨迹文件 |
+| `I` | 查看详情 | 显示轨迹元数据（时长、点数等）|
+| `R` | 刷新列表 | 重新扫描轨迹目录 |
+| `H` | 帮助菜单 | 显示完整命令说明 |
+| `Q` | 退出程序 | 优雅关闭节点 |
+
+---
+
+## 功能详解
+
+### 💾 保存轨迹 [S]
+
+**交互流程**：
+```
+1. 按 [S] 键进入保存模式
+
+2. 提示: Enter trajectory name:
+   输入: my_first_trajectory
+   验证: 
+   - ✓ 不能
+
+#### `/save_last_trajectory` (新增)
 ```bash
-source ~/ros2_ws/install/setup.bash
-ros2 run ARV_V1_MOVEIT mission_executor_node
+# 保存最近执行的轨迹
+ros2 service call /save_last_trajectory \
+  arv_v1_interfaces/srv/SaveLastTrajectory \
+  "{name: 'my_trajectory', description: '测试轨迹'}"
+
+# 响应
+success: true
+message: "Trajectory saved successfully"
+saved_path: "/home/user/ros2_ws/.../my_trajectory.yaml"
+```为空
+   - ✓ 不能包含空格、斜杠
+   - ✓ 检查是否重复
+
+3. 如果名称已存在:
+   提示: Mission 'xxx' exists. Overwrite? [Y/N]:
+   
+4. 提示: Enter description (optional, press Enter to skip):
+   输入: 这是我的第一个测试轨迹
+   
+5. 后台调用 /save_last_trajectory 服务
+
+6. 状态显示: Saving my_first_trajectory...
+   成功: Saved: my_first_trajectory
+   
+7. 自动刷新状态机输入模式
+
+**问题**：如何在TUI中支持单字符命令和行输入？
+
+**解决方案**：
+```cpp
+enum class InputMode {
+    COMMAND,      // 单字符模式 (std::cin >> key)
+    SAVE_NAME,    // 行输入模式 (std::getline)
+    SAVE_DESC,    // 行输入模式
+    DELETE_CONFIRM,
+    INFO_SELECT,
+    OVERWRITE_CONFIRM
+};
+
+// 智能切换输入方式
+if (input_mode_ == InputMode::COMMAND) {
+    char key;
+    std::cin >> key;  // 单字符
+} else {
+    std::string input;
+    std::cin.ignore();  // 清除缓冲区
+    std::getline(std::cin, input);  // 完整行
+}
+```
+
+### 2. 输入验证与安全
+
+```cpp
+void handleSaveName(const std::string& name) {
+    // 1. 空值检查
+    if (name.empty()) {
+        return error("Name cannot be empty");
+    }
+    
+    // 2. 非法字符检查
+    if (name.find('/') != std::string::npos || 
+        name.find(' ') != std::string::npos) {
+        return error("Invalid characters");
+    }
+    
+    // 3. 重复检查
+    if (missionExists(name)) {
+        // 进入覆盖确认模式
+        input_mode_ = InputMode::OVERWRITE_CONFIRM;
+        return;
+    }
+    
+    // 4. 验证通过，继续输入描述
+    pending_name_ = name;
+    input_mode_ = InputMode::SAVE_DESC;
+}
+```
+
+### 3. 文件系统操作
+
+```cpp保存服务不可用
+```
+Status: Error: Save service not available
+```
+**原因**：`trajectory_manager_node` 未启动
+**解决**：
+```bash
+ros2 run ARV_V1_MOVEIT trajectory_manager_node
+```
+
+### 问题2：无法保存 - 没有轨迹
+```
+Status: Save failed: No trajectory captured
+```
+**原因**：trajectory_manager没有缓存任何轨迹
+**解决**：在RViz中执行 Plan & Execute 一个轨迹
+
+### 问题3：名称已存在
+```
+Mission 'test' exists. Overwrite? [Y/N]:
+```
+**处理**：
+- 按 `Y` 覆盖已有轨迹
+- 按 `N` 取消保存，重新输入新名称
+
+### 问题4：删除失败 - 权限不足
+```
+Status: Error: Permission denied
+```
+**解决**：
+```bash
+# 检查文件权限
+ls -la ~/ros2_ws/src/ARV_V1_MOVEIT/config/trajectories/
+
+# 修改权限（如果需要）
+chmod 644 ~/ros2_ws/src/ARV_V1_MOVEIT/config/trajectories/*.yaml
+```
+
+### 问题5：输入卡住
+**症状**：按键后无响应
+**原因**：输入缓冲区残留
+**解决**：按 Ctrl+C 重启节点
+// 删除轨迹
+void deleteTrajectory(const std::string& name) {
+    std::string path = trajectory_dir_ + "/" + name + ".yaml";
+    
+    try {
+        if (std::filesystem::exists(path)) {
+            std::filesystem::remove(path);
+            fetchMissions();  // 自动刷新
+        }
+    } catch (const std::filesystem::filesystem_error& e) {
+        // 处理权限错误等
+    }
+}
+```
+
+### 4. YAML元数据解析
+
+```cpp
+void showMissionInfo(const std::string& name) {
+    YAML::Node config = YAML::LoadFile(path);
+    
+    // 提取元数据
+    if (config["meta"]) {
+        auto duration = config["meta"]["duration_sec"].as<double>();
+        auto saved_at = config["meta"]["saved_at"].as<std::string>();
+    }
+    
+    // 提取轨迹点数
+    int point_count = config["points"].size();
+}
+```
+
+### 5. ANSI颜色编码
+
+```cpp
+const std::string COLOR_RED    = "\033[0;31m";
+const std::string COLOR_GREEN  = "\033[0;32m";
+const std::string COLOR_YELLOW = "\033[1;33m";
+
+// 根据状态动态着色
+if (status.find("Error") != std::string::npos) {
+    std::cout << COLOR_RED << status << COLOR_RESET;
+} else if (status.find("Success") != std::string::npos) {
+    std::cout << COLOR_GREEN << status << COLOR_RESET;
+}
+```
+```
+
+**注意事项**：
+- 必须先在RViz中执行一个轨迹（Plan & Execute）
+- trajectory_manager_node会自动缓存最近执行的轨迹
+- 描述是可选的，直接按回车可跳过
+
+### 🗑️ 删除轨迹 [D]
+
+**交互流程**：
+```
+1. 按 [D] 键进入删除模式
+
+2. 提示: Enter mission number to delete (1-9) or [C] to cancel:
+   输入: 2  (删除第2个任务)
+   或者: C  (取消删除)
+
+3. 确认删除对应的YAML文件
+
+4. 自动刷新任务列表
+```
+
+### ℹ️ 查看详情 [I]
+
+**显示信息**：
+```
+╔════════════════════════════════════════════════════════════╗
+║  Trajectory Information                                    ║
+╚════════════════════════════════════════════════════════════╝
+
+  Name:        grab_cube
+  Description: 抓取立方体演示
+  Duration:    5.23 seconds
+  Saved at:    2026-02-01T14:30:00
+  Points:      127
+  Start pos:   0.00 0.00 0.00 0.00 0.00 0.00
+
+Press Enter to continue...
 ```
 
 ### 界面操作
@@ -175,19 +452,33 @@ for (size_t i = 0; i < count; ++i) {
         static_cast<char>('1' + i)
     });
 }
-```
+```2.0 (2026-02-01)
+**核心功能**：
+- ✅ [S] 保存轨迹 - 交互式输入名称和描述
+- ✅ 输入验证 - 名称合法性、重复检测、覆盖确认
+- ✅ 自动刷新 - 保存/删除后自动更新列表
 
-### 3. ANSI终端控制
+**增强功能**：
+- ✅ [D] 删除轨迹 - 选择编号删除文件
+- ✅ [I] 查看详情 - 显示轨迹元数据
+- ✅ [H] 帮助菜单 - 完整命令说明
 
-```cpp
-// 清屏并重置光标到左上角
-std::cout << "\033[2J\033[H";
+**用户体验**：
+- ✅ 彩色UI - ANSI颜色编码
+- ✅ 状态机输入 - 智能切换输入模式
+- ✅ 错误提示 - 详细的操作建议
 
+### v1.0 (2026-02-01)
+- ✅ 初始实现
+- ✅ 动态任务加载
+- ✅ 持久化服务连接
+- ✅ 异步执行
+- ✅ 线程安全保护
 // ANSI转义码序列
 // \033[2J - 清除整个屏幕
 // \033[H  - 移动光标到(0,0)
 ```
-
+2
 **优势**：无需ncurses库，轻量级实现
 
 ---
