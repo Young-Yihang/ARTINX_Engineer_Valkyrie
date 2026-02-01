@@ -182,6 +182,7 @@ start_sim_mode() {
     sleep 3
     start_node "MuJoCo(仿真)" "ros2 run ARV_V1_MOVEIT mujoco_interface_node" 0
     start_node "TrajectoryManager" "ros2 run ARV_V1_MOVEIT trajectory_manager_node" 1
+    start_node "MissionExecutor" "ros2 run ARV_V1_MOVEIT mission_executor_node" 2
 }
 
 # ========== 模式2: 串口 + 数字孪生 ==========
@@ -202,6 +203,7 @@ start_serial_mode() {
     start_node "SerialInterface" "ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 0
     start_node "MuJoCo(孪生)" "ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true" 0
     start_node "TrajectoryManager" "ros2 run ARV_V1_MOVEIT trajectory_manager_node" 1
+    start_node "MissionExecutor" "ros2 run ARV_V1_MOVEIT mission_executor_node" 2
 }
 
 
@@ -242,6 +244,10 @@ main() {
     echo "  加载并执行轨迹:"
     echo "    ros2 service call /load_trajectory arv_v1_interfaces/srv/LoadTrajectory \\"
     echo "        \"{name: 'my_traj', execute: true}\""
+    echo ""
+    echo -e "${YELLOW}任务执行器 (TUI界面):${NC}"
+    echo "  已在独立终端窗口启动，提供交互式任务选择和执行"
+    echo "  按数字键执行任务，按 R 刷新任务列表，按 Q 退出"
     echo ""
 
     log_info "按 Ctrl+C 退出此脚本（节点继续运行）"

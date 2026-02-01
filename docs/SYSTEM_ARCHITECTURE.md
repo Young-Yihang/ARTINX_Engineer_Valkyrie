@@ -17,6 +17,24 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
+│                 应用层 (Application)                             │
+│  mission_executor_node - TUI任务执行器                           │
+│  • 交互式任务选择和执行                                           │
+│  • 动态轨迹列表刷新                                               │
+│  • 持久化服务连接                                                 │
+└────────────────────────┬────────────────────────────────────────┘
+                         │ Service接口
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                 业务层 (Business Logic)                          │
+│  trajectory_manager_node - 轨迹管理                              │
+│  • 轨迹保存/加载 (YAML文件系统)                                   │
+│  • 动态任务发现 (/list_trajectories)                             │
+│  • 执行调度 (/load_trajectory)                                   │
+└────────────────────────┬────────────────────────────────────────┘
+                         │ Action接口
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
 │                    规划层 (Planning)                              │
 │  MoveIt2 (move_group) → /ARM_controller/follow_joint_trajectory │
 └────────────────────────┬────────────────────────────────────────┘
@@ -44,7 +62,81 @@
 
 ## 三、核心节点实现
 
-### 3.1 torque_controller_node (1400行)
+### 3.1 mission_executor_node (230行)
+
+**应用层TUI交互节点**:
+```cpp
+// 功能特性
+• ANSI转义码实现伪图形界面
+• 动态轨迹列表 (通过/list_trajectories)
+• 持久化服务连接 (低延迟<5ms)
+• 异步任务执行 (非阻塞UI)
+• 线程安全状态更新 (std::mutex)
+```
+
+**服务调用架构**:
+```cpp
+// 启动时: 获取任务菜单
+auto future = list_client_->async_send_request(request);
+rclcpp::spin_until_future_complete(node, future);  // 阻塞等待
+
+// 执行时: 异步非阻塞
+auto future = load_client_->async_send_request(request);
+std::thread([future = std::move(future)]() {  // 移动语义
+    auto result = future.get();
+    updateStatus(result);  // 后台更新
+}).detach();
+```
+
+**关键技术点**:
+- 移动捕获避免Future拷贝: `[future = std::move(future)]`
+- 互斥锁保护共享状态: `std::lock_guard<std::mutex>`
+- ANSI清屏重绘: `\033[2J\033[H`
+
+---
+
+### 3.2 trajectory_manager_node (536行)
+
+**轨迹生命周期管理**:
+```yaml
+# 存储格式: config/trajectories/my_traj.yaml
+meta:
+  name: "my_traj"
+  description: "我的轨迹"
+  saved_at: "2026-02-01T14:30:00"
+  duration_sec: 5.2
+
+joint_names: [joint_1, joint_2, ...]
+points:
+  - time: 0.0
+    positions: [0.0, 0.0, ...]
+    velocities: [0.0, 0.0, ...]
+```
+
+**服务接口**:
+- `/list_trajectories`: 扫描目录，返回名称+描述
+- `/load_trajectory`: 解析YAML → 发送Action
+- `/save_trajectory`: 接收JointTrajectory → 写入YAML
+- `/save_last_trajectory`: 缓存最近执行的轨迹
+
+**关键实现**:
+```cpp
+// 轨迹缓存 (订阅MoveIt输出)
+void trajectoryCallback(const JointTrajectory::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(trajectory_mutex_);
+    last_trajectory_ = *msg;
+    has_last_trajectory_ = true;
+}
+
+// Action执行
+auto goal = FollowJointTrajectory::Goal();
+goal.trajectory = loaded_trajectory;
+action_client_->async_send_goal(goal, callbacks);
+```
+
+---
+
+### 3.3 torque_controller_node (1400行)
 
 **控制律实现**:
 ```cpp
@@ -70,7 +162,7 @@ e_v = v_cmd - v_actual
 - 100ms超时保护
 - 参数热重载 (`ros2 param set`)
 
-### 3.2 hardware_interface_node (600行)
+### 3.4 hardware_interface_node (600行)
 
 **双定时器解耦架构**:
 ```cpp

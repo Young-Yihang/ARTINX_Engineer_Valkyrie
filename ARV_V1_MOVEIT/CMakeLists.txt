@@ -112,6 +112,7 @@ target_include_directories(torque_controller_node PUBLIC
   $<INSTALL_INTERFACE:include>
   ${rclcpp_INCLUDE_DIRS}
   ${rclcpp_action_INCLUDE_DIRS}
+  ${ament_index_cpp_INCLUDE_DIRS}
   ${urdf_INCLUDE_DIRS}
   ${orocos_kdl_INCLUDE_DIRS}
   ${kdl_parser_INCLUDE_DIRS}
@@ -152,6 +153,7 @@ target_include_directories(mujoco_interface_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${rclcpp_INCLUDE_DIRS}
+  ${ament_index_cpp_INCLUDE_DIRS}
   ${MUJOCO_INCLUDE_DIRS}  # ← 添加MuJoCo头文件
 )
 
@@ -230,6 +232,22 @@ ament_target_dependencies(trajectory_manager_node
   arv_v1_interfaces
 )
 
+# -------------------------------------------
+# Mission Executor Node (Application Layer)
+add_executable(mission_executor_node
+  src/mission_executor_node.cpp
+)
+
+target_link_libraries(mission_executor_node
+  ${rclcpp_LIBRARIES}
+)
+
+ament_target_dependencies(mission_executor_node
+  rclcpp
+  std_msgs
+  arv_v1_interfaces
+)
+
 # ============= 4. 安装 =============
 
 # 安装可执行文件和库
@@ -239,6 +257,7 @@ install(TARGETS
   mujoco_interface_node
   hardware_interface_node
   trajectory_manager_node  # ← 轨迹管理节点
+  mission_executor_node    # ← Application Layer Node
   DESTINATION lib/${PROJECT_NAME}
 )
 

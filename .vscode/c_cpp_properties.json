@@ -3,12 +3,15 @@
     {
       "name": "linux-gcc-x64",
       "includePath": [
-        "${workspaceFolder}/**"
+        "${workspaceFolder}/**",
+        "/opt/ros/jazzy/include/**",
+        "/home/huan/ros2_ws/install/**"
       ],
       "compilerPath": "/usr/bin/gcc",
       "cStandard": "${default}",
       "cppStandard": "${default}",
       "intelliSenseMode": "linux-gcc-x64",
+      "compileCommands": "/home/huan/ros2_ws/build/ARV_V1_MOVEIT/compile_commands.json",
       "compilerArgs": [
         ""
       ]

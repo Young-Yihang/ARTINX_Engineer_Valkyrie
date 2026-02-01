@@ -55,6 +55,8 @@ nodes=(
     "hardware_interface_node"
     "torque_controller_node"
     "dynamics_solver_node"
+    "trajectory_manager_node"
+    "mission_executor_node"
     "move_group"
     "rviz2"
     "robot_state_publisher"
@@ -89,6 +91,7 @@ terminal_titles=(
     "MuJoCo(孪生)"
     "SerialInterface"
     "TrajectoryManager"
+    "MissionExecutor"
 )
 
 for title in "${terminal_titles[@]}"; do

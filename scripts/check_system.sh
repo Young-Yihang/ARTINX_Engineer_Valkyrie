@@ -65,6 +65,7 @@ declare -A EXPECTED_NODES=(
     ["move_group"]="MoveIt规划器"
     ["robot_state_publisher"]="TF发布器"
     ["trajectory_manager"]="轨迹管理器"
+    ["mission_executor"]="任务执行器"
 )
 
 # 期望的话题和频率
@@ -76,11 +77,6 @@ declare -A EXPECTED_TOPICS=(
 # ==================== 主程序 ====================
 clear
 show_mascot
-echo ""
-echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║              ARV_V1 系统健康检查 v2.0                        ║${NC}"
-echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
-echo ""
 
 # 统计变量
 NODE_OK=0
@@ -291,10 +287,61 @@ fi
 
 echo ""
 
-# ==================== 5. 控制器参数 ====================
+# ==================== 5. 轨迹管理服务 ====================
+echo -e "${CYAN}┌─────────────────────────────────────────────────────────────┐${NC}"
+echo -e "${CYAN}│  5. 轨迹管理服务                                            │${NC}"
+echo -e "${CYAN}└─────────────────────────────────────────────────────────────┘${NC}"
+
+# 检查服务是否存在
+services=$(ros2 service list 2>/dev/null)
+
+check_service() {
+    local service=$1
+    local desc=$2
+    
+    if echo "$services" | grep -q "$service"; then
+        # 尝试调用服务测试响应
+        if [ "$service" = "/list_trajectories" ]; then
+            local result=$(timeout 2 ros2 service call "$service" arv_v1_interfaces/srv/ListTrajectories 2>/dev/null)
+            if [ $? -eq 0 ]; then
+                local traj_count=$(echo "$result" | grep -o "names:" | wc -l)
+                if [ "$traj_count" -gt 0 ]; then
+                    local names=$(echo "$result" | grep "names:" -A 1 | tail -1 | tr -d "[]'")
+                    local count=$(echo "$names" | grep -o "," | wc -l)
+                    count=$((count + 1))
+                    ok "$desc (已保存 $count 个轨迹)"
+                else
+                    ok "$desc (无已保存轨迹)"
+                fi
+            else
+                warn "$desc (服务响应超时)"
+            fi
+        else
+            ok "$desc"
+        fi
+    else
+        fail "$desc (服务不存在)"
+    fi
+}
+
+check_service "/list_trajectories" "列出轨迹"
+check_service "/load_trajectory" "加载轨迹"
+check_service "/save_trajectory" "保存轨迹"
+check_service "/save_last_trajectory" "保存最近轨迹"
+
+# 检查mission_executor是否在运行
+if echo "$NODES" | grep -q "mission_executor"; then
+    ok "任务执行器: 运行中 (TUI界面可用)"
+else
+    info "任务执行器: 未启动 (可选组件)"
+fi
+
+echo ""
+
+# ==================== 6. 控制器参数 ====================
 if echo "$NODES" | grep -q "torque_controller"; then
     echo -e "${CYAN}┌─────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}│  5. 控制器配置                                              │${NC}"
+    echo -e "${CYAN}│  6. 控制器配置                                              │${NC}"
     echo -e "${CYAN}└─────────────────────────────────────────────────────────────┘${NC}"
 
     params=$(ros2 param list /torque_controller_action_server 2>/dev/null)
@@ -320,9 +367,9 @@ if echo "$NODES" | grep -q "torque_controller"; then
     echo ""
 fi
 
-# ==================== 6. TF链路 ====================
+# ==================== 7. TF链路 ====================
 echo -e "${CYAN}┌─────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│  6. TF坐标系                                                │${NC}"
+echo -e "${CYAN}│  7. TF坐标系                                                │${NC}"
 echo -e "${CYAN}└─────────────────────────────────────────────────────────────┘${NC}"
 
 tf_result=$(timeout 2 ros2 run tf2_ros tf2_echo base_link link6_2006roll 2>&1 | head -3)
@@ -334,9 +381,9 @@ fi
 
 echo ""
 
-# ==================== 7. 系统资源 ====================
+# ==================== 8. 系统资源 ====================
 echo -e "${CYAN}┌─────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│  7. 系统资源                                                │${NC}"
+echo -e "${CYAN}│  8. 系统资源                                                │${NC}"
 echo -e "${CYAN}└─────────────────────────────────────────────────────────────┘${NC}"
 
 # CPU和内存
