@@ -37,7 +37,7 @@ The following files contain validated control algorithms. Never edit without exp
 
 ### Directory Mapping
 ```
-ARV_V1_MOVEIT/src/
+arv_v1_moveit/src/
 ├── core/              # Protected control algorithms (DO NOT MODIFY)
 │   ├── dynamics_computer.cpp/hpp
 │   ├── cascade_pid.cpp/hpp
@@ -66,10 +66,10 @@ ARV_V1_MOVEIT/src/
 
 ```
 /home/huan/ros2_ws/src/
-├── ARV_V1_MODEL/           # URDF models and meshes
+├── arv_v1_model/           # URDF models and meshes
 │   ├── urdf/               # Robot description files
 │   └── meshes/             # STL/DAE visual models
-├── ARV_V1_MOVEIT/          # Core control package
+├── arv_v1_moveit/          # Core control package
 │   ├── src/                # C++ source (layered subdirectories)
 │   │   ├── core/           # Protected algorithms
 │   │   ├── control/        # Control nodes
@@ -96,7 +96,7 @@ ARV_V1_MOVEIT/src/
 ### Build
 ```bash
 cd ~/ros2_ws
-colcon build --packages-select ARV_V1_MOVEIT ARV_V1_MODEL
+colcon build --packages-select arv_v1_moveit arv_v1_model
 source install/setup.bash
 ```
 
@@ -107,17 +107,17 @@ source install/setup.bash
 
 # Manual launch options:
 # Mode 1: Pure simulation
-ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py
-ros2 run ARV_V1_MOVEIT torque_controller_node
-ros2 run ARV_V1_MOVEIT mujoco_interface_node
-ros2 run ARV_V1_MOVEIT trajectory_manager_node
-ros2 run ARV_V1_MOVEIT mission_executor_node  # TUI interface
+ros2 launch arv_v1_moveit mujoco_demo.launch.py
+ros2 run arv_v1_moveit torque_controller_node
+ros2 run arv_v1_moveit mujoco_interface_node
+ros2 run arv_v1_moveit trajectory_manager_node
+ros2 run arv_v1_moveit mission_executor_node  # TUI interface
 
 # Mode 2: Hardware + Digital twin
-ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=/dev/ttyACM0
-ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true
-ros2 run ARV_V1_MOVEIT trajectory_manager_node
-ros2 run ARV_V1_MOVEIT mission_executor_node
+ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=/dev/ttyACM0
+ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true
+ros2 run arv_v1_moveit trajectory_manager_node
+ros2 run arv_v1_moveit mission_executor_node
 ```
 
 ### Debugging Commands

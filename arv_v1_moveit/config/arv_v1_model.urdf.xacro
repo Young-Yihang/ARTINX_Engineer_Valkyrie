@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="arv_v1_model">
+    <xacro:arg name="initial_positions_file" default="initial_positions.yaml" />
+
+    <!-- Import arv_v1_model urdf file -->
+    <xacro:include filename="$(find arv_v1_model)/urdf/arv_v1_model.urdf" />
+
+    <!-- Import control_xacro -->
+    <xacro:include filename="arv_v1_model.ros2_control.xacro" />
+
+    <!-- ros2_control 标签（使用 mock 硬件） -->
+    <xacro:arv_v1_model_ros2_control name="FakeSystem" initial_positions_file="$(arg initial_positions_file)"/>
+
+</robot>

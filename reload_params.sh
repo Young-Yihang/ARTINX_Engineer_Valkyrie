@@ -3,7 +3,7 @@
 # 使用方法: ./reload_params.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/ARV_V1_MOVEIT/config/controller_params.yaml"
+CONFIG_FILE="$SCRIPT_DIR/arv_v1_moveit/config/controller_params.yaml"
 
 echo "=== 热重载控制器参数 ==="
 echo "配置文件: $CONFIG_FILE"

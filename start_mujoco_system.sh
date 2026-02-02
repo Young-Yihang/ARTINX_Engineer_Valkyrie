@@ -139,7 +139,7 @@ build_workspace() {
     log_info "编译项目..."
     cd "$WORKSPACE_DIR"
 
-    colcon build --packages-select arv_v1_interfaces ARV_V1_MODEL ARV_V1_MOVEIT --cmake-args -DCMAKE_BUILD_TYPE=Release
+    colcon build --packages-select arv_v1_interfaces arv_v1_model arv_v1_moveit --cmake-args -DCMAKE_BUILD_TYPE=Release
     
     if [ $? -eq 0 ]; then
         log_success "编译成功！"
@@ -176,13 +176,13 @@ start_node() {
 # ========== 模式1: 纯仿真 ==========
 start_sim_mode() {
     log_info "启动纯仿真模式..."
-    local config_path="$WORKSPACE_DIR/src/ARV_V1_MOVEIT/config/controller_params.yaml"
-    start_node "MoveIt+RViz" "ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py" 0
-    start_node "TorqueController" "ros2 run ARV_V1_MOVEIT torque_controller_node --ros-args --params-file $config_path" 0
+    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
+    start_node "MoveIt+RViz" "ros2 launch arv_v1_moveit mujoco_demo.launch.py" 0
+    start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
-    start_node "MuJoCo(仿真)" "ros2 run ARV_V1_MOVEIT mujoco_interface_node" 0
-    start_node "TrajectoryManager" "ros2 run ARV_V1_MOVEIT trajectory_manager_node" 1
-    start_node "MissionExecutor" "ros2 run ARV_V1_MOVEIT mission_executor_node" 2
+    start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node" 0
+    start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
+    start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 2
 }
 
 # ========== 模式2: 串口 + 数字孪生 ==========
@@ -196,14 +196,14 @@ start_serial_mode() {
     fi
 
     log_info "启动串口真机模式 (设备: $DETECTED_SERIAL_DEVICE)..."
-    local config_path="$WORKSPACE_DIR/src/ARV_V1_MOVEIT/config/controller_params.yaml"
-    start_node "MoveIt+RViz" "ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py" 0
-    start_node "TorqueController" "ros2 run ARV_V1_MOVEIT torque_controller_node --ros-args --params-file $config_path" 0
+    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
+    start_node "MoveIt+RViz" "ros2 launch arv_v1_moveit mujoco_demo.launch.py" 0
+    start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
-    start_node "SerialInterface" "ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 0
-    start_node "MuJoCo(孪生)" "ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true" 0
-    start_node "TrajectoryManager" "ros2 run ARV_V1_MOVEIT trajectory_manager_node" 1
-    start_node "MissionExecutor" "ros2 run ARV_V1_MOVEIT mission_executor_node" 2
+    start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 0
+    start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true" 0
+    start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
+    start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 2
 }
 
 
