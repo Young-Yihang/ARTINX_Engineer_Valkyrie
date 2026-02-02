@@ -54,7 +54,6 @@ nodes=(
     "mujoco_interface_node"
     "hardware_interface_node"
     "torque_controller_node"
-    "dynamics_solver_node"
     "trajectory_manager_node"
     "mission_executor_node"
     "move_group"

@@ -37,8 +37,8 @@ message(STATUS "MuJoCo library: ${MUJOCO_LIBRARIES}")
 include_directories(include)
 
 # ============= 2. 创建动力学工具类库（先创建，后续节点会链接它）=============
-add_library(dynamics_computer 
-  src/dynamics_computer.cpp
+add_library(dynamics_computer
+  src/core/dynamics_computer.cpp
 )
 
 # 工具类的依赖
@@ -58,7 +58,7 @@ target_include_directories(dynamics_computer PUBLIC
 
 # ============= 2.5 创建卡尔曼滤波器库 =============
 add_library(kalman_filter
-  src/kalman_filter.cpp
+  src/core/kalman_filter.cpp
 )
 
 # 卡尔曼滤波器的依赖
@@ -68,19 +68,19 @@ target_link_libraries(kalman_filter
 
 # 卡尔曼滤波器的头文件路径
 target_include_directories(kalman_filter PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core>
   $<INSTALL_INTERFACE:include>
   ${EIGEN3_INCLUDE_DIRS}
 )
 
 # ============= 2.6 创建级联PID控制器库 =============
 add_library(cascade_pid
-  src/cascade_pid.cpp
+  src/core/cascade_pid.cpp
 )
 
 # 级联PID的头文件路径
 target_include_directories(cascade_pid PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core>
   $<INSTALL_INTERFACE:include>
 )
 
@@ -88,8 +88,8 @@ target_include_directories(cascade_pid PUBLIC
 
 # -------------------------------------------
 # 力矩控制器 Action Server 节点 (Stage 4)
-add_executable(torque_controller_node 
-  src/torque_controller_node.cpp
+add_executable(torque_controller_node
+  src/control/torque_controller_node.cpp
 )
 
 # 链接库（包含工具类和卡尔曼滤波器）
@@ -108,7 +108,7 @@ target_link_libraries(torque_controller_node
 # 头文件路径
 target_include_directories(torque_controller_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>  # ← 添加 src 目录以找到 kalman_filter.hpp
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core>
   $<INSTALL_INTERFACE:include>
   ${rclcpp_INCLUDE_DIRS}
   ${rclcpp_action_INCLUDE_DIRS}
@@ -137,8 +137,8 @@ ament_target_dependencies(torque_controller_node
 # -------------------------------------------
 
 # MuJoCo接口节点 (Stage 4 - MuJoCo仿真)
-add_executable(mujoco_interface_node 
-  src/mujoco_interface_node.cpp
+add_executable(mujoco_interface_node
+  src/interfaces/mujoco_interface_node.cpp
 )
 
 # 链接库
@@ -174,8 +174,8 @@ ament_target_dependencies(mujoco_interface_node
 # -------------------------------------------
 # 硬件接口节点 (Sim2Real)
 add_executable(hardware_interface_node
-  src/hardware_interface_node.cpp
-  src/Crc.cpp
+  src/interfaces/hardware_interface_node.cpp
+  src/interfaces/Crc.cpp
 )
 
 # 链接库
@@ -187,6 +187,7 @@ target_link_libraries(hardware_interface_node
 # 头文件路径
 target_include_directories(hardware_interface_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/interfaces>
   $<INSTALL_INTERFACE:include>
   ${rclcpp_INCLUDE_DIRS}
   ${serial_driver_INCLUDE_DIRS}
@@ -203,7 +204,7 @@ ament_target_dependencies(hardware_interface_node
 # -------------------------------------------
 # 轨迹管理节点 (Phase 1)
 add_executable(trajectory_manager_node
-  src/trajectory_manager_node.cpp
+  src/application/trajectory_manager_node.cpp
 )
 
 # 链接库
@@ -235,7 +236,7 @@ ament_target_dependencies(trajectory_manager_node
 # -------------------------------------------
 # Mission Executor Node (Application Layer v2.0)
 add_executable(mission_executor_node
-  src/mission_executor_node.cpp
+  src/application/mission_executor_node.cpp
 )
 
 target_link_libraries(mission_executor_node

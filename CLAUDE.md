@@ -12,10 +12,10 @@
 
 ### DO NOT MODIFY - Core Control Files
 The following files contain validated control algorithms. Never edit without explicit permission:
-- `torque_controller_node.cpp` - Core torque control implementation
-- `dynamics_computer.cpp` - Dynamics computation algorithms
-- `cascade_pid.cpp` - Cascade PID controller
-- `kalman_filter.cpp` - State estimation filters
+- `src/control/torque_controller_node.cpp` - Core torque control implementation
+- `src/core/dynamics_computer.cpp` - Dynamics computation algorithms
+- `src/core/cascade_pid.cpp` - Cascade PID controller
+- `src/core/kalman_filter.cpp` - State estimation filters
 
 #### File Creation Policy
 - **Prefer editing existing files over creating new ones**
@@ -37,18 +37,23 @@ The following files contain validated control algorithms. Never edit without exp
 
 ### Directory Mapping
 ```
-src/
-├── core/           # Protected control algorithms (DO NOT MODIFY)
-│   ├── torque_controller_node.cpp
-│   ├── dynamics_computer.cpp
-│   ├── cascade_pid.cpp
-│   └── kalman_filter.cpp
-├── interfaces/     # Hardware & simulation interfaces
+ARV_V1_MOVEIT/src/
+├── core/              # Protected control algorithms (DO NOT MODIFY)
+│   ├── dynamics_computer.cpp/hpp
+│   ├── cascade_pid.cpp/hpp
+│   └── kalman_filter.cpp/hpp
+├── control/           # Control nodes
+│   └── torque_controller_node.cpp
+├── interfaces/        # Hardware & simulation interfaces
 │   ├── mujoco_interface_node.cpp
-│   └── hardware_interface_node.cpp
-├── planning/       # Motion planning utilities
-├── services/       # ROS2 service implementations
-└── utils/          # Helper functions, type definitions
+│   ├── hardware_interface_node.cpp
+│   ├── Crc.cpp/hpp
+│   └── serial_protocol.hpp
+├── application/       # Application layer nodes
+│   ├── trajectory_manager_node.cpp
+│   └── mission_executor_node.cpp
+└── utils/             # Helper functions
+    └── urdf_parser.cpp
 ```
 
 ### Dependency Rules
@@ -65,20 +70,25 @@ src/
 │   ├── urdf/               # Robot description files
 │   └── meshes/             # STL/DAE visual models
 ├── ARV_V1_MOVEIT/          # Core control package
-│   ├── src/                # C++ source (see constraints above)
+│   ├── src/                # C++ source (layered subdirectories)
+│   │   ├── core/           # Protected algorithms
+│   │   ├── control/        # Control nodes
+│   │   ├── interfaces/     # Hardware/simulation interfaces
+│   │   ├── application/    # Application layer nodes
+│   │   └── utils/          # Helper functions
 │   ├── include/            # Header files
 │   ├── config/             # YAML configuration files
 │   ├── launch/             # ROS2 launch files
 │   └── CMakeLists.txt
+├── arv_v1_interfaces/      # ROS2 custom service definitions
+│   └── srv/                # Service message files
 ├── docs/                   # Technical documentation
 │   ├── TODO_KDL.md         # System architecture & roadmap
-│   ├── VISION_GRASP.md    # Vision system design
-│   ├── VISION_LEARNING.md # Learning pathway
-│   └── ARCHITECTURE_RT.md # Real-time architecture
-└── scripts/
-    ├── start_mujoco_system.sh  # Main startup script
-    ├── stop_all_nodes.sh        # Cleanup script
-    └── reload_params.sh         # Hot reload parameters
+│   ├── VISION_GRASP.md     # Vision system design
+│   ├── VISION_LEARNING.md  # Learning pathway
+│   └── ARCHITECTURE_RT.md  # Real-time architecture
+├── start_mujoco_system.sh  # Main startup script (interactive menu)
+└── stop_all_nodes.sh       # Cleanup script
 ```
 
 ## Build and Run Commands
@@ -92,7 +102,7 @@ source install/setup.bash
 
 ### Launch System
 ```bash
-# Interactive menu for mode selection
+# Recommended: Interactive menu for mode selection
 ./start_mujoco_system.sh
 
 # Manual launch options:
@@ -100,10 +110,14 @@ source install/setup.bash
 ros2 launch ARV_V1_MOVEIT mujoco_demo.launch.py
 ros2 run ARV_V1_MOVEIT torque_controller_node
 ros2 run ARV_V1_MOVEIT mujoco_interface_node
+ros2 run ARV_V1_MOVEIT trajectory_manager_node
+ros2 run ARV_V1_MOVEIT mission_executor_node  # TUI interface
 
 # Mode 2: Hardware + Digital twin
 ros2 run ARV_V1_MOVEIT hardware_interface_node --ros-args -p serial_port:=/dev/ttyACM0
 ros2 run ARV_V1_MOVEIT mujoco_interface_node --ros-args -p visualization_only:=true
+ros2 run ARV_V1_MOVEIT trajectory_manager_node
+ros2 run ARV_V1_MOVEIT mission_executor_node
 ```
 
 ### Debugging Commands
@@ -124,14 +138,43 @@ ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
 
 ### Node Topology (200Hz Control Loop)
 ```
-MoveIt2 → torque_controller → [mujoco_interface | hardware_interface] → joint_states
-         ↑__________________________________________________|
+┌─────────────────────────────────────────────────────────────────────┐
+│  Application Layer                                                  │
+│  ┌─────────────────────┐    ┌───────────────────────┐              │
+│  │ mission_executor    │───→│ trajectory_manager    │              │
+│  │ (TUI interface)     │    │ (save/load/execute)   │              │
+│  └─────────────────────┘    └───────────┬───────────┘              │
+└──────────────────────────────────────────│──────────────────────────┘
+                                           ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│  Control Layer                                                      │
+│  MoveIt2 → torque_controller → [mujoco_interface | hardware_interface]
+│            ↑__________________________________________________|     │
+│                                joint_states                         │
+└─────────────────────────────────────────────────────────────────────┘
 ```
+
+### ROS2 Nodes
+| Node | Directory | Description |
+|------|-----------|-------------|
+| `torque_controller_node` | `control/` | Core torque control with PID/Kalman |
+| `mujoco_interface_node` | `interfaces/` | MuJoCo simulation interface |
+| `hardware_interface_node` | `interfaces/` | Hardware serial communication |
+| `trajectory_manager_node` | `application/` | Trajectory save/load/execute |
+| `mission_executor_node` | `application/` | TUI for task execution |
 
 ### Key Topics
 - `/joint_states` - Current robot state (position, velocity, effort)
 - `/effort_controller/commands` - Computed torque commands
 - `/ARM_controller/follow_joint_trajectory` - Trajectory action interface
+
+### Service Interfaces (arv_v1_interfaces)
+- `/list_trajectories` - List saved trajectories
+- `/load_trajectory` - Load and execute a saved trajectory
+- `/save_trajectory` - Save current trajectory to file
+- `/save_last_trajectory` - Save the last executed trajectory
+- `/execute_action` - Execute task commands
+- `/get_task_state` - Query task execution state
 
 ### Control Modes
 1. **Hold Mode**: Maintains current position with gravity compensation
@@ -202,7 +245,7 @@ printf("Position: %f\n", pos);
 
 ## Current Development Status
 
-**Branch**: feature/ros2_components
+**Branch**: feature/pick_ores
 **Completed Features**:
 - ✅ Dual-mode architecture (simulation/hardware)
 - ✅ Kalman filtering
@@ -210,10 +253,12 @@ printf("Position: %f\n", pos);
 - ✅ USB serial communication
 - ✅ Digital twin visualization
 - ✅ Parameter hot reload
+- ✅ Trajectory management system (save/load/execute)
+- ✅ Mission executor TUI
 
 **In Progress**:
-- 🔧 Visual servoing integration
-- 🔧 Dynamic obstacle avoidance
+- 🔧 Visual servoing integration (20%)
+- 🔧 Pick & place automation
 
 ## Hardware Configuration
 
@@ -315,6 +360,6 @@ my_node:
 
 ---
 
-**Last Updated**: 2026-01-21
+**Last Updated**: 2026-02-02
 **Maintainer**: Young-Yihang
-**Version**: 2.0
+**Version**: 2.1
