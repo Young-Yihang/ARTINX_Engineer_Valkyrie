@@ -67,28 +67,33 @@ arv_v1_moveit/src/
 ```
 /home/huan/ros2_ws/src/
 ├── arv_v1_model/           # URDF models and meshes
-│   ├── urdf/               # Robot description files
-│   └── meshes/             # STL/DAE visual models
+│   ├── urdf/               # Robot description files (arv_v1_model.urdf)
+│   ├── meshes/             # STL/DAE visual models
+│   ├── config/             # Model configuration (joint_names_ARV_V1_MODEL.yaml)
+│   └── launch/             # Model launch files
 ├── arv_v1_moveit/          # Core control package
 │   ├── src/                # C++ source (layered subdirectories)
-│   │   ├── core/           # Protected algorithms
+│   │   ├── core/           # Protected algorithms (.cpp + .hpp in same dir)
 │   │   ├── control/        # Control nodes
-│   │   ├── interfaces/     # Hardware/simulation interfaces
+│   │   ├── interfaces/     # Hardware/simulation interfaces (.cpp + .hpp)
 │   │   ├── application/    # Application layer nodes
 │   │   └── utils/          # Helper functions
-│   ├── include/            # Header files
 │   ├── config/             # YAML configuration files
+│   │   └── trajectories/   # Saved trajectory files
 │   ├── launch/             # ROS2 launch files
+│   ├── docs/               # Package-specific documentation
 │   └── CMakeLists.txt
 ├── arv_v1_interfaces/      # ROS2 custom service definitions
 │   └── srv/                # Service message files
 ├── docs/                   # Technical documentation
-│   ├── TODO_KDL.md         # System architecture & roadmap
-│   ├── VISION_GRASP.md     # Vision system design
-│   ├── VISION_LEARNING.md  # Learning pathway
-│   └── ARCHITECTURE_RT.md  # Real-time architecture
+│   ├── GRADUATION_PROJECT/ # Thesis-related documentation
+│   ├── SYSTEM_ARCHITECTURE.md
+│   ├── TECHNICAL_IMPLEMENTATION.md
+│   └── VISION_SYSTEM.md
+├── scripts/                # Utility scripts (check_system.sh)
 ├── start_mujoco_system.sh  # Main startup script (interactive menu)
-└── stop_all_nodes.sh       # Cleanup script
+├── stop_all_nodes.sh       # Cleanup script
+└── reload_params.sh        # Hot-reload parameters script
 ```
 
 ## Build and Run Commands
@@ -362,4 +367,4 @@ my_node:
 
 **Last Updated**: 2026-02-02
 **Maintainer**: Young-Yihang
-**Version**: 2.1
+**Version**: 2.2
