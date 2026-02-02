@@ -18,6 +18,9 @@ find_package(glfw3 REQUIRED)
 find_package(serial_driver REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(arv_v1_interfaces REQUIRED)
+find_package(PkgConfig REQUIRED)
+find_package(OpenGL REQUIRED)
+pkg_check_modules(IMGUI REQUIRED imgui)
 
 # ========== MuJoCo手动配置 ==========
 # 设置MuJoCo安装路径
@@ -84,6 +87,37 @@ target_include_directories(cascade_pid PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
+# ========== ImGui后端 + ImPlot 源码编译 ==========
+# ImGui后端目录 (apt包不含后端实现，需要源码编译)
+set(IMGUI_BACKENDS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends/backends)
+
+# ImGui后端库 (GLFW + OpenGL3)
+add_library(imgui_backends STATIC
+  ${IMGUI_BACKENDS_DIR}/imgui_impl_glfw.cpp
+  ${IMGUI_BACKENDS_DIR}/imgui_impl_opengl3.cpp
+)
+target_include_directories(imgui_backends PUBLIC
+  ${IMGUI_BACKENDS_DIR}
+  ${IMGUI_INCLUDE_DIRS}
+)
+target_link_libraries(imgui_backends PUBLIC
+  ${IMGUI_LIBRARIES}
+  glfw
+  OpenGL::GL
+)
+
+# ImPlot源码编译 (apt没有implot包)
+set(IMPLOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/implot)
+add_library(implot STATIC
+  ${IMPLOT_DIR}/implot.cpp
+  ${IMPLOT_DIR}/implot_items.cpp
+)
+target_include_directories(implot PUBLIC
+  ${IMPLOT_DIR}
+  ${IMGUI_INCLUDE_DIRS}
+)
+target_link_libraries(implot PUBLIC ${IMGUI_LIBRARIES})
+
 # ============= 3. 创建可执行文件 =============
 
 # -------------------------------------------
@@ -146,6 +180,10 @@ target_link_libraries(mujoco_interface_node
   ${rclcpp_LIBRARIES}
   ${MUJOCO_LIBRARIES}  # ← 使用手动配置的MuJoCo库
   glfw  # GLFW窗口库
+  OpenGL::GL
+  ${IMGUI_LIBRARIES}
+  imgui_backends  # ← 新增: ImGui GLFW/OpenGL3后端
+  implot
 )
 
 # 头文件路径
@@ -155,6 +193,8 @@ target_include_directories(mujoco_interface_node PUBLIC
   ${rclcpp_INCLUDE_DIRS}
   ${ament_index_cpp_INCLUDE_DIRS}
   ${MUJOCO_INCLUDE_DIRS}  # ← 添加MuJoCo头文件
+  ${IMGUI_INCLUDE_DIRS}
+  ${IMGUI_BACKENDS_DIR}   # ← 新增: ImGui后端头文件
 )
 
 # 设置运行时库路径 
@@ -250,11 +290,16 @@ ament_target_dependencies(mission_executor_node
   arv_v1_interfaces
 )
 
+
 # ============= 4. 安装 =============
 
 # 安装可执行文件和库
 install(TARGETS
   dynamics_computer       # ← 工具类库
+  kalman_filter
+  cascade_pid
+  imgui_backends          # ← 新增: ImGui后端库
+  implot
   torque_controller_node
   mujoco_interface_node
   hardware_interface_node
