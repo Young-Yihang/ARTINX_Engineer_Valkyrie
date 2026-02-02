@@ -95,23 +95,23 @@ public:
             std::bind(&TrajectoryManagerNode::listTrajectoriesCallback, this,
                       std::placeholders::_1, std::placeholders::_2));
 
-        RCLCPP_INFO(this->get_logger(), "");
+        RCLCPP_INFO(this->get_logger(), " ");
         RCLCPP_INFO(this->get_logger(), "==============================================");
         RCLCPP_INFO(this->get_logger(), "     Trajectory Manager Node Started");
         RCLCPP_INFO(this->get_logger(), "==============================================");
-        RCLCPP_INFO(this->get_logger(), "");
+        RCLCPP_INFO(this->get_logger(), " ");
         RCLCPP_INFO(this->get_logger(), "Services:");
         RCLCPP_INFO(this->get_logger(), "  /save_last_trajectory - Save last executed trajectory");
         RCLCPP_INFO(this->get_logger(), "  /save_trajectory      - Save specified trajectory");
         RCLCPP_INFO(this->get_logger(), "  /load_trajectory      - Load and execute trajectory");
         RCLCPP_INFO(this->get_logger(), "  /list_trajectories    - List saved trajectories");
-        RCLCPP_INFO(this->get_logger(), "");
+        RCLCPP_INFO(this->get_logger(), " ");
         RCLCPP_INFO(this->get_logger(), "Usage:");
         RCLCPP_INFO(this->get_logger(), "  1. Plan and execute in RViz");
         RCLCPP_INFO(this->get_logger(), "  2. Save: ros2 service call /save_last_trajectory \\");
         RCLCPP_INFO(this->get_logger(), "           arv_v1_interfaces/srv/SaveLastTrajectory \\");
         RCLCPP_INFO(this->get_logger(), "           \"{name: 'my_traj', description: 'desc'}\"");
-        RCLCPP_INFO(this->get_logger(), "");
+        RCLCPP_INFO(this->get_logger(), " ");
     }
 
 private:
