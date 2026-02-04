@@ -211,10 +211,9 @@ start_serial_mode() {
 # ========== 主函数 ==========
 main() {
     clear
-    show_mascot
     setup_environment
     build_workspace
-
+    show_mascot
     while true; do
         show_menu
         read choice
