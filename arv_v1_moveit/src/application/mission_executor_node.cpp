@@ -108,6 +108,10 @@ private:
   std::mutex status_mutex_;
   std::string trajectory_dir_;
   
+  // Pagination
+  static constexpr size_t MISSIONS_PER_PAGE = 6;
+  size_t current_page_ = 0;
+  
   // Input state machine
   enum class InputMode {
     COMMAND,
@@ -149,15 +153,17 @@ private:
                     response->names.size(), response->descriptions.size());
       }
 
-      // Map first 9 trajectories to keys '1'-'9'
-      size_t count = std::min(response->names.size(), size_t(9));
-      for (size_t i = 0; i < count; ++i) {
+      // Load all trajectories (pagination handled in UI)
+      for (size_t i = 0; i < response->names.size(); ++i) {
         Mission m;
         m.name = response->names[i];
         m.description = response->descriptions[i];
-        m.hotkey = '1' + i;
+        m.hotkey = '0'; // Will be assigned dynamically per page
         missions_.push_back(m);
       }
+      
+      // Reset to first page
+      current_page_ = 0;
     }
   }
 
@@ -165,12 +171,8 @@ private:
     // Clear screen and home cursor
     std::cout << "\033[2J\033[H";
 
-    // Title with color
+  // Title with color
     std::cout << COLOR_CYAN << COLOR_BOLD;
-    std::cout << "\n";
-    std::cout << "\n";
-    std::cout << "\n";
-    std::cout << "\n";
     std::cout << COLOR_RESET << "\n";
     std::cout << "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀  ⠀⠀⠀⠀⠀⢀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀" << std::endl;
     std::cout << "⠀⠀⠀⠀⠀⠀⠀⠀⠀  ⠀⠀⠀⠀⠀⢀⣾⣿⣿⣿⣿⣦⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀" << std::endl;
@@ -191,25 +193,37 @@ private:
     std::cout << "⠀⠀⣰⣄⠑⢽⣿⣿⣿⣿⣿⣿⣿⢹⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⠀⠀⡿⣿⣿⠿⣿⣇⠀⠀⠀⠀" << std::endl;
     std::cout << "⠀⠰⢿⣿⣷⣤⡙⠻⢿⣿⣿⣿⣿⣿⡆⢹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠇⠀⠙⢏⡞⠀⠘⠺⠄⠀⠀⠀" << std::endl;
     std::cout << "⠀⠀⠀⠈⠉⠛⠻⠷⢤⠈⠉⠙⠛⠛⠓⠀⢿⣿⣿⣿⣿⣿⣿⠿⠟⢋⠽⠋⠀⠀⠀⠀⠁⠀⠀⠀⠀⠀⠀⠀" << std::endl;
-    std::cout << "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀" << std::endl;
+    std::cout << "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀     " << std::endl;
 
-    // Missions list
+    // Missions list with pagination
     if (missions_.empty()) {
       std::cout << COLOR_YELLOW << "  No missions found. Press [S] to save a trajectory.\n" << COLOR_RESET;
     } else {
-      std::cout << COLOR_BOLD << "Available Missions:\n" << COLOR_RESET;
-      for (const auto &m : missions_) {
-        std::cout << "  [" << COLOR_YELLOW << m.hotkey << COLOR_RESET << "] ";
-        std::cout << std::setw(20) << std::left << m.name;
-        std::cout << " : " << m.description << "\n";
+      size_t total_pages = (missions_.size() + MISSIONS_PER_PAGE - 1) / MISSIONS_PER_PAGE;
+      size_t start_idx = current_page_ * MISSIONS_PER_PAGE;
+      size_t end_idx = std::min(start_idx + MISSIONS_PER_PAGE, missions_.size());
+      
+      std::cout << COLOR_BOLD << "Available Missions (Page " 
+                << (current_page_ + 1) << "/" << total_pages << "):" 
+                << COLOR_RESET << "\n";
+      
+      for (size_t i = start_idx; i < end_idx; ++i) {
+        char hotkey = '1' + (i - start_idx);
+        std::cout << "  [" << COLOR_YELLOW << hotkey << COLOR_RESET << "] ";
+        std::cout << std::setw(20) << std::left << missions_[i].name;
+        std::cout << " : " << missions_[i].description << "\n";
       }
     }
 
     std::cout << "\n";
     
-    // Commands
+    // Commands with pagination
     std::cout << COLOR_BOLD << "Commands:\n" << COLOR_RESET;
-    std::cout << "  [S]ave  [D]elete  [I]nfo  [R]efresh  [H]elp  [Q]uit\n\n";
+    if (missions_.size() > MISSIONS_PER_PAGE) {
+      std::cout << "  [N]ext  [P]rev  |  [S]ave  [D]elete  [I]nfo  [R]efresh  [H]elp  [Q]uit\n\n";
+    } else {
+      std::cout << "  [S]ave  [D]elete  [I]nfo  [R]efresh  [H]elp  [Q]uit\n\n";
+    }
     
     // Status with color
     std::cout << "Status: ";
@@ -283,6 +297,28 @@ private:
       return;
     }
     
+    // Pagination - Next page
+    if (key == 'n' || key == 'N') {
+      if (missions_.size() > MISSIONS_PER_PAGE) {
+        size_t total_pages = (missions_.size() + MISSIONS_PER_PAGE - 1) / MISSIONS_PER_PAGE;
+        current_page_ = (current_page_ + 1) % total_pages;
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        current_status_ = "Page " + std::to_string(current_page_ + 1) + "/" + std::to_string(total_pages);
+      }
+      return;
+    }
+    
+    // Pagination - Previous page
+    if (key == 'p' || key == 'P') {
+      if (missions_.size() > MISSIONS_PER_PAGE) {
+        size_t total_pages = (missions_.size() + MISSIONS_PER_PAGE - 1) / MISSIONS_PER_PAGE;
+        current_page_ = (current_page_ + total_pages - 1) % total_pages;
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        current_status_ = "Page " + std::to_string(current_page_ + 1) + "/" + std::to_string(total_pages);
+      }
+      return;
+    }
+    
     if (key == 'r' || key == 'R') {
       {
         std::lock_guard<std::mutex> lock(status_mutex_);
@@ -326,10 +362,11 @@ private:
       return;
     }
     
-    // Check if it's a mission hotkey
-    for (const auto &m : missions_) {
-      if (m.hotkey == key) {
-        executeMission(m.name);
+    // Check if it's a mission hotkey (1-6 for current page)
+    if (key >= '1' && key <= '9') {
+      size_t idx = (key - '1') + (current_page_ * MISSIONS_PER_PAGE);
+      if (idx < missions_.size()) {
+        executeMission(missions_[idx].name);
         return;
       }
     }
@@ -461,7 +498,8 @@ private:
     }
     
     if (key >= '1' && key <= '9') {
-      size_t idx = key - '1';
+      // Map hotkey to actual mission index based on current page
+      size_t idx = (key - '1') + (current_page_ * MISSIONS_PER_PAGE);
       if (idx < missions_.size()) {
         deleteTrajectory(missions_[idx].name);
       } else {
@@ -503,9 +541,13 @@ private:
     }
     
     if (key >= '1' && key <= '9') {
-      size_t idx = key - '1';
+      // Map hotkey to actual mission index based on current page
+      size_t idx = (key - '1') + (current_page_ * MISSIONS_PER_PAGE);
       if (idx < missions_.size()) {
         showMissionInfo(missions_[idx].name);
+      } else {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        current_status_ = "Invalid mission number";
       }
     }
     
