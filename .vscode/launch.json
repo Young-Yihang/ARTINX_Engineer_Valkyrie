@@ -2,14 +2,54 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Colcon Build: Bash Start Mujoco System",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "/bin/bash",
+      "args": [
+        "${workspaceFolder}/start_mujoco_system.sh"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "externalConsole": true,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
+      "name": "Bash Stop All Nodes",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "/bin/bash",
+      "args": [
+        "${workspaceFolder}/stop_all_nodes.sh"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "externalConsole": true,
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
       "name": "C/C++ Runner: Debug Session",
       "type": "cppdbg",
       "request": "launch",
       "args": [],
       "stopAtEntry": false,
       "externalConsole": false,
-      "cwd": "/home/wuhuan/ros2_ws/src",
-      "program": "/home/wuhuan/ros2_ws/src/build/Debug/outDebug",
+      "cwd": "/home/huan/ros2_ws/src/arv_v1_moveit/src/application",
+      "program": "/home/huan/ros2_ws/src/arv_v1_moveit/src/application/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [
