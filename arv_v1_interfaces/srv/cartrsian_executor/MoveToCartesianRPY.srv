@@ -1,0 +1,17 @@
+# 笛卡尔空间：物体坐标系
+# request
+float64 x
+float64 y
+float64 z
+float64 roll
+float64 pitch
+float64 yaw
+float64 velocity_scaling
+float64 acceleration_scaling
+bool async
+---
+# response
+bool success
+string message
+float64 planning_time
+float64 trajectory_duration

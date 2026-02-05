@@ -15,6 +15,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # mission_executor_node 服务
   "srv/mission_executor/ExecuteAction.srv"
   "srv/mission_executor/GetTaskState.srv"
+  # cartesian_executor_node 服务
+  "srv/cartesian_executor/MoveToCartesianRPY.srv"
+  "srv/cartesian_executor/StopCartesianMotion.srv"
   DEPENDENCIES trajectory_msgs service_msgs
 )
 
