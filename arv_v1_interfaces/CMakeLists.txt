@@ -4,13 +4,18 @@ project(arv_v1_interfaces)
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(trajectory_msgs REQUIRED)
+find_package(service_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "srv/SaveTrajectory.srv"
-  "srv/SaveLastTrajectory.srv"
-  "srv/LoadTrajectory.srv"
-  "srv/ListTrajectories.srv"
-  DEPENDENCIES trajectory_msgs
+  # trajectory_manager_node 服务
+  "srv/trajectory_manager/ListTrajectories.srv"
+  "srv/trajectory_manager/LoadTrajectory.srv"
+  "srv/trajectory_manager/SaveTrajectory.srv"
+  "srv/trajectory_manager/SaveLastTrajectory.srv"
+  # mission_executor_node 服务
+  "srv/mission_executor/ExecuteAction.srv"
+  "srv/mission_executor/GetTaskState.srv"
+  DEPENDENCIES trajectory_msgs service_msgs
 )
 
 ament_package()
