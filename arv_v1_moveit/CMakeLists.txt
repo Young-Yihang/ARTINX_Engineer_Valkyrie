@@ -18,6 +18,14 @@ find_package(glfw3 REQUIRED)
 find_package(serial_driver REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(arv_v1_interfaces REQUIRED)
+find_package(moveit_ros_planning_interface REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(geometric_shapes REQUIRED)
+find_package(shape_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(OpenGL REQUIRED)
 pkg_check_modules(IMGUI REQUIRED imgui)
@@ -184,6 +192,7 @@ target_link_libraries(mujoco_interface_node
   ${IMGUI_LIBRARIES}
   imgui_backends  # ← 新增: ImGui GLFW/OpenGL3后端
   implot
+  yaml-cpp  # 读取 scene_obstacles.yaml
 )
 
 # 头文件路径
@@ -274,6 +283,33 @@ ament_target_dependencies(trajectory_manager_node
 )
 
 # -------------------------------------------
+# 笛卡尔坐标输入节点 
+add_executable(cartesian_controller_node
+  src/application/cartesian_controller_node.cpp
+)
+
+target_link_libraries(cartesian_controller_node
+  ${rclcpp_LIBRARIES}
+)
+
+target_include_directories(cartesian_controller_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${rclcpp_INCLUDE_DIRS}
+)
+
+ament_target_dependencies(cartesian_controller_node
+  rclcpp
+  std_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  moveit_ros_planning_interface
+  arv_v1_interfaces
+)
+
+# -------------------------------------------
 # Mission Executor Node (Application Layer v2.0)
 add_executable(mission_executor_node
   src/application/mission_executor_node.cpp
@@ -290,6 +326,27 @@ ament_target_dependencies(mission_executor_node
   arv_v1_interfaces
 )
 
+# -------------------------------------------
+# Scene Manager Node (Application Layer - 障碍物场景管理)
+add_executable(scene_manager_node
+  src/application/scene_manager_node.cpp
+)
+
+target_link_libraries(scene_manager_node
+  ${rclcpp_LIBRARIES}
+)
+
+ament_target_dependencies(scene_manager_node
+  rclcpp
+  geometry_msgs
+  tf2
+  urdf
+  ament_index_cpp
+  moveit_ros_planning_interface
+  geometric_shapes
+  shape_msgs
+  std_srvs
+)
 
 # ============= 4. 安装 =============
 
@@ -303,8 +360,10 @@ install(TARGETS
   torque_controller_node
   mujoco_interface_node
   hardware_interface_node
-  trajectory_manager_node  # ← 轨迹管理节点
-  mission_executor_node    # ← Application Layer Node
+  trajectory_manager_node    # ← 轨迹管理节点
+  cartesian_controller_node  # ← 笛卡尔坐标控制节点
+  mission_executor_node      # ← Application Layer Node
+  scene_manager_node         # ← 障碍物场景管理节点
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -5,6 +5,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(service_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   # trajectory_manager_node 服务
@@ -18,7 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # cartesian_executor_node 服务
   "srv/cartesian_executor/MoveToCartesianRPY.srv"
   "srv/cartesian_executor/StopCartesianMotion.srv"
-  DEPENDENCIES trajectory_msgs service_msgs
+  DEPENDENCIES trajectory_msgs service_msgs geometry_msgs
 )
 
 ament_package()

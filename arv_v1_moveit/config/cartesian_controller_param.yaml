@@ -1,0 +1,19 @@
+cartesian_controller_node:
+  ros__parameters:
+    # 运动学
+    planning_group: "ARM"
+    end_effector_link: "link6_2006roll"
+    reference_frame: "base_link"
+    # 速度与加速度比例
+    velocity_scaling_factor: 1.0
+    acceleration_scaling_factor: 1.0
+
+    # 视觉伺服参数
+    pose_topic_min_interval_ms: 50.0
+
+    # 球形工作空间参数
+    spherical_workspace_enabled: true
+    spherical_workspace_center_x: 0.0
+    spherical_workspace_center_y: 0.0
+    spherical_workspace_center_z: 0.0
+    spherical_workspace_radius: 0.7

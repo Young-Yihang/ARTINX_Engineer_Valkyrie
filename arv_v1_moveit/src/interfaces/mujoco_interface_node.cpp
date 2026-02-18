@@ -2,6 +2,7 @@
 
 #include <GLFW/glfw3.h>
 #include <mujoco/mujoco.h>
+#include <yaml-cpp/yaml.h>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <atomic>
@@ -57,6 +58,20 @@ public:
     temp_dir_ = std::filesystem::temp_directory_path() / "arv_v1_mujoco";
     std::filesystem::create_directories(temp_dir_);
     RCLCPP_INFO(this->get_logger(), "[OK] Temp directory: %s", temp_dir_.c_str());
+
+    // 障碍物场景配置文件路径
+    this->declare_parameter("scene_config_file", std::string(""));
+    scene_config_path_ = this->get_parameter("scene_config_file").as_string();
+    if (scene_config_path_.empty()) {
+      // 默认查找 arv_v1_moveit 包下的配置
+      try {
+        auto moveit_share = ament_index_cpp::get_package_share_directory("arv_v1_moveit");
+        scene_config_path_ = moveit_share + "/config/scene_obstacles.yaml";
+      } catch (...) {
+        RCLCPP_WARN(this->get_logger(),
+                    "[WARN] Cannot find arv_v1_moveit package for scene config");
+      }
+    }
 
     // ========== 步骤1: 加载MuJoCo模型 ==========
     if (!loadMuJoCoModel()) {
@@ -161,6 +176,7 @@ private:
   std::string mesh_dir_;            // Mesh 文件目录
   std::filesystem::path temp_dir_;  // 临时文件目录
   double sim_frequency_;
+  std::string scene_config_path_;  // 障碍物配置 YAML 路径
 
   // ========== 可视化相关成员变量 ==========
   std::thread render_thread_;
@@ -206,6 +222,9 @@ private:
   // ========== 成员函数声明 ==========
   bool loadMuJoCoModel();
   void setInitialPose();
+  std::string buildObstacleMJCF();  // 从 YAML 生成障碍物 MJCF
+  std::string loadObstacleURDF(const std::string &id,
+                               const std::string &urdf_uri);  // URDF→MJCF 转换
   void effortCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);  // 数字孪生
   void simulationStep();
@@ -305,6 +324,14 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
   size_t mujoco_end = mjcf_string.find("</mujoco>");
   mjcf_string.insert(mujoco_end, actuator_mjcf);
 
+  // 注入场景障碍物 (仅可视化，无碰撞，会被后续禁用碰撞循环统一禁用)
+  std::string obstacle_mjcf = buildObstacleMJCF();
+  if (!obstacle_mjcf.empty()) {
+    mujoco_end = mjcf_string.find("</mujoco>");
+    mjcf_string.insert(mujoco_end, obstacle_mjcf);
+    RCLCPP_INFO(this->get_logger(), "[OK] Scene obstacles injected into MJCF");
+  }
+
   // 禁用碰撞
   pos = 0;
   while ((pos = mjcf_string.find("<geom", pos)) != std::string::npos) {
@@ -350,6 +377,219 @@ void MuJoCoInterfaceNode::setInitialPose() {
   }
   mj_forward(model_, data_);
   RCLCPP_INFO(this->get_logger(), "[OK] Initial pose set");
+}
+
+std::string MuJoCoInterfaceNode::loadObstacleURDF(const std::string &id,
+                                                  const std::string &urdf_uri) {
+  // 解析 package:// URI → 磁盘路径
+  std::string disk_path = urdf_uri;
+  const std::string pkg_prefix = "package://";
+  if (urdf_uri.find(pkg_prefix) == 0) {
+    size_t slash = urdf_uri.find('/', pkg_prefix.size());
+    if (slash == std::string::npos) {
+      RCLCPP_ERROR(this->get_logger(), "[ERROR] Invalid package URI: %s", urdf_uri.c_str());
+      return "";
+    }
+    std::string pkg_name = urdf_uri.substr(pkg_prefix.size(), slash - pkg_prefix.size());
+    try {
+      std::string pkg_dir = ament_index_cpp::get_package_share_directory(pkg_name);
+      disk_path = pkg_dir + urdf_uri.substr(slash);
+    } catch (const std::exception &e) {
+      RCLCPP_ERROR(this->get_logger(), "[ERROR] Package '%s' not found: %s", pkg_name.c_str(),
+                   e.what());
+      return "";
+    }
+  }
+
+  if (!std::filesystem::exists(disk_path)) {
+    RCLCPP_WARN(this->get_logger(), "[WARN] Obstacle URDF not found: %s (skipping)",
+                disk_path.c_str());
+    return "";
+  }
+
+  // 读取 URDF 文件
+  std::ifstream f(disk_path);
+  std::string urdf_str((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  f.close();
+
+  // 获取 mesh 目录 (URDF 同目录的 ../meshes 或由 URDF 内部 package:// 指定)
+  std::string obs_dir = std::filesystem::path(disk_path).parent_path().string();
+  std::string obs_mesh_dir = (std::filesystem::path(obs_dir).parent_path() / "meshes").string();
+
+  // 插入 MuJoCo compiler 设置 (meshdir 指向 mesh 目录)
+  std::string compiler_tag = "\n  <mujoco>\n    <compiler meshdir=\"" + obs_mesh_dir +
+                             "\" strippath=\"false\"/>\n  </mujoco>\n";
+  size_t robot_pos = urdf_str.find("<robot");
+  if (robot_pos == std::string::npos) {
+    RCLCPP_ERROR(this->get_logger(), "[ERROR] No <robot> tag in obstacle URDF: %s", id.c_str());
+    return "";
+  }
+  size_t bracket = urdf_str.find(">", robot_pos);
+  urdf_str.insert(bracket + 1, compiler_tag);
+
+  // 替换 package:// mesh 路径 (和主机械臂一样的处理方式)
+  std::string find_str = "package://arv_v1_model/meshes/";
+  size_t pos = 0;
+  while ((pos = urdf_str.find(find_str, pos)) != std::string::npos) {
+    urdf_str.replace(pos, find_str.length(), "");
+  }
+
+  // 写入临时 URDF
+  std::string temp_path = (temp_dir_ / (".obs_" + id + ".urdf")).string();
+  std::ofstream out(temp_path);
+  out << urdf_str;
+  out.close();
+
+  // MuJoCo 加载 URDF → 导出 MJCF
+  char error[1000] = "";
+  mjModel *tmp = mj_loadXML(temp_path.c_str(), nullptr, error, 1000);
+  if (!tmp) {
+    RCLCPP_ERROR(this->get_logger(), "[ERROR] MuJoCo failed to load obstacle '%s': %s", id.c_str(),
+                 error);
+    return "";
+  }
+
+  std::string mjcf_path = (temp_dir_ / (".obs_" + id + ".xml")).string();
+  mj_saveLastXML(mjcf_path.c_str(), tmp, error, 1000);
+  mj_deleteModel(tmp);
+
+  // 读取生成的 MJCF
+  std::ifstream mf(mjcf_path);
+  std::string mjcf_str((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
+  mf.close();
+
+  RCLCPP_INFO(this->get_logger(), "[OK] Obstacle '%s' URDF→MJCF converted", id.c_str());
+  return mjcf_str;
+}
+
+std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
+  if (scene_config_path_.empty() || !std::filesystem::exists(scene_config_path_)) {
+    RCLCPP_INFO(this->get_logger(), "[INFO] No scene config file, skipping obstacle injection");
+    return "";
+  }
+
+  RCLCPP_INFO(this->get_logger(), "[INFO] Loading scene obstacles from: %s",
+              scene_config_path_.c_str());
+
+  YAML::Node config;
+  try {
+    config = YAML::LoadFile(scene_config_path_);
+  } catch (const std::exception &e) {
+    RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to parse scene YAML: %s", e.what());
+    return "";
+  }
+
+  auto params = config["scene_manager"]["ros__parameters"];
+  if (!params) return "";
+
+  auto obstacle_ids = params["obstacle_ids"];
+  if (!obstacle_ids || !obstacle_ids.IsSequence()) return "";
+
+  std::ostringstream asset_ss;
+  std::ostringstream body_ss;
+  bool has_asset = false;
+  int count = 0;
+
+  for (const auto &id_node : obstacle_ids) {
+    std::string id = id_node.as<std::string>();
+    auto obs = params["obstacles"][id];
+    if (!obs) continue;
+
+    std::string type = obs["type"].as<std::string>("box");
+    auto pos = obs["position"];
+    double px = pos[0].as<double>(0), py = pos[1].as<double>(0), pz = pos[2].as<double>(0);
+    bool graspable = obs["graspable"].as<bool>(false);
+
+    // RPY → MuJoCo euler (度数)
+    std::string euler_attr;
+    if (obs["orientation_rpy"]) {
+      double r = obs["orientation_rpy"][0].as<double>(0) * 180.0 / M_PI;
+      double p = obs["orientation_rpy"][1].as<double>(0) * 180.0 / M_PI;
+      double y = obs["orientation_rpy"][2].as<double>(0) * 180.0 / M_PI;
+      if (std::abs(r) > 1e-6 || std::abs(p) > 1e-6 || std::abs(y) > 1e-6) {
+        std::ostringstream e;
+        e << " euler=\"" << r << " " << p << " " << y << "\"";
+        euler_attr = e.str();
+      }
+    }
+
+    if (type == "urdf") {
+      std::string urdf_uri = obs["urdf_path"].as<std::string>("");
+      if (urdf_uri.empty()) continue;
+      std::string child_mjcf = loadObstacleURDF(id, urdf_uri);
+      if (child_mjcf.empty()) continue;
+
+      // 从子 MJCF 提取 <asset> 内容和 <worldbody> 内容
+      auto extract = [](const std::string &src, const std::string &tag) -> std::string {
+        std::string open = "<" + tag + ">";
+        std::string close = "</" + tag + ">";
+        size_t s = src.find(open);
+        size_t e = src.find(close);
+        if (s == std::string::npos || e == std::string::npos) return "";
+        return src.substr(s + open.size(), e - s - open.size());
+      };
+
+      std::string child_asset = extract(child_mjcf, "asset");
+      std::string child_body = extract(child_mjcf, "worldbody");
+
+      if (!child_asset.empty()) {
+        asset_ss << child_asset;
+        has_asset = true;
+      }
+
+      // 包裹在带位置的 body 中
+      body_ss << "    <body name=\"obstacle_" << id << "\" pos=\"" << px << " " << py << " " << pz
+              << "\"" << euler_attr << ">\n";
+      if (graspable) {
+        body_ss << "      <freejoint name=\"fj_" << id << "\"/>\n";
+      }
+      body_ss << child_body;
+      body_ss << "    </body>\n";
+    } else {
+      // box / cylinder / sphere (保留原有逻辑)
+      std::string geom_attrs;
+      if (type == "box") {
+        auto d = obs["dimensions"];
+        double hx = d[0].as<double>(1) / 2, hy = d[1].as<double>(1) / 2,
+               hz = d[2].as<double>(1) / 2;
+        std::ostringstream g;
+        g << "type=\"box\" size=\"" << hx << " " << hy << " " << hz << "\"";
+        geom_attrs = g.str();
+      } else if (type == "cylinder") {
+        auto d = obs["dimensions"];
+        std::ostringstream g;
+        g << "type=\"cylinder\" size=\"" << d[1].as<double>(0.1) << " " << (d[0].as<double>(1) / 2)
+          << "\"";
+        geom_attrs = g.str();
+      } else if (type == "sphere") {
+        std::ostringstream g;
+        g << "type=\"sphere\" size=\"" << obs["dimensions"][0].as<double>(0.1) << "\"";
+        geom_attrs = g.str();
+      } else {
+        continue;
+      }
+
+      body_ss << "    <body name=\"obstacle_" << id << "\" pos=\"" << px << " " << py << " " << pz
+              << "\"" << euler_attr << ">\n";
+      if (graspable) {
+        body_ss << "      <freejoint name=\"fj_" << id << "\"/>\n";
+      }
+      body_ss << "      <geom " << geom_attrs << " rgba=\"0.5 0.5 0.5 0.4\"/>\n"
+              << "    </body>\n";
+    }
+    count++;
+  }
+
+  if (count == 0) return "";
+
+  std::ostringstream mjcf;
+  if (has_asset) {
+    mjcf << "\n  <asset>\n" << asset_ss.str() << "  </asset>\n";
+  }
+  mjcf << "\n  <worldbody>\n" << body_ss.str() << "  </worldbody>\n";
+
+  RCLCPP_INFO(this->get_logger(), "[OK] Built MJCF for %d obstacles", count);
+  return mjcf.str();
 }
 
 void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
