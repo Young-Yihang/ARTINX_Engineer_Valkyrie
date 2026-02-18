@@ -12,8 +12,5 @@ cartesian_controller_node:
     pose_topic_min_interval_ms: 50.0
 
     # 球形工作空间参数
-    spherical_workspace_enabled: true
-    spherical_workspace_center_x: 0.0
-    spherical_workspace_center_y: 0.0
-    spherical_workspace_center_z: 0.0
-    spherical_workspace_radius: 0.7
+    ws_min_radius_: 0.01
+    ws_max_radius_: 0.8
