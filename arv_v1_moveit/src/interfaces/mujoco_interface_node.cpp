@@ -412,9 +412,13 @@ std::string MuJoCoInterfaceNode::loadObstacleURDF(const std::string &id,
   std::string urdf_str((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
   f.close();
 
-  // 获取 mesh 目录 (URDF 同目录的 ../meshes 或由 URDF 内部 package:// 指定)
+  // 获取 mesh 目录 (URDF 在 urdf/obstacles/ 下, meshes 在包 share 根目录下)
+  // disk_path: .../share/arv_v1_model/urdf/obstacles/ore_frame.urdf
+  // obs_dir:   .../share/arv_v1_model/urdf/obstacles
+  // 需要上溯两级到包 share 根目录, 再拼 meshes/
   std::string obs_dir = std::filesystem::path(disk_path).parent_path().string();
-  std::string obs_mesh_dir = (std::filesystem::path(obs_dir).parent_path() / "meshes").string();
+  std::string obs_mesh_dir =
+      (std::filesystem::path(obs_dir).parent_path().parent_path() / "meshes").string();
 
   // 插入 MuJoCo compiler 设置 (meshdir 指向 mesh 目录)
   std::string compiler_tag = "\n  <mujoco>\n    <compiler meshdir=\"" + obs_mesh_dir +
