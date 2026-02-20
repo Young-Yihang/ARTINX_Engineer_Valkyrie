@@ -1,15 +1,21 @@
 {
   "configurations": [
     {
-      "name": "linux-gcc-x64",
+      "name": "ROS2",
       "includePath": [
-        "${workspaceFolder}/**"
+        "${workspaceFolder}/**",
+        "/opt/ros/${env:ROS_DISTRO}/include/**",
+        "${env:MUJOCO_PATH}/include",
+        "${workspaceFolder}/../install/arv_v1_interfaces/include/**",
+        "${workspaceFolder}/../install/arv_v1_moveit/include/**",
+        "/usr/include/**"
       ],
-      "compilerPath": "/usr/bin/gcc",
-      "cStandard": "${default}",
-      "cppStandard": "${default}",
+      "defines": [],
+      "compilerPath": "/usr/bin/g++",
+      "cStandard": "c17",
+      "cppStandard": "c++17",
       "intelliSenseMode": "linux-gcc-x64",
-      "compileCommands": "${workspaceFolder}/../build/compile_commands.json"
+      "compileCommands": "${workspaceFolder}/../build/arv_v1_moveit/compile_commands.json"
     }
   ],
   "version": 4

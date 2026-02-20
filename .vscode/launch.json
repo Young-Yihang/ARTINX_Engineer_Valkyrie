@@ -48,8 +48,8 @@
       "args": [],
       "stopAtEntry": false,
       "externalConsole": false,
-      "cwd": "/home/huan/ros2_ws/src/arv_v1_moveit/src/application",
-      "program": "/home/huan/ros2_ws/src/arv_v1_moveit/src/application/build/Debug/outDebug",
+      "cwd": "${workspaceFolder}/arv_v1_moveit/src/application",
+      "program": "${workspaceFolder}/arv_v1_moveit/src/application/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [

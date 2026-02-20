@@ -1,7 +1,7 @@
 {
   "urdf-visualizer.packages": {
-    "arv_v1_model": "/home/huan/ros2_ws/src/arv_v1_model",
-    "arv_v1_moveit": "/home/huan/ros2_ws/src/arv_v1_moveit"
+    "arv_v1_model": "${workspaceFolder}/arv_v1_model",
+    "arv_v1_moveit": "${workspaceFolder}/arv_v1_moveit"
   },
   "cmake.ignoreCMakeListsMissing": true,
   "C_Cpp_Runner.cCompilerPath": "gcc",
