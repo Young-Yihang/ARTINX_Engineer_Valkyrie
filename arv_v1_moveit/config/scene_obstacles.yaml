@@ -33,7 +33,7 @@ scene_manager:
       # STL包围盒(body内): X[-1.99,0.15] Y[-0.96,2.02] Z[0,1.62] (经RPY旋转)
       ore_frame:
         type: "urdf"
-        position: [0.2, 0.0, 0.0]
+        position: [0.3, 0.0, 0.0]
         orientation_rpy: [0.0, 0.0, 0.0]
         urdf_path: "package://arv_v1_model/urdf/obstacles/ore_frame.urdf"
         graspable: false
@@ -42,63 +42,62 @@ scene_manager:
         # rgba 半透明用于调试可视化, 可选
         collision_shapes:
           # 六边形竖立于XZ平面, 绕Y轴拉伸(深度D沿Y轴)
-          # a=0.173m; box尺寸: [2a, D, a] = [0.346, 0.05, 0.173]
           # 3个box绕Y轴旋转0°/60°/120°覆盖整个六边形截面
           - type: "box"
-            position: [0, 0, 0.7]           # 六棱柱中心 (Z=高度)
+            position: [0.05, 0, 0.7]           # 六棱柱中心 (Z=高度)
             orientation_rpy: [0.0, 0.0, 0.0]
-            dimensions: [0.346, 0.05, 0.173]  # [2a, D(拉伸深度), a]
+            dimensions: [0.15, 0.086602540378, 0.15]  
             rgba: [0.0, 1.0, 0.0, 0.2]
 
           - type: "box"
-            position: [0, 0, 0.7]
-            orientation_rpy: [0.0, 1.047, 0.0]   # 60° 绕Y轴 = π/3
-            dimensions: [0.346, 0.05, 0.173]
+            position: [0.05, 0, 0.7]
+            orientation_rpy: [1.047197551196598, 0.0, 0.0]   # 60° 绕X轴 = π/3
+            dimensions: [0.15, 0.086602540378, 0.15]  
             rgba: [0.0, 1.0, 0.0, 0.2]
 
           - type: "box"
-            position: [0, 0, 0.7]
-            orientation_rpy: [0.0, 2.094, 0.0]   # 120° 绕Y轴 = 2π/3
-            dimensions: [0.346, 0.05, 0.173]
+            position: [0.05, 0, 0.7]
+            orientation_rpy: [2.094395102393195, 0.0, 0.0]   # 120° 绕X轴 = 2π/3
+            dimensions: [0.15, 0.086602540378, 0.15]
             rgba: [0.0, 1.0, 0.0, 0.2]
 
-          # === 6根外伸圆柱: 轴在XZ平面内, 方向=(cosθ, 0, sinθ) ===
-          # apothem r=0.150m, 杆长L=0.075m → 圆心距=0.150+0.0375=0.1875m
-          # cylinder默认轴=Z, 绕Y轴pitch=(θ-90°)使轴转到XZ平面角θ处
-          # 位置偏移: X=0.1875*cosθ, Z=0.7+0.1875*sinθ
+          # === 6根外伸圆柱: 轴在YZ平面内, 整体绕X轴顺时针旋转90° ===
+          # apothem r=0.075m, 杆长L=0.075m → 圆心距=0.075+0.0375=0.1125m
+          # Rx(+90°)后: Y=-0.1125*sinθ, Z=0.7+0.1125*cosθ  (θ从+Y轴起, 向+Z为正)
+          # orientation: roll += π/2
           - type: "cylinder"
-            position: [0.188, 0.000, 0.700]   # 面0: θ=0°  (+X)
-            orientation_rpy: [0.0, -1.5708, 0.0]
+            position: [0.035, 0.0000, 0.8125]  
+            orientation_rpy: [0.0, 0.0, 0.0]
             dimensions: [0.075, 0.019]            # [高度, 半径]
             rgba: [0.0, 1.0, 0.0, 0.2]
 
           - type: "cylinder"
-            position: [0.094, 0.000, 0.863]   # 面1: θ=60°
-            orientation_rpy: [0.0, -0.5236, 0.0]
+            position: [0.035, -0.0974, 0.7563]  
+            orientation_rpy: [1.0471975511965974, 0.0, 0.0]
             dimensions: [0.075, 0.019]
             rgba: [0.0, 1.0, 0.0, 0.2]
 
           - type: "cylinder"
-            position: [-0.094, 0.000, 0.863]  # 面2: θ=120°
-            orientation_rpy: [0.0, 0.5236, 0.0]
+            position: [0.035, -0.0974, 0.6438] 
+            orientation_rpy: [2.094395102393195, 0.0, 0.0]
             dimensions: [0.075, 0.019]
             rgba: [0.0, 1.0, 0.0, 0.2]
 
           - type: "cylinder"
-            position: [-0.188, 0.000, 0.700]  # 面3: θ=180° (-X)
-            orientation_rpy: [0.0, 1.5708, 0.0]
+            position: [0.035, 0.0000, 0.5875] 
+            orientation_rpy: [0.0, 0.0, 0.0]
             dimensions: [0.075, 0.019]
             rgba: [0.0, 1.0, 0.0, 0.2]
 
           - type: "cylinder"
-            position: [-0.094, 0.000, 0.537]  # 面4: θ=240°
-            orientation_rpy: [0.0, 2.618, 0.0]
+            position: [0.035, 0.0974, 0.6438] 
+            orientation_rpy: [1.047197551196598, 0.0, 0.0]
             dimensions: [0.075, 0.019]
             rgba: [0.0, 1.0, 0.0, 0.2]
 
           - type: "cylinder"
-            position: [0.094, 0.000, 0.537]   # 面5: θ=300°
-            orientation_rpy: [0.0, -2.618, 0.0]
+            position: [0.035, 0.0974, 0.7563]
+            orientation_rpy: [2.094395102393195, 0.0, 0.0]
             dimensions: [0.075, 0.019]
             rgba: [0.0, 1.0, 0.0, 0.2]
 

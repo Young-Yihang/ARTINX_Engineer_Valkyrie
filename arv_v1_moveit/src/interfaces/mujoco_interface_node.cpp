@@ -531,12 +531,12 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
     double px = pos[0].as<double>(0), py = pos[1].as<double>(0), pz = pos[2].as<double>(0);
     bool graspable = obs["graspable"].as<bool>(false);
 
-    // RPY → MuJoCo euler (度数)
+    // RPY → MuJoCo euler (弧度, 因为 mj_saveLastXML 导出 angle="radian")
     std::string euler_attr;
     if (obs["orientation_rpy"]) {
-      double r = obs["orientation_rpy"][0].as<double>(0) * 180.0 / M_PI;
-      double p = obs["orientation_rpy"][1].as<double>(0) * 180.0 / M_PI;
-      double y = obs["orientation_rpy"][2].as<double>(0) * 180.0 / M_PI;
+      double r = obs["orientation_rpy"][0].as<double>(0);
+      double p = obs["orientation_rpy"][1].as<double>(0);
+      double y = obs["orientation_rpy"][2].as<double>(0);
       if (std::abs(r) > 1e-6 || std::abs(p) > 1e-6 || std::abs(y) > 1e-6) {
         std::ostringstream e;
         e << " euler=\"" << r << " " << p << " " << y << "\"";
@@ -611,9 +611,9 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
           gs << "      <geom name=\"vcol_" << id << "_" << si << "\" pos=\"" << sx << " " << sy
              << " " << sz << "\"";
           if (shape["orientation_rpy"] && shape["orientation_rpy"].IsSequence()) {
-            double vr = shape["orientation_rpy"][0].as<double>(0) * 180.0 / M_PI;
-            double vp = shape["orientation_rpy"][1].as<double>(0) * 180.0 / M_PI;
-            double vy = shape["orientation_rpy"][2].as<double>(0) * 180.0 / M_PI;
+            double vr = shape["orientation_rpy"][0].as<double>(0);
+            double vp = shape["orientation_rpy"][1].as<double>(0);
+            double vy = shape["orientation_rpy"][2].as<double>(0);
             if (std::abs(vr) > 1e-6 || std::abs(vp) > 1e-6 || std::abs(vy) > 1e-6)
               gs << " euler=\"" << vr << " " << vp << " " << vy << "\"";
           }
