@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 取矿框架: 六边形体 + 6根棒子 (Φ38×75mm, 60°间隔, Φ450外径)
+     SW-URDF 导出, 整体为固定体 (graspable=false)
+     STL 单位: 米, 原点: SolidWorks 全局坐标系 -->
+<robot name="ore_frame">
+  <link name="base_link">
+    <inertial>
+      <origin xyz="-0.78995 0.19862 0.57191" rpy="0 0 0"/>
+      <mass value="1.0482"/>
+      <inertia ixx="0.22695" ixy="7.2106E-05" ixz="-0.013505"
+               iyy="0.30004" iyz="7.8999E-05" izz="0.19485"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://arv_v1_model/meshes/obstacles/ore_frame.STL"/>
+      </geometry>
+      <material name="dark_gray">
+        <color rgba="0.2 0.2 0.2 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://arv_v1_model/meshes/obstacles/ore_frame.STL"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

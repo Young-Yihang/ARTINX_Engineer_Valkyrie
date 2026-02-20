@@ -18,7 +18,7 @@ scene_manager:
     reference_frame: "world"
     auto_load: true
 
-    obstacle_ids: ["ground_plane", "energy_holder_1", "energy_unit_1"]
+    obstacle_ids: ["ground_plane", "ore_frame"]
 
     obstacles:
       # --- 地面 ---
@@ -29,18 +29,20 @@ scene_manager:
         dimensions: [3.0, 3.0, 0.01]
         graspable: false
 
-      # --- 能量单元固定器 (固定障碍物, SW-URDF导出) ---
-      energy_holder_1:
+      # --- 取矿框架 (六边形+6棒子, SW-URDF整体导出, 固定) ---
+      # STL 包围盒: X[-1.99,0.15] Y[-1.62,0] Z[-0.96,2.02] (单位:米)
+      # 质心: (-0.79, 0.20, 0.57)
+      ore_frame:
         type: "urdf"
-        position: [0.3, 0.0, 0.0]
+        position: [0.5, 0.0, 0.0]
         orientation_rpy: [0.0, 0.0, 0.0]
-        urdf_path: "package://arv_v1_model/urdf/obstacles/energy_holder.urdf"
+        urdf_path: "package://arv_v1_model/urdf/obstacles/ore_frame.urdf"
         graspable: false
 
-      # --- 能量单元 (可夹取物体, SW-URDF导出) ---
-      energy_unit_1:
-        type: "urdf"
-        position: [0.4, 0.2, 0.05]
-        orientation_rpy: [0.0, 0.0, 0.0]
-        urdf_path: "package://arv_v1_model/urdf/obstacles/energy_unit.urdf"
-        graspable: true
+      # --- 能量单元 (待导出STL后启用) ---
+      # energy_unit_0:
+      #   type: "urdf"
+      #   position: [0.5, 0.0, 0.3]
+      #   orientation_rpy: [0.0, 0.0, 0.0]
+      #   urdf_path: "package://arv_v1_model/urdf/obstacles/energy_unit.urdf"
+      #   graspable: true
