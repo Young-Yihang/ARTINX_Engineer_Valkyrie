@@ -30,14 +30,77 @@ scene_manager:
         graspable: false
 
       # --- 取矿框架 (六边形+6棒子, SW-URDF整体导出, 固定) ---
-      # STL 包围盒: X[-1.99,0.15] Y[-1.62,0] Z[-0.96,2.02] (单位:米)
-      # 质心: (-0.79, 0.20, 0.57)
+      # STL包围盒(body内): X[-1.99,0.15] Y[-0.96,2.02] Z[0,1.62] (经RPY旋转)
       ore_frame:
         type: "urdf"
-        position: [0.5, 0.0, 0.0]
+        position: [0.2, 0.0, 0.0]
         orientation_rpy: [0.0, 0.0, 0.0]
         urdf_path: "package://arv_v1_model/urdf/obstacles/ore_frame.urdf"
         graspable: false
+        # 虚拟碰撞体: 手动建模替代STL凸包 (MuJoCo侧)
+        # position 相对于 ore_frame body 原点, dimensions 为全尺寸
+        # rgba 半透明用于调试可视化, 可选
+        collision_shapes:
+          # 六边形竖立于XZ平面, 绕Y轴拉伸(深度D沿Y轴)
+          # a=0.173m; box尺寸: [2a, D, a] = [0.346, 0.05, 0.173]
+          # 3个box绕Y轴旋转0°/60°/120°覆盖整个六边形截面
+          - type: "box"
+            position: [0, 0, 0.7]           # 六棱柱中心 (Z=高度)
+            orientation_rpy: [0.0, 0.0, 0.0]
+            dimensions: [0.346, 0.05, 0.173]  # [2a, D(拉伸深度), a]
+            rgba: [0.0, 1.0, 0.0, 0.2]
+
+          - type: "box"
+            position: [0, 0, 0.7]
+            orientation_rpy: [0.0, 1.047, 0.0]   # 60° 绕Y轴 = π/3
+            dimensions: [0.346, 0.05, 0.173]
+            rgba: [0.0, 1.0, 0.0, 0.2]
+
+          - type: "box"
+            position: [0, 0, 0.7]
+            orientation_rpy: [0.0, 2.094, 0.0]   # 120° 绕Y轴 = 2π/3
+            dimensions: [0.346, 0.05, 0.173]
+            rgba: [0.0, 1.0, 0.0, 0.2]
+
+          # === 6根外伸圆柱: 轴在XZ平面内, 方向=(cosθ, 0, sinθ) ===
+          # apothem r=0.150m, 杆长L=0.075m → 圆心距=0.150+0.0375=0.1875m
+          # cylinder默认轴=Z, 绕Y轴pitch=(θ-90°)使轴转到XZ平面角θ处
+          # 位置偏移: X=0.1875*cosθ, Z=0.7+0.1875*sinθ
+          - type: "cylinder"
+            position: [0.188, 0.000, 0.700]   # 面0: θ=0°  (+X)
+            orientation_rpy: [0.0, -1.5708, 0.0]
+            dimensions: [0.075, 0.019]            # [高度, 半径]
+            rgba: [0.0, 1.0, 0.0, 0.2]
+
+          - type: "cylinder"
+            position: [0.094, 0.000, 0.863]   # 面1: θ=60°
+            orientation_rpy: [0.0, -0.5236, 0.0]
+            dimensions: [0.075, 0.019]
+            rgba: [0.0, 1.0, 0.0, 0.2]
+
+          - type: "cylinder"
+            position: [-0.094, 0.000, 0.863]  # 面2: θ=120°
+            orientation_rpy: [0.0, 0.5236, 0.0]
+            dimensions: [0.075, 0.019]
+            rgba: [0.0, 1.0, 0.0, 0.2]
+
+          - type: "cylinder"
+            position: [-0.188, 0.000, 0.700]  # 面3: θ=180° (-X)
+            orientation_rpy: [0.0, 1.5708, 0.0]
+            dimensions: [0.075, 0.019]
+            rgba: [0.0, 1.0, 0.0, 0.2]
+
+          - type: "cylinder"
+            position: [-0.094, 0.000, 0.537]  # 面4: θ=240°
+            orientation_rpy: [0.0, 2.618, 0.0]
+            dimensions: [0.075, 0.019]
+            rgba: [0.0, 1.0, 0.0, 0.2]
+
+          - type: "cylinder"
+            position: [0.094, 0.000, 0.537]   # 面5: θ=300°
+            orientation_rpy: [0.0, -2.618, 0.0]
+            dimensions: [0.075, 0.019]
+            rgba: [0.0, 1.0, 0.0, 0.2]
 
       # --- 能量单元 (待导出STL后启用) ---
       # energy_unit_0:

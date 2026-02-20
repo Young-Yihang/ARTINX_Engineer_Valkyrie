@@ -208,7 +208,7 @@ private:
   double lastx_ = 0.0;
   double lasty_ = 0.0;
 
-  bool paused_ = false;
+  std::atomic<bool> paused_{false};
   bool show_ui_ = true;
   bool show_contacts_ = false;
   bool show_forces_ = false;
@@ -332,17 +332,44 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     RCLCPP_INFO(this->get_logger(), "[OK] Scene obstacles injected into MJCF");
   }
 
-  // 禁用碰撞
-  pos = 0;
-  while ((pos = mjcf_string.find("<geom", pos)) != std::string::npos) {
-    size_t geom_end = mjcf_string.find("/>", pos);
-    if (geom_end == std::string::npos) geom_end = mjcf_string.find(">", pos);
+  // 注入光照设置（提升 ambient，防止 MuJoCo 默认 ambient=0 导致背光面全黑）
+  std::string visual_mjcf =
+      "\n  <visual>\n"
+      "    <headlight ambient=\".4 .4 .4\" diffuse=\".8 .8 .8\" specular=\".1 .1 .1\"/>\n"
+      "  </visual>\n";
+  mujoco_end = mjcf_string.find("</mujoco>");
+  mjcf_string.insert(mujoco_end, visual_mjcf);
 
-    std::string geom_tag = mjcf_string.substr(pos, geom_end - pos);
-    if (geom_tag.find("contype") == std::string::npos) {
-      mjcf_string.insert(geom_end, " contype=\"0\" conaffinity=\"0\"");
-    }
-    pos = geom_end + 1;
+  // 碰撞组设置:
+  //   机械臂 geom  → contype=1, conaffinity=3 (只与虚拟建模组碰撞)
+  //   障碍物 geom  → contype=2, conaffinity=2 (不碰撞)
+  //   虚拟障碍物 geom  -> contype=3, conaffinity=1 （只与机械臂碰撞）
+  // 结果: 机械臂自碰 (1&2)=0 禁止; 机械臂-障碍物 (1&1)≠0 允许
+  {
+    size_t obs_start = mjcf_string.find("<body name=\"obstacle_");
+    if (obs_start == std::string::npos) obs_start = mjcf_string.size();
+
+    // 分段处理，避免插入后偏移量失效
+    std::string robot_part = mjcf_string.substr(0, obs_start);
+    std::string obs_part = mjcf_string.substr(obs_start);
+
+    auto inject_contype = [](std::string &s, const std::string &attr) {
+      size_t p = 0;
+      while ((p = s.find("<geom", p)) != std::string::npos) {
+        size_t end = s.find("/>", p);
+        if (end == std::string::npos) end = s.find(">", p);
+        if (s.substr(p, end - p).find("contype") == std::string::npos) {
+          s.insert(end, attr);
+          p = end + attr.size() + 1;
+        } else {
+          p = end + 1;
+        }
+      }
+    };
+
+    inject_contype(robot_part, " contype=\"1\" conaffinity=\"2\"");
+    inject_contype(obs_part, " contype=\"2\" conaffinity=\"1\"");
+    mjcf_string = robot_part + obs_part;
   }
 
   // 保存最终MJCF（使用 /tmp 目录）
@@ -536,6 +563,22 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
       std::string child_asset = extract(child_mjcf, "asset");
       std::string child_body = extract(child_mjcf, "worldbody");
 
+      // collision_shapes: 虚拟碰撞体替代 STL 凸包
+      bool use_vcol = obs["collision_shapes"] && obs["collision_shapes"].IsSequence() &&
+                      obs["collision_shapes"].size() > 0;
+      if (use_vcol) {
+        // 禁用 URDF mesh geom 碰撞 (仅保留视觉)
+        size_t gp = 0;
+        while ((gp = child_body.find("<geom", gp)) != std::string::npos) {
+          size_t ge = child_body.find("/>", gp);
+          if (ge == std::string::npos) break;
+          child_body.insert(ge, " contype=\"0\" conaffinity=\"0\"");
+          gp = ge + 35;
+        }
+        RCLCPP_INFO(this->get_logger(),
+                    "[OK] '%s': STL mesh set visual-only, using virtual collision", id.c_str());
+      }
+
       if (!child_asset.empty()) {
         asset_ss << child_asset;
         has_asset = true;
@@ -548,6 +591,49 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
         body_ss << "      <freejoint name=\"fj_" << id << "\"/>\n";
       }
       body_ss << child_body;
+
+      // 生成虚拟碰撞几何体
+      if (use_vcol) {
+        int si = 0;
+        for (const auto &shape : obs["collision_shapes"]) {
+          std::string st = shape["type"].as<std::string>("box");
+          double sx = shape["position"][0].as<double>(0);
+          double sy = shape["position"][1].as<double>(0);
+          double sz = shape["position"][2].as<double>(0);
+          std::string rgba = "1 0 0 0.15";
+          if (shape["rgba"] && shape["rgba"].IsSequence()) {
+            std::ostringstream rs;
+            rs << shape["rgba"][0].as<double>(1) << " " << shape["rgba"][1].as<double>(0) << " "
+               << shape["rgba"][2].as<double>(0) << " " << shape["rgba"][3].as<double>(0.15);
+            rgba = rs.str();
+          }
+          std::ostringstream gs;
+          gs << "      <geom name=\"vcol_" << id << "_" << si << "\" pos=\"" << sx << " " << sy
+             << " " << sz << "\"";
+          if (shape["orientation_rpy"] && shape["orientation_rpy"].IsSequence()) {
+            double vr = shape["orientation_rpy"][0].as<double>(0) * 180.0 / M_PI;
+            double vp = shape["orientation_rpy"][1].as<double>(0) * 180.0 / M_PI;
+            double vy = shape["orientation_rpy"][2].as<double>(0) * 180.0 / M_PI;
+            if (std::abs(vr) > 1e-6 || std::abs(vp) > 1e-6 || std::abs(vy) > 1e-6)
+              gs << " euler=\"" << vr << " " << vp << " " << vy << "\"";
+          }
+          if (st == "box") {
+            auto d = shape["dimensions"];
+            gs << " type=\"box\" size=\"" << d[0].as<double>(0.1) / 2 << " "
+               << d[1].as<double>(0.1) / 2 << " " << d[2].as<double>(0.1) / 2 << "\"";
+          } else if (st == "cylinder") {
+            auto d = shape["dimensions"];
+            gs << " type=\"cylinder\" size=\"" << d[1].as<double>(0.02) << " "
+               << d[0].as<double>(0.1) / 2 << "\"";
+          } else if (st == "sphere") {
+            gs << " type=\"sphere\" size=\"" << shape["dimensions"][0].as<double>(0.05) << "\"";
+          }
+          gs << " rgba=\"" << rgba << "\" contype=\"2\" conaffinity=\"1\"/>\n";
+          body_ss << gs.str();
+          si++;
+        }
+      }
+
       body_ss << "    </body>\n";
     } else {
       // box / cylinder / sphere (保留原有逻辑)
@@ -690,8 +776,8 @@ bool MuJoCoInterfaceNode::initializeVisualization() {
   mjv_defaultScene(&scene_);
   mjr_defaultContext(&con_);
 
-  opt_.flags[mjVIS_JOINT] = 1;
-  opt_.flags[mjVIS_ACTUATOR] = 1;
+  opt_.flags[mjVIS_JOINT] = 0;
+  opt_.flags[mjVIS_ACTUATOR] = 0;
 
   mjv_makeScene(model_, &scene_, 1000);
 
@@ -728,47 +814,57 @@ void MuJoCoInterfaceNode::renderLoop() {
 
     mjr_render(viewport, &scene_, &con_);
 
-    // ========== 修改：使用 mjr_text 手动指定每行位置 ==========
     if (show_ui_) {
-      char status[512];
-      std::lock_guard<std::mutex> lock(sim_mutex_);
+      // 快照数据（持锁期间只做内存拷贝，不做 OpenGL 调用）
+      double snap_time, snap_qpos[6], snap_qvel[6], snap_ctrl[6];
+      bool snap_paused;
+      {
+        std::lock_guard<std::mutex> lock(sim_mutex_);
+        snap_time = data_->time;
+        snap_paused = paused_.load();
+        for (int i = 0; i < 6; i++) {
+          snap_qpos[i] = data_->qpos[i];
+          snap_qvel[i] = data_->qvel[i];
+          snap_ctrl[i] = data_->ctrl[i];
+        }
+      }
 
-      // 定义起始位置和行间距
-      int start_x = 10;                    // 左边距（像素）
-      int start_y = viewport.height - 30;  // 从顶部开始（像素）
-      int line_height = 20;                // 行高（像素）
-      int current_line = 0;                // 当前行号
+      char status[256];
+      const float margin_x = 10.0f / viewport.width;
+      const float margin_y = 30.0f / viewport.height;
+      const float line_step = 20.0f / viewport.height;
+      int ln = 0;
 
-      // 第 1 行：仿真时间和状态
-      snprintf(status, sizeof(status), "时间: %.2f s | %s", data_->time, paused_ ? "暂停" : "运行");
-      mjr_text(mjFONT_NORMAL, status, &con_, start_x, start_y - (current_line++) * line_height,
-               1.0f, 1.0f, 1.0f);  // 白色文本
+      // Line 1: time + mode
+      snprintf(status, sizeof(status), "Time: %.2f s | %s", snap_time,
+               snap_paused ? "PAUSED" : "RUNNING");
+      mjr_text(mjFONT_NORMAL, status, &con_, margin_x, 1.0f - margin_y - (ln++) * line_step, 1.0f,
+               1.0f, 1.0f);
 
-      // 第 2 行：关节位置
-      snprintf(status, sizeof(status), "位置: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f] rad",
-               data_->qpos[0], data_->qpos[1], data_->qpos[2], data_->qpos[3], data_->qpos[4],
-               data_->qpos[5]);
-      mjr_text(mjFONT_NORMAL, status, &con_, start_x, start_y - (current_line++) * line_height,
-               1.0f, 1.0f, 0.0f);  // 黄色文本（位置信息）
+      // Line 2: joint positions
+      snprintf(status, sizeof(status), "Pos: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f] rad",
+               snap_qpos[0], snap_qpos[1], snap_qpos[2], snap_qpos[3], snap_qpos[4], snap_qpos[5]);
+      mjr_text(mjFONT_NORMAL, status, &con_, margin_x, 1.0f - margin_y - (ln++) * line_step, 1.0f,
+               1.0f, 0.0f);
 
-      // 第 3 行：关节速度
-      snprintf(status, sizeof(status), "速度: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f] rad/s",
-               data_->qvel[0], data_->qvel[1], data_->qvel[2], data_->qvel[3], data_->qvel[4],
-               data_->qvel[5]);
-      mjr_text(mjFONT_NORMAL, status, &con_, start_x, start_y - (current_line++) * line_height,
-               0.0f, 1.0f, 1.0f);  // 青色文本（速度信息）
+      // Line 3: joint velocities
+      snprintf(status, sizeof(status), "Vel: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f] rad/s",
+               snap_qvel[0], snap_qvel[1], snap_qvel[2], snap_qvel[3], snap_qvel[4], snap_qvel[5]);
+      mjr_text(mjFONT_NORMAL, status, &con_, margin_x, 1.0f - margin_y - (ln++) * line_step, 0.0f,
+               1.0f, 1.0f);
 
-      // 第 4 行：执行器力矩
-      snprintf(status, sizeof(status), "力矩: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f] N·m",
-               data_->ctrl[0], data_->ctrl[1], data_->ctrl[2], data_->ctrl[3], data_->ctrl[4],
-               data_->ctrl[5]);
-      mjr_text(mjFONT_NORMAL, status, &con_, start_x, start_y - (current_line++) * line_height,
-               1.0f, 0.5f, 0.0f);  // 橙色文本（力矩信息）
+      // Line 4: torque (simulation mode only; in digital-twin mode ctrl is always 0)
+      if (!visualization_only_) {
+        snprintf(status, sizeof(status), "Torque: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f] Nm",
+                 snap_ctrl[0], snap_ctrl[1], snap_ctrl[2], snap_ctrl[3], snap_ctrl[4],
+                 snap_ctrl[5]);
+        mjr_text(mjFONT_NORMAL, status, &con_, margin_x, 1.0f - margin_y - (ln++) * line_step, 1.0f,
+                 0.5f, 0.0f);
+      }
 
-      // ========== 右下角：快捷键提示 ==========
-      snprintf(status, sizeof(status), "快捷键: [空格]暂停 [H]隐藏UI [R]重置相机 [ESC]退出");
-      mjr_text(mjFONT_NORMAL, status, &con_, 10, 10,  // 左下角位置
-               0.7f, 0.7f, 0.7f);                     // 灰色文本（提示信息）
+      // Bottom-left: key hints
+      mjr_text(mjFONT_NORMAL, "[Space]Pause [H]HideUI [R]ResetCam [C]Contacts [F]Forces [ESC]Exit",
+               &con_, margin_x, 10.0f / viewport.height, 0.7f, 0.7f, 0.7f);
     }
 
     glfwSwapBuffers(window_);
