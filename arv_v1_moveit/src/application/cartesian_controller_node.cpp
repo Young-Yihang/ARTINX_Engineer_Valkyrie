@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <functional>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <moveit/move_group_interface/move_group_interface.hpp>
 #include <mutex>
@@ -82,10 +83,18 @@ private:
   // 话题路径工作线程
   void planningWorker();
 
-  // 规划与执行
+  // 规划与执行 (带锁 — 服务路径调用)
   bool planAndExecute(const geometry_msgs::msg::Pose& target_pose, double velocity_scaling,
                       double acceleration_scaling, bool async, double& planning_time,
                       double& trajectory_duration, std::string& error_message);
+
+  // 规划与执行 (无锁 — 话题路径已在外部持锁)
+  bool planAndExecuteUnlocked(const geometry_msgs::msg::Pose& target_pose, double velocity_scaling,
+                              double acceleration_scaling, bool async, double& planning_time,
+                              double& trajectory_duration, std::string& error_message);
+
+  // 异步执行完成监控
+  void monitorAsyncExecution();
 
   // 回调函数
   void poseTargetCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
@@ -181,6 +190,13 @@ void CartesianControllerNode::planningWorker() {
       pending_pose_.reset();  // 取走目标，丢弃等待期间累积的旧值
     }
 
+    // 尝试获取执行锁 — 如果服务路径正在执行，跳过本次话题目标
+    std::unique_lock<std::mutex> exec_lock(execution_mutex_, std::try_to_lock);
+    if (!exec_lock.owns_lock()) {
+      RCLCPP_DEBUG(this->get_logger(), "[topic path] skipped: service path is executing");
+      continue;
+    }
+
     // 停止当前运动：无运动时为空操作；有运动时实现话题抢占
     if (move_group_) {
       move_group_->stop();
@@ -188,8 +204,9 @@ void CartesianControllerNode::planningWorker() {
 
     double pt = 0.0, td = 0.0;
     std::string err;
-    planAndExecute(target, default_velocity_scaling_, default_acceleration_scaling_,
-                   /*async=*/true, pt, td, err);
+    // 话题路径已持有 execution_mutex_，planAndExecute 内不再重复加锁
+    planAndExecuteUnlocked(target, default_velocity_scaling_, default_acceleration_scaling_,
+                           /*async=*/true, pt, td, err);
     if (!err.empty()) {
       RCLCPP_WARN(this->get_logger(), "[topic path] planning failed: %s", err.c_str());
     }
@@ -256,12 +273,23 @@ bool CartesianControllerNode::planAndExecute(const geometry_msgs::msg::Pose& tar
                                              bool async, double& planning_time,
                                              double& trajectory_duration,
                                              std::string& error_message) {
+  // 服务路径: 加锁后委托给无锁版本
+  std::lock_guard<std::mutex> lock(execution_mutex_);
+  return planAndExecuteUnlocked(target_pose, velocity_scaling, acceleration_scaling, async,
+                                planning_time, trajectory_duration, error_message);
+}
+
+bool CartesianControllerNode::planAndExecuteUnlocked(const geometry_msgs::msg::Pose& target_pose,
+                                                     double velocity_scaling,
+                                                     double acceleration_scaling, bool async,
+                                                     double& planning_time,
+                                                     double& trajectory_duration,
+                                                     std::string& error_message) {
   if (!move_group_) {
     error_message = "MoveGroupInterface not initialized yet";
     return false;
   }
 
-  std::lock_guard<std::mutex> lock(execution_mutex_);
   state_ = State::PLANNING;
   publishStatus("PLANNING");
 
@@ -299,6 +327,9 @@ bool CartesianControllerNode::planAndExecute(const geometry_msgs::msg::Pose& tar
 
   if (async) {
     move_group_->asyncExecute(plan);
+    // 不立即设 IDLE — 启动监控线程等待执行完成
+    std::thread(&CartesianControllerNode::monitorAsyncExecution, this).detach();
+    return true;
   } else {
     auto exec_result = move_group_->execute(plan);
     if (exec_result != moveit::core::MoveItErrorCode::SUCCESS) {
@@ -307,11 +338,33 @@ bool CartesianControllerNode::planAndExecute(const geometry_msgs::msg::Pose& tar
       publishStatus("ERROR");
       return false;
     }
+    state_ = State::IDLE;
+    publishStatus("IDLE");
+    return true;
+  }
+}
+
+void CartesianControllerNode::monitorAsyncExecution() {
+  // 轮询 MoveGroupInterface 的运动状态，直到不再 EXECUTING
+  const auto timeout = std::chrono::seconds(30);
+  const auto poll_interval = std::chrono::milliseconds(50);
+  auto start = std::chrono::steady_clock::now();
+
+  while (state_ == State::EXECUTING && !shutdown_) {
+    if (std::chrono::steady_clock::now() - start > timeout) {
+      RCLCPP_WARN(this->get_logger(), "Async execution monitor timed out (30s)");
+      state_ = State::IDLE;
+      publishStatus("IDLE");
+      return;
+    }
+    std::this_thread::sleep_for(poll_interval);
   }
 
-  state_ = State::IDLE;
-  publishStatus("IDLE");
-  return true;
+  // 如果状态仍是 EXECUTING (被 stop 中断等)，恢复 IDLE
+  State expected = State::EXECUTING;
+  if (state_.compare_exchange_strong(expected, State::IDLE)) {
+    publishStatus("IDLE");
+  }
 }
 
 void CartesianControllerNode::poseTargetCallback(
@@ -383,11 +436,16 @@ void CartesianControllerNode::publishCurrentPose() {
   if (!move_group_) {
     return;
   }
-  geometry_msgs::msg::PoseStamped pose_msg;
-  pose_msg.header.stamp = this->now();
-  pose_msg.header.frame_id = reference_frame_;
-  pose_msg.pose = move_group_->getCurrentPose(end_effector_link_).pose;
-  current_pose_pub_->publish(pose_msg);
+  try {
+    geometry_msgs::msg::PoseStamped pose_msg;
+    pose_msg.header.stamp = this->now();
+    pose_msg.header.frame_id = reference_frame_;
+    pose_msg.pose = move_group_->getCurrentPose(end_effector_link_).pose;
+    current_pose_pub_->publish(pose_msg);
+  } catch (const std::exception& e) {
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                          "Failed to get current pose: %s", e.what());
+  }
 }
 
 void CartesianControllerNode::publishStatus(const std::string& status) {
