@@ -334,6 +334,7 @@ add_executable(scene_manager_node
 
 target_link_libraries(scene_manager_node
   ${rclcpp_LIBRARIES}
+  yaml-cpp  # 直接读取 collision_shapes (ROS2 params 不支持嵌套列表)
 )
 
 ament_target_dependencies(scene_manager_node

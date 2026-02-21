@@ -14,10 +14,14 @@
 
 #include <geometric_shapes/shape_operations.h>
 #include <geometric_shapes/shapes.h>
+#include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Vector3.h>
 #include <urdf_parser/urdf_parser.h>
+#include <yaml-cpp/yaml.h>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <filesystem>
 #include <moveit/planning_scene_interface/planning_scene_interface.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <shape_msgs/msg/mesh.hpp>
@@ -32,6 +36,9 @@ public:
     // PlanningSceneInterface 通过 topic 与 move_group 通信
     planning_scene_interface_ =
         std::make_shared<moveit::planning_interface::PlanningSceneInterface>();
+
+    // 加载 YAML 配置 (collision_shapes 需要 yaml-cpp, ROS2 params 不支持嵌套列表)
+    loadSceneYAML();
 
     // 服务：重新加载 / 清空场景
     reload_srv_ = this->create_service<std_srvs::srv::Trigger>(
@@ -60,6 +67,32 @@ private:
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reload_srv_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_srv_;
   rclcpp::TimerBase::SharedPtr init_timer_;
+  YAML::Node scene_yaml_;  // collision_shapes 直接从 YAML 读取
+
+  // 加载场景 YAML (用于 collision_shapes)
+  void loadSceneYAML() {
+    // 尝试从 arv_v1_moveit 包路径查找默认配置
+    try {
+      auto moveit_share = ament_index_cpp::get_package_share_directory("arv_v1_moveit");
+      std::string yaml_path = moveit_share + "/config/scene_obstacles.yaml";
+      if (std::filesystem::exists(yaml_path)) {
+        scene_yaml_ = YAML::LoadFile(yaml_path);
+        RCLCPP_INFO(get_logger(), "Loaded scene YAML: %s", yaml_path.c_str());
+        return;
+      }
+    } catch (...) {
+    }
+    // 尝试源码目录
+    try {
+      std::string src_path = std::string(std::getenv("HOME") ? std::getenv("HOME") : "") +
+                             "/ros2_ws/src/arv_v1_moveit/config/scene_obstacles.yaml";
+      if (std::filesystem::exists(src_path)) {
+        scene_yaml_ = YAML::LoadFile(src_path);
+        RCLCPP_INFO(get_logger(), "Loaded scene YAML (src): %s", src_path.c_str());
+      }
+    } catch (...) {
+    }
+  }
 
   void declareParameters() {
     this->declare_parameter("reference_frame", "world");
@@ -67,20 +100,33 @@ private:
     this->declare_parameter("obstacle_ids", std::vector<std::string>{});
   }
 
-  // ========== 加载全部障碍物 ==========
+  // ========== 加载全部障碍物 (从 yaml-cpp 读取, 不依赖 ROS2 params) ==========
   void loadAllObstacles() {
-    auto ids = this->get_parameter("obstacle_ids").as_string_array();
-    if (ids.empty()) {
-      RCLCPP_WARN(get_logger(), "No obstacle_ids configured");
+    if (scene_yaml_.IsNull()) {
+      RCLCPP_WARN(get_logger(), "No scene YAML loaded, skipping obstacle injection");
       return;
     }
 
-    std::string ref_frame = this->get_parameter("reference_frame").as_string();
-    std::vector<moveit_msgs::msg::CollisionObject> objects;
+    auto params = scene_yaml_["scene_manager"]["ros__parameters"];
+    if (!params) {
+      RCLCPP_WARN(get_logger(), "No ros__parameters in scene YAML");
+      return;
+    }
 
-    for (const auto& id : ids) {
+    std::string ref_frame = params["reference_frame"].as<std::string>("world");
+    auto obstacle_ids = params["obstacle_ids"];
+    if (!obstacle_ids || !obstacle_ids.IsSequence() || obstacle_ids.size() == 0) {
+      RCLCPP_WARN(get_logger(), "No obstacle_ids in scene YAML");
+      return;
+    }
+
+    std::vector<moveit_msgs::msg::CollisionObject> objects;
+    for (const auto& id_node : obstacle_ids) {
+      std::string id = id_node.as<std::string>();
+      auto obs = params["obstacles"][id];
+      if (!obs) continue;
       try {
-        auto obj = loadSingleObstacle(id, ref_frame);
+        auto obj = loadSingleObstacleFromYAML(id, obs, ref_frame);
         objects.push_back(obj);
         RCLCPP_INFO(get_logger(), "Loaded obstacle: %s", id.c_str());
       } catch (const std::exception& e) {
@@ -94,70 +140,56 @@ private:
     }
   }
 
-  // ========== 加载单个障碍物 ==========
-  moveit_msgs::msg::CollisionObject loadSingleObstacle(const std::string& id,
-                                                       const std::string& ref_frame) {
-    std::string prefix = "obstacles." + id + ".";
-
-    // 声明并读取参数（首次调用时声明）
-    auto declare_if_needed = [&](const std::string& name, const auto& default_val) {
-      if (!this->has_parameter(prefix + name)) {
-        this->declare_parameter(prefix + name, default_val);
-      }
-    };
-
-    declare_if_needed("type", std::string("box"));
-    declare_if_needed("position", std::vector<double>{0, 0, 0});
-    declare_if_needed("orientation_rpy", std::vector<double>{0, 0, 0});
-
-    std::string type = this->get_parameter(prefix + "type").as_string();
-    auto pos = this->get_parameter(prefix + "position").as_double_array();
-    auto rpy = this->get_parameter(prefix + "orientation_rpy").as_double_array();
+  // ========== 从 YAML 加载单个障碍物 ==========
+  moveit_msgs::msg::CollisionObject loadSingleObstacleFromYAML(const std::string& id,
+                                                               const YAML::Node& obs,
+                                                               const std::string& ref_frame) {
+    std::string type = obs["type"].as<std::string>("box");
+    double px = obs["position"][0].as<double>(0);
+    double py = obs["position"][1].as<double>(0);
+    double pz = obs["position"][2].as<double>(0);
+    double rr = 0, rp = 0, ry = 0;
+    if (obs["orientation_rpy"] && obs["orientation_rpy"].IsSequence()) {
+      rr = obs["orientation_rpy"][0].as<double>(0);
+      rp = obs["orientation_rpy"][1].as<double>(0);
+      ry = obs["orientation_rpy"][2].as<double>(0);
+    }
 
     moveit_msgs::msg::CollisionObject obj;
     obj.header.frame_id = ref_frame;
     obj.id = id;
     obj.operation = moveit_msgs::msg::CollisionObject::ADD;
 
-    // 位姿
     geometry_msgs::msg::Pose pose;
-    pose.position.x = pos[0];
-    pose.position.y = pos[1];
-    pose.position.z = pos[2];
+    pose.position.x = px;
+    pose.position.y = py;
+    pose.position.z = pz;
     tf2::Quaternion q;
-    q.setRPY(rpy[0], rpy[1], rpy[2]);
+    q.setRPY(rr, rp, ry);
     pose.orientation.x = q.x();
     pose.orientation.y = q.y();
     pose.orientation.z = q.z();
     pose.orientation.w = q.w();
 
     if (type == "urdf") {
-      loadURDFObstacle(obj, pose, id, prefix);
-    } else if (type == "mesh") {
-      loadMeshObstacle(obj, pose, id, prefix);
-    } else {
-      loadPrimitiveObstacle(obj, pose, type, id, prefix);
+      std::string urdf_uri = obs["urdf_path"].as<std::string>("");
+      if (!urdf_uri.empty()) {
+        loadURDFObstacleFromPath(obj, pose, id, urdf_uri);
+      }
+    } else if (type == "box" || type == "cylinder" || type == "sphere") {
+      loadPrimitiveFromYAML(obj, pose, type, id, obs);
     }
+
+    // 追加 YAML collision_shapes 虚拟碰撞体 (若有)
+    addCollisionShapes(obj, pose, id);
 
     return obj;
   }
 
   // ========== URDF 障碍物 (SW-URDF导出, 与MuJoCo共用) ==========
-  void loadURDFObstacle(moveit_msgs::msg::CollisionObject& obj,
-                        const geometry_msgs::msg::Pose& world_pose, const std::string& id,
-                        const std::string& prefix) {
-    auto declare_if_needed = [&](const std::string& name, const auto& default_val) {
-      if (!this->has_parameter(prefix + name)) {
-        this->declare_parameter(prefix + name, default_val);
-      }
-    };
-
-    declare_if_needed("urdf_path", std::string(""));
-    std::string urdf_uri = this->get_parameter(prefix + "urdf_path").as_string();
-    if (urdf_uri.empty()) {
-      throw std::runtime_error("urdf_path is empty for obstacle: " + id);
-    }
-
+  void loadURDFObstacleFromPath(moveit_msgs::msg::CollisionObject& obj,
+                                const geometry_msgs::msg::Pose& world_pose, const std::string& id,
+                                const std::string& urdf_uri) {
     // 解析 URDF，提取 collision mesh
     auto model = urdf::parseURDFFile(resolvePackageURI(urdf_uri));
     if (!model) {
@@ -227,6 +259,75 @@ private:
     }
   }
 
+  // ========== 从 YAML collision_shapes 添加虚拟碰撞体 ==========
+  void addCollisionShapes(moveit_msgs::msg::CollisionObject& obj,
+                          const geometry_msgs::msg::Pose& world_pose, const std::string& id) {
+    if (scene_yaml_.IsNull()) return;
+    auto params = scene_yaml_["scene_manager"]["ros__parameters"];
+    if (!params) return;
+    auto obs = params["obstacles"][id];
+    if (!obs || !obs["collision_shapes"] || !obs["collision_shapes"].IsSequence()) return;
+
+    // 父体姿态的四元数 (用于旋转局部偏移到世界坐标)
+    tf2::Quaternion world_q(world_pose.orientation.x, world_pose.orientation.y,
+                            world_pose.orientation.z, world_pose.orientation.w);
+    tf2::Matrix3x3 world_rot(world_q);
+
+    for (const auto& shape : obs["collision_shapes"]) {
+      std::string st = shape["type"].as<std::string>("box");
+      double lx = shape["position"][0].as<double>(0);
+      double ly = shape["position"][1].as<double>(0);
+      double lz = shape["position"][2].as<double>(0);
+
+      // 局部位置 → 世界坐标: world_pos + world_rot * local_pos
+      tf2::Vector3 local_pos(lx, ly, lz);
+      tf2::Vector3 rotated = world_rot * local_pos;
+
+      // 局部姿态
+      tf2::Quaternion local_q;
+      local_q.setRPY(0, 0, 0);
+      if (shape["orientation_rpy"] && shape["orientation_rpy"].IsSequence()) {
+        double r = shape["orientation_rpy"][0].as<double>(0);
+        double p = shape["orientation_rpy"][1].as<double>(0);
+        double y = shape["orientation_rpy"][2].as<double>(0);
+        local_q.setRPY(r, p, y);
+      }
+      tf2::Quaternion final_q = world_q * local_q;
+      final_q.normalize();
+
+      geometry_msgs::msg::Pose shape_pose;
+      shape_pose.position.x = world_pose.position.x + rotated.x();
+      shape_pose.position.y = world_pose.position.y + rotated.y();
+      shape_pose.position.z = world_pose.position.z + rotated.z();
+      shape_pose.orientation.x = final_q.x();
+      shape_pose.orientation.y = final_q.y();
+      shape_pose.orientation.z = final_q.z();
+      shape_pose.orientation.w = final_q.w();
+
+      shape_msgs::msg::SolidPrimitive prim;
+      if (st == "box") {
+        auto d = shape["dimensions"];
+        prim.type = shape_msgs::msg::SolidPrimitive::BOX;
+        prim.dimensions = {d[0].as<double>(0.1), d[1].as<double>(0.1), d[2].as<double>(0.1)};
+      } else if (st == "cylinder") {
+        auto d = shape["dimensions"];
+        prim.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
+        prim.dimensions = {d[0].as<double>(0.1), d[1].as<double>(0.05)};
+      } else if (st == "sphere") {
+        prim.type = shape_msgs::msg::SolidPrimitive::SPHERE;
+        prim.dimensions = {shape["dimensions"][0].as<double>(0.05)};
+      } else {
+        continue;
+      }
+
+      obj.primitives.push_back(prim);
+      obj.primitive_poses.push_back(shape_pose);
+    }
+
+    RCLCPP_INFO(get_logger(), "'%s': added %zu collision shapes from YAML", id.c_str(),
+                obs["collision_shapes"].size());
+  }
+
   // 解析 package:// URI → 磁盘绝对路径
   std::string resolvePackageURI(const std::string& uri) {
     const std::string prefix = "package://";
@@ -244,76 +345,27 @@ private:
     }
   }
 
-  // ========== Mesh 障碍物 (直接STL, 保留兼容) ==========
-  void loadMeshObstacle(moveit_msgs::msg::CollisionObject& obj,
-                        const geometry_msgs::msg::Pose& pose, const std::string& id,
-                        const std::string& prefix) {
-    auto declare_if_needed = [&](const std::string& name, const auto& default_val) {
-      if (!this->has_parameter(prefix + name)) {
-        this->declare_parameter(prefix + name, default_val);
-      }
-    };
-
-    declare_if_needed("mesh_path", std::string(""));
-    declare_if_needed("mesh_scale", std::vector<double>{1.0, 1.0, 1.0});
-
-    std::string mesh_path = this->get_parameter(prefix + "mesh_path").as_string();
-    auto scale_vec = this->get_parameter(prefix + "mesh_scale").as_double_array();
-
-    if (mesh_path.empty()) {
-      throw std::runtime_error("mesh_path is empty for obstacle: " + id);
-    }
-
-    Eigen::Vector3d scale(scale_vec[0], scale_vec[1], scale_vec[2]);
-    shapes::Mesh* mesh = shapes::createMeshFromResource(mesh_path, scale);
-    if (!mesh) {
-      throw std::runtime_error("Failed to load mesh: " + mesh_path);
-    }
-
-    shapes::ShapeMsg shape_msg;
-    shapes::constructMsgFromShape(mesh, shape_msg);
-    obj.meshes.push_back(boost::get<shape_msgs::msg::Mesh>(shape_msg));
-    obj.mesh_poses.push_back(pose);
-
-    delete mesh;
-  }
-
-  // ========== 基本几何体障碍物 ==========
-  void loadPrimitiveObstacle(moveit_msgs::msg::CollisionObject& obj,
+  // ========== 基本几何体 (从 YAML Node 读取) ==========
+  void loadPrimitiveFromYAML(moveit_msgs::msg::CollisionObject& obj,
                              const geometry_msgs::msg::Pose& pose, const std::string& type,
-                             const std::string& id, const std::string& prefix) {
-    auto declare_if_needed = [&](const std::string& name, const auto& default_val) {
-      if (!this->has_parameter(prefix + name)) {
-        this->declare_parameter(prefix + name, default_val);
-      }
-    };
-
-    declare_if_needed("dimensions", std::vector<double>{});
-
-    auto dims = this->get_parameter(prefix + "dimensions").as_double_array();
-
+                             const std::string& id, const YAML::Node& obs) {
     shape_msgs::msg::SolidPrimitive primitive;
+    auto dims = obs["dimensions"];
+    if (!dims || !dims.IsSequence()) {
+      throw std::runtime_error("Missing dimensions for: " + id);
+    }
 
     if (type == "box") {
-      if (dims.size() != 3) {
-        throw std::runtime_error("Box needs 3 dims [x,y,z] for: " + id);
-      }
       primitive.type = shape_msgs::msg::SolidPrimitive::BOX;
-      primitive.dimensions = {dims[0], dims[1], dims[2]};
+      primitive.dimensions = {dims[0].as<double>(), dims[1].as<double>(), dims[2].as<double>()};
     } else if (type == "cylinder") {
-      if (dims.size() != 2) {
-        throw std::runtime_error("Cylinder needs 2 dims [h,r] for: " + id);
-      }
       primitive.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
-      primitive.dimensions = {dims[0], dims[1]};
+      primitive.dimensions = {dims[0].as<double>(), dims[1].as<double>()};
     } else if (type == "sphere") {
-      if (dims.size() != 1) {
-        throw std::runtime_error("Sphere needs 1 dim [r] for: " + id);
-      }
       primitive.type = shape_msgs::msg::SolidPrimitive::SPHERE;
-      primitive.dimensions = {dims[0]};
+      primitive.dimensions = {dims[0].as<double>()};
     } else {
-      throw std::runtime_error("Unknown obstacle type: " + type);
+      throw std::runtime_error("Unknown type: " + type);
     }
 
     obj.primitives.push_back(primitive);

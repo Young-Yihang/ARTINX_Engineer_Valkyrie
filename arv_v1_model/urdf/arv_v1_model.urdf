@@ -473,7 +473,7 @@
   <joint name="world_fixed" type="fixed">
     <parent link="world"/>
     <child link="base_link"/>
-    <origin xyz="0 0 0.5" rpy="0 0 0"/>  <!-- Z=0.5米，让底座在地面上方 -->
+    <origin xyz="0 0 0.35" rpy="0 0 0"/>    
   </joint>
 
 </robot>

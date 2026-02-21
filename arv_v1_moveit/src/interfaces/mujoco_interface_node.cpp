@@ -10,7 +10,9 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <set>
 #include <sstream>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <string>
@@ -201,6 +203,18 @@ private:
   const std::vector<std::string> joint_names_ = {"joint_1", "joint_2", "joint_3",
                                                  "joint_4", "joint_5", "joint_6"};
 
+  // ========== 磁力吸引系统 ==========
+  struct MagnetAnchor {
+    int body_id;         // MuJoCo body ID
+    double anchor[3];    // 初始世界坐标 (XYZ)
+    double force_mag;    // 吸引力大小 (N)
+    double detach_dist;  // 脱离距离 (m)
+    bool detached;       // 已脱离标志
+  };
+  std::vector<MagnetAnchor> magnet_anchors_;
+  double magnet_force_default_ = 14.4;  // mg + 10N
+  double magnet_detach_dist_ = 0.15;    // 脭离距离
+
   // ========== 交互状态变量 ==========
   bool button_left_ = false;
   bool button_middle_ = false;
@@ -232,6 +246,8 @@ private:
   bool initializeVisualization();
   void renderLoop();
   void healthCheck();
+  void applyMagnetForces();     // 磁力吸引
+  void collectMagnetAnchors();  // 模型加载后收集锚点
 };
 
 // ========== 成员函数实现 ==========
@@ -394,7 +410,107 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
   }
 
   RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo model loaded successfully");
+
+  // 收集磁力锚点
+  collectMagnetAnchors();
+
   return true;
+}
+
+void MuJoCoInterfaceNode::collectMagnetAnchors() {
+  magnet_anchors_.clear();
+
+  // 从 scene_obstacles.yaml 读取 graspable 物体的初始位置作为锚点
+  if (scene_config_path_.empty() || !std::filesystem::exists(scene_config_path_)) return;
+
+  YAML::Node config;
+  try {
+    config = YAML::LoadFile(scene_config_path_);
+  } catch (...) {
+    return;
+  }
+
+  auto params = config["scene_manager"]["ros__parameters"];
+  if (!params) return;
+
+  // 读取磁力参数 (可选覆盖默认值)
+  if (params["magnet_force_N"]) magnet_force_default_ = params["magnet_force_N"].as<double>(14.4);
+  if (params["magnet_detach_dist"])
+    magnet_detach_dist_ = params["magnet_detach_dist"].as<double>(0.15);
+
+  auto obstacle_ids = params["obstacle_ids"];
+  if (!obstacle_ids) return;
+
+  for (const auto &id_node : obstacle_ids) {
+    std::string id = id_node.as<std::string>();
+    auto obs = params["obstacles"][id];
+    if (!obs || !obs["graspable"] || !obs["graspable"].as<bool>(false)) continue;
+
+    // 查找 MuJoCo body ID
+    std::string body_name = "obstacle_" + id;
+    int bid = mj_name2id(model_, mjOBJ_BODY, body_name.c_str());
+    if (bid < 0) {
+      RCLCPP_WARN(get_logger(), "[MAGNET] Body '%s' not found, skipping", body_name.c_str());
+      continue;
+    }
+
+    // 锚点 = 初始位置 (从 YAML 读取)
+    MagnetAnchor anchor;
+    anchor.body_id = bid;
+    anchor.anchor[0] = obs["position"][0].as<double>(0);
+    anchor.anchor[1] = obs["position"][1].as<double>(0);
+    anchor.anchor[2] = obs["position"][2].as<double>(0);
+    anchor.force_mag = magnet_force_default_;
+    anchor.detach_dist = magnet_detach_dist_;
+    anchor.detached = false;
+
+    magnet_anchors_.push_back(anchor);
+    RCLCPP_INFO(get_logger(), "[MAGNET] Anchor: %s (body=%d) pos=[%.3f,%.3f,%.3f] F=%.1fN",
+                id.c_str(), bid, anchor.anchor[0], anchor.anchor[1], anchor.anchor[2],
+                anchor.force_mag);
+  }
+
+  RCLCPP_INFO(get_logger(), "[MAGNET] Total %zu magnet anchors registered", magnet_anchors_.size());
+}
+
+void MuJoCoInterfaceNode::applyMagnetForces() {
+  for (auto &ma : magnet_anchors_) {
+    if (ma.detached) continue;
+
+    // 获取当前 body 世界坐标
+    double *xpos = data_->xpos + 3 * ma.body_id;
+
+    // 计算偏移向量: 锚点 - 当前位置
+    double dx = ma.anchor[0] - xpos[0];
+    double dy = ma.anchor[1] - xpos[1];
+    double dz = ma.anchor[2] - xpos[2];
+    double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    // 超过脱离距离 → 永久脱离
+    if (dist > ma.detach_dist) {
+      ma.detached = true;
+      // 清除残留力
+      data_->xfrc_applied[6 * ma.body_id + 0] = 0;
+      data_->xfrc_applied[6 * ma.body_id + 1] = 0;
+      data_->xfrc_applied[6 * ma.body_id + 2] = 0;
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                           "[MAGNET] Body %d detached (dist=%.3f)", ma.body_id, dist);
+      continue;
+    }
+
+    // 施加吸引力 (方向: 指向锚点)
+    if (dist > 1e-6) {
+      double scale = ma.force_mag / dist;
+      data_->xfrc_applied[6 * ma.body_id + 0] = dx * scale;
+      data_->xfrc_applied[6 * ma.body_id + 1] = dy * scale;
+      data_->xfrc_applied[6 * ma.body_id + 2] = dz * scale;
+    } else {
+      // 已在锚点上，仅抵消重力
+      data_->xfrc_applied[6 * ma.body_id + 0] = 0;
+      data_->xfrc_applied[6 * ma.body_id + 1] = 0;
+      data_->xfrc_applied[6 * ma.body_id + 2] = 0;
+    }
+  }
 }
 
 void MuJoCoInterfaceNode::setInitialPose() {
@@ -520,6 +636,8 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
   std::ostringstream body_ss;
   bool has_asset = false;
   int count = 0;
+  std::map<std::string, std::string> urdf_mjcf_cache;  // urdf_uri → MJCF 缓存
+  std::set<std::string> loaded_assets;                 // 已注入 asset 的 urdf_uri
 
   for (const auto &id_node : obstacle_ids) {
     std::string id = id_node.as<std::string>();
@@ -547,7 +665,15 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
     if (type == "urdf") {
       std::string urdf_uri = obs["urdf_path"].as<std::string>("");
       if (urdf_uri.empty()) continue;
-      std::string child_mjcf = loadObstacleURDF(id, urdf_uri);
+
+      // 缓存 URDF→MJCF 转换结果 (同一 STL 只转换一次)
+      std::string child_mjcf;
+      if (urdf_mjcf_cache.count(urdf_uri)) {
+        child_mjcf = urdf_mjcf_cache[urdf_uri];
+      } else {
+        child_mjcf = loadObstacleURDF(id, urdf_uri);
+        urdf_mjcf_cache[urdf_uri] = child_mjcf;
+      }
       if (child_mjcf.empty()) continue;
 
       // 从子 MJCF 提取 <asset> 内容和 <worldbody> 内容
@@ -579,9 +705,11 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
                     "[OK] '%s': STL mesh set visual-only, using virtual collision", id.c_str());
       }
 
-      if (!child_asset.empty()) {
+      // 仅首次遇到该 URDF 时注入 asset (避免同名 mesh 重复)
+      if (!child_asset.empty() && loaded_assets.find(urdf_uri) == loaded_assets.end()) {
         asset_ss << child_asset;
         has_asset = true;
+        loaded_assets.insert(urdf_uri);
       }
 
       // 包裹在带位置的 body 中
@@ -628,7 +756,13 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
           } else if (st == "sphere") {
             gs << " type=\"sphere\" size=\"" << shape["dimensions"][0].as<double>(0.05) << "\"";
           }
-          gs << " rgba=\"" << rgba << "\" contype=\"2\" conaffinity=\"1\"/>\n";
+          // graspable 物体需要与地面/矿框/彼此碰撞 → contype=3, conaffinity=3
+          // 静态障碍物只需与机械臂碰撞 → contype=2, conaffinity=1
+          if (graspable) {
+            gs << " rgba=\"" << rgba << "\" contype=\"3\" conaffinity=\"3\"/>\n";
+          } else {
+            gs << " rgba=\"" << rgba << "\" contype=\"2\" conaffinity=\"1\"/>\n";
+          }
           body_ss << gs.str();
           si++;
         }
@@ -732,6 +866,7 @@ void MuJoCoInterfaceNode::simulationStep() {
   }
 
   std::lock_guard<std::mutex> lock(sim_mutex_);
+  applyMagnetForces();
   mj_step(model_, data_);
   sim_step_count_++;
   publishJointStates();
