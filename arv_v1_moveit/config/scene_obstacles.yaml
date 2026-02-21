@@ -18,13 +18,7 @@ scene_manager:
     reference_frame: "world"
     auto_load: true
 
-    # --- 磁力吸引参数 ---
-    # magnet_force_N: 吸引力大小 = 重力(mg≈4.4N) + 最小取出力(10N) = 14.4N
-    # magnet_detach_dist: 脱离距离(m), 超过后磁力归零
-    magnet_force_N: 14.4
-    magnet_detach_dist: 0.15
-
-    obstacle_ids: ["ground_plane", "ore_frame", "energy_core_0", "energy_core_1", "energy_core_2", "energy_core_3", "energy_core_4", "energy_core_5"]
+    obstacle_ids: ["ground_plane", "ore_frame"]
 
     obstacles:
       # --- 地面 ---
@@ -36,234 +30,17 @@ scene_manager:
         graspable: false
 
       # --- 取矿框架 (六边形+6棒子, SW-URDF整体导出, 固定) ---
-      # STL包围盒(body内): X[-1.99,0.15] Y[-0.96,2.02] Z[0,1.62] (经RPY旋转)
       ore_frame:
         type: "urdf"
-        position: [0.3, 0.0, 0.0]
+        position: [0.5, 0.0, 0.0]
         orientation_rpy: [0.0, 0.0, 0.0]
         urdf_path: "package://arv_v1_model/urdf/obstacles/ore_frame.urdf"
         graspable: false
-        # 虚拟碰撞体: 手动建模替代STL凸包 (MuJoCo侧)
-        # position 相对于 ore_frame body 原点, dimensions 为全尺寸
-        # rgba 半透明用于调试可视化, 可选
-        collision_shapes:
-          # 六边形竖立于XZ平面, 绕Y轴拉伸(深度D沿Y轴)
-          # 3个box绕Y轴旋转0°/60°/120°覆盖整个六边形截面
-          - type: "box"
-            position: [0.05, 0, 0.7]           # 六棱柱中心 (Z=高度)
-            orientation_rpy: [0.0, 0.0, 0.0]
-            dimensions: [0.15, 0.086602540378, 0.15]  
-            rgba: [0.0, 1.0, 0.0, 0.2]
 
-          - type: "box"
-            position: [0.05, 0, 0.7]
-            orientation_rpy: [1.047197551196598, 0.0, 0.0]   # 60° 绕X轴 = π/3
-            dimensions: [0.15, 0.086602540378, 0.15]  
-            rgba: [0.0, 1.0, 0.0, 0.2]
-
-          - type: "box"
-            position: [0.05, 0, 0.7]
-            orientation_rpy: [2.094395102393195, 0.0, 0.0]   # 120° 绕X轴 = 2π/3
-            dimensions: [0.15, 0.086602540378, 0.15]
-            rgba: [0.0, 1.0, 0.0, 0.2]
-
-          # === 6根外伸圆柱: 轴在YZ平面内, 整体绕X轴顺时针旋转90° ===
-          # apothem r=0.075m, 杆长L=0.075m → 圆心距=0.075+0.0375=0.1125m
-          # Rx(+90°)后: Y=-0.1125*sinθ, Z=0.7+0.1125*cosθ  (θ从+Y轴起, 向+Z为正)
-          # orientation: roll += π/2
-          - type: "cylinder"
-            position: [0.035, 0.0000, 0.8125]  
-            orientation_rpy: [0.0, 0.0, 0.0]
-            dimensions: [0.075, 0.019]            # [高度, 半径]
-            rgba: [0.0, 1.0, 0.0, 0.2]
-
-          - type: "cylinder"
-            position: [0.035, -0.0974, 0.7563]  
-            orientation_rpy: [1.0471975511965974, 0.0, 0.0]
-            dimensions: [0.075, 0.019]
-            rgba: [0.0, 1.0, 0.0, 0.2]
-
-          - type: "cylinder"
-            position: [0.035, -0.0974, 0.6438] 
-            orientation_rpy: [2.094395102393195, 0.0, 0.0]
-            dimensions: [0.075, 0.019]
-            rgba: [0.0, 1.0, 0.0, 0.2]
-
-          - type: "cylinder"
-            position: [0.035, 0.0000, 0.5875] 
-            orientation_rpy: [0.0, 0.0, 0.0]
-            dimensions: [0.075, 0.019]
-            rgba: [0.0, 1.0, 0.0, 0.2]
-
-          - type: "cylinder"
-            position: [0.035, 0.0974, 0.6438] 
-            orientation_rpy: [1.047197551196598, 0.0, 0.0]
-            dimensions: [0.075, 0.019]
-            rgba: [0.0, 1.0, 0.0, 0.2]
-
-          - type: "cylinder"
-            position: [0.035, 0.0974, 0.7563]
-            orientation_rpy: [2.094395102393195, 0.0, 0.0]
-            dimensions: [0.075, 0.019]
-            rgba: [0.0, 1.0, 0.0, 0.2]
-
-      # --- 能量单元 × 6 (放置在 ore_frame 的6根棒子顶端, graspable) ---
-      # energy_core URDF: 质心Y=0.078m, 圆柱形, 直径~0.1m 高~0.155m
-      # 碰撞体: 单个圆柱包裹, dimensions [高度, 半径]
-      # 棒子位置复用 ore_frame collision_shapes 中6根cylinder的世界坐标
-      # (ore_frame.pos=[0.3,0,0] + cylinder相对偏移)
-      energy_core_0:
-        type: "urdf"
-        position: [0.335, 0.0000, 0.8125]
-        orientation_rpy: [0.0, 0.0, 0.0]
-        urdf_path: "package://arv_v1_model/urdf/obstacles/energy_core.urdf"
-        graspable: true
-        collision_shapes:
-          # 底部粗圆柱 (盲孔圆柱主体)
-          - type: "cylinder"
-            position: [0.0, 0.0, 0.13]
-            dimensions: [0.04, 0.05]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          # 顶部三个小圆柱围绕盲孔 (Z=0 平面)
-          - type: "cylinder"
-            position: [0.0, 0.026, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [0.022517, -0.013 , 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [-0.022517, -0.013, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-
-      energy_core_1:
-        type: "urdf"
-        position: [0.335, -0.0974, 0.7563]
-        orientation_rpy: [1.047197551196598, 0.0, 0.0]
-        urdf_path: "package://arv_v1_model/urdf/obstacles/energy_core.urdf"
-        graspable: true
-        collision_shapes:
-          # 底部粗圆柱 (盲孔圆柱主体)
-          - type: "cylinder"
-            position: [0.0, 0.0, 0.13]
-            dimensions: [0.04, 0.05]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          # 顶部三个小圆柱围绕盲孔 (Z=0 平面)
-          - type: "cylinder"
-            position: [0.0, 0.026, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [0.022517, -0.013 , 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [-0.022517, -0.013, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-
-      energy_core_2:
-        type: "urdf"
-        position: [0.335, -0.0974, 0.6438]
-        orientation_rpy: [2.094395102393195, 0.0, 0.0]
-        urdf_path: "package://arv_v1_model/urdf/obstacles/energy_core.urdf"
-        graspable: true
-        collision_shapes:
-          # 底部粗圆柱 (盲孔圆柱主体)
-          - type: "cylinder"
-            position: [0.0, 0.0, 0.13]
-            dimensions: [0.04, 0.05]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          # 顶部三个小圆柱围绕盲孔 (Z=0 平面)
-          - type: "cylinder"
-            position: [0.0, 0.026, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [0.022517, -0.013 , 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [-0.022517, -0.013, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-
-      energy_core_3:
-        type: "urdf"
-        position: [0.335, 0.0000, 0.5875]
-        orientation_rpy: [3.1415926535, 0.0, 0.0]
-        urdf_path: "package://arv_v1_model/urdf/obstacles/energy_core.urdf"
-        graspable: true
-        collision_shapes:
-          # 底部粗圆柱 (盲孔圆柱主体)
-          - type: "cylinder"
-            position: [0.0, 0.0, 0.13]
-            dimensions: [0.04, 0.05]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          # 顶部三个小圆柱围绕盲孔 (Z=0 平面)
-          - type: "cylinder"
-            position: [0.0, 0.026, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [0.022517, -0.013 , 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [-0.022517, -0.013, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-
-      energy_core_4:
-        type: "urdf"
-        position: [0.335, 0.0974, 0.6438]
-        orientation_rpy: [4.1887902048, 0.0, 0.0]
-        urdf_path: "package://arv_v1_model/urdf/obstacles/energy_core.urdf"
-        graspable: true
-        collision_shapes:
-          # 底部粗圆柱 (盲孔圆柱主体)
-          - type: "cylinder"
-            position: [0.0, 0.0, 0.13]
-            dimensions: [0.04, 0.05]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          # 顶部三个小圆柱围绕盲孔 (Z=0 平面)
-          - type: "cylinder"
-            position: [0.0, 0.026, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [0.022517, -0.013 , 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [-0.022517, -0.013, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-
-      energy_core_5:
-        type: "urdf"
-        position: [0.335, 0.0974, 0.7563]
-        orientation_rpy: [5.2359877560, 0.0, 0.0]
-        urdf_path: "package://arv_v1_model/urdf/obstacles/energy_core.urdf"
-        graspable: true
-        collision_shapes:
-          # 底部粗圆柱 (盲孔圆柱主体)
-          - type: "cylinder"
-            position: [0.0, 0.0, 0.13]
-            dimensions: [0.04, 0.05]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          # 顶部三个小圆柱围绕盲孔 (Z=0 平面)
-          - type: "cylinder"
-            position: [0.0, 0.026, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [0.022517, -0.013 , 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
-          - type: "cylinder"
-            position: [-0.022517, -0.013, 0.055]
-            dimensions: [0.11, 0.01]
-            rgba: [1.0, 1.0, 0.0, 0.2]
+      # --- 能量单元 (待导出STL后启用) ---
+      # energy_unit_0:
+      #   type: "urdf"
+      #   position: [0.5, 0.0, 0.3]
+      #   orientation_rpy: [0.0, 0.0, 0.0]
+      #   urdf_path: "package://arv_v1_model/urdf/obstacles/energy_unit.urdf"
+      #   graspable: true
