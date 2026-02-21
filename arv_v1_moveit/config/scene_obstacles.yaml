@@ -18,7 +18,7 @@ scene_manager:
     reference_frame: "world"
     auto_load: true
 
-    obstacle_ids: ["ground_plane", "ore_frame"]
+    obstacle_ids: ["ground_plane", "ore_frame", "energy_core_0"]
 
     obstacles:
       # --- 地面 ---
@@ -37,10 +37,15 @@ scene_manager:
         urdf_path: "package://arv_v1_model/urdf/obstacles/ore_frame.urdf"
         graspable: false
 
-      # --- 能量单元 (待导出STL后启用) ---
-      # energy_unit_0:
-      #   type: "urdf"
-      #   position: [0.5, 0.0, 0.3]
-      #   orientation_rpy: [0.0, 0.0, 0.0]
-      #   urdf_path: "package://arv_v1_model/urdf/obstacles/energy_unit.urdf"
-      #   graspable: true
+      # --- 能量单元 (graspable, 虚拟碰撞体近似圆柱体) ---
+      energy_core_0:
+        type: "urdf"
+        position: [0.5, 0.0, 0.23]
+        orientation_rpy: [0.0, 0.0, 0.0]
+        urdf_path: "package://arv_v1_model/urdf/obstacles/energy_core.urdf"
+        graspable: true
+        collision_shapes:
+          - type: "cylinder"
+            position: [0.0, 0.0776, 0.0]
+            dimensions: [0.155, 0.042]
+

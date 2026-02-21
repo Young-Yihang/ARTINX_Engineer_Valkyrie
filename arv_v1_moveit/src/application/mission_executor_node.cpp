@@ -25,6 +25,8 @@
 #include <thread>
 #include <vector>
 
+#include "arv_v1_interfaces/srv/execute_action.hpp"
+#include "arv_v1_interfaces/srv/get_task_state.hpp"
 #include "arv_v1_interfaces/srv/list_trajectories.hpp"
 #include "arv_v1_interfaces/srv/load_trajectory.hpp"
 #include "arv_v1_interfaces/srv/save_last_trajectory.hpp"
@@ -32,6 +34,8 @@
 using LoadTrajectory = arv_v1_interfaces::srv::LoadTrajectory;
 using ListTrajectories = arv_v1_interfaces::srv::ListTrajectories;
 using SaveLastTrajectory = arv_v1_interfaces::srv::SaveLastTrajectory;
+using ExecuteAction = arv_v1_interfaces::srv::ExecuteAction;
+using GetTaskState = arv_v1_interfaces::srv::GetTaskState;
 using namespace std::chrono_literals;
 
 // ANSI Color codes
@@ -72,6 +76,17 @@ public:
 
     // 2. Dynamically load available missions
     fetchMissions();
+
+    // 3. Create state machine service servers
+    execute_action_srv_ = this->create_service<ExecuteAction>(
+        "/execute_action",
+        std::bind(&MissionExecutorNode::executeActionCallback, this, std::placeholders::_1,
+                  std::placeholders::_2));
+    get_task_state_srv_ = this->create_service<GetTaskState>(
+        "/get_task_state",
+        std::bind(&MissionExecutorNode::getTaskStateCallback, this, std::placeholders::_1,
+                  std::placeholders::_2));
+    RCLCPP_INFO(this->get_logger(), "State machine services ready: /execute_action /get_task_state");
   }
 
   void run() {
@@ -103,11 +118,21 @@ private:
   rclcpp::Client<LoadTrajectory>::SharedPtr load_client_;
   rclcpp::Client<SaveLastTrajectory>::SharedPtr save_client_;
 
+  // Service servers (state machine API)
+  rclcpp::Service<ExecuteAction>::SharedPtr execute_action_srv_;
+  rclcpp::Service<GetTaskState>::SharedPtr get_task_state_srv_;
+
   // Data
   std::vector<Mission> missions_;
   std::string current_status_ = "Ready";
   std::mutex status_mutex_;
   std::string trajectory_dir_;
+
+  // State machine
+  enum class TaskState { IDLE, EXECUTING };
+  TaskState task_state_ = TaskState::IDLE;
+  std::string current_action_;
+  std::mutex task_state_mutex_;
 
   // Pagination
   static constexpr size_t MISSIONS_PER_PAGE = 6;
@@ -128,6 +153,76 @@ private:
   std::string pending_name_;
   std::string pending_desc_;
   std::string target_mission_;
+
+  // ========== State machine helper ==========
+  std::string taskStateToString(TaskState s) const {
+    return s == TaskState::IDLE ? "IDLE" : "EXECUTING";
+  }
+
+  // ========== /execute_action service callback ==========
+  void executeActionCallback(const std::shared_ptr<ExecuteAction::Request> request,
+                             std::shared_ptr<ExecuteAction::Response> response) {
+    std::lock_guard<std::mutex> lock(task_state_mutex_);
+
+    if (task_state_ == TaskState::EXECUTING && !request->force) {
+      response->success = false;
+      response->message = "Already executing: " + current_action_ + ". Use force=true to override.";
+      response->new_state = taskStateToString(task_state_);
+      return;
+    }
+
+    // Map action_name to trajectory name and trigger execution
+    auto req = std::make_shared<LoadTrajectory::Request>();
+    req->name = request->action_name;
+    req->execute = true;
+
+    task_state_ = TaskState::EXECUTING;
+    current_action_ = request->action_name;
+
+    auto future = load_client_->async_send_request(req);
+
+    // Update status in TUI
+    {
+      std::lock_guard<std::mutex> sl(status_mutex_);
+      current_status_ = "Executing action: " + request->action_name;
+    }
+
+    // Monitor completion in background
+    std::thread([this, future = std::move(future), name = request->action_name]() mutable {
+      try {
+        auto result = future.get();
+        {
+          std::lock_guard<std::mutex> sl(task_state_mutex_);
+          task_state_ = TaskState::IDLE;
+          current_action_.clear();
+        }
+        {
+          std::lock_guard<std::mutex> sl2(status_mutex_);
+          current_status_ =
+              result->success ? "Action done: " + name : "Action failed: " + result->message;
+        }
+      } catch (const std::exception& e) {
+        std::lock_guard<std::mutex> sl(task_state_mutex_);
+        task_state_ = TaskState::IDLE;
+        current_action_.clear();
+      }
+    }).detach();
+
+    response->success = true;
+    response->message = "Action dispatched: " + request->action_name;
+    response->new_state = taskStateToString(task_state_);
+  }
+
+  // ========== /get_task_state service callback ==========
+  void getTaskStateCallback(const std::shared_ptr<GetTaskState::Request> /*request*/,
+                            std::shared_ptr<GetTaskState::Response> response) {
+    std::lock_guard<std::mutex> lock(task_state_mutex_);
+    response->state = taskStateToString(task_state_);
+    response->current_action = current_action_;
+    for (const auto& m : missions_) {
+      response->available_actions.push_back(m.name);
+    }
+  }
 
   void fetchMissions() {
     auto list_client = this->create_client<ListTrajectories>("/list_trajectories");
