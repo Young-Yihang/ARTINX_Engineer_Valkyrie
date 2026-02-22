@@ -410,6 +410,13 @@
       damping="0.3"
       friction="0.4" />
   </joint>
+  <joint name="joint_tcp" type="fixed">
+    <origin xyz="0 0.000 0.179" rpy="0 0 0"/>
+    <parent link="link6"/>
+    <child link="tcp"/>
+    <axis xyz="0 0 0"/>
+  </joint>
+  <link name="tcp"/>
   <link
     name="link_gripper1">
     <inertial>
