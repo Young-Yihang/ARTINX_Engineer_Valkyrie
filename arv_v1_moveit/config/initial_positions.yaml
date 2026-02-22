@@ -2,8 +2,9 @@
 
 initial_positions:
   joint_1: 0
-  joint_2: 3.0359
-  joint_3: 1.2664
-  joint_4: 1.7175
+  joint_2: 0
+  joint_3: 0
+  joint_4: 0
   joint_5: 0
   joint_6: 0
+  joint_gripper1: 0.0  # 夹爪初始位置（米），0=夹爪收起

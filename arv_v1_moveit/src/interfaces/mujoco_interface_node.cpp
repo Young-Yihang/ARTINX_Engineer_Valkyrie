@@ -514,7 +514,7 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
 }
 
 void MuJoCoInterfaceNode::setInitialPose() {
-  double initial_q[6] = {0.0, 3.06, 0.766, 1.718, 0.0, 0.0};
+  double initial_q[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};  // 新臂零位，标定后按实际修改
   for (int i = 0; i < 6; i++) {
     data_->qpos[i] = initial_q[i];
   }

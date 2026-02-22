@@ -4,42 +4,47 @@
     A URDF file must exist for this robot as well, where the joints and the links that are referenced are defined
 -->
 <robot name="ARV_V1_MODEL">
-    <!--GROUPS: Representation of a set of joints and links. This can be useful for specifying DOF to plan for, defining arms, end effectors, etc-->
-    <!--LINKS: When a link is specified, the parent joint of that link (if it exists) is automatically included-->
-    <!--JOINTS: When a joint is specified, the child link of that joint (which will always exist) is automatically included-->
-    <!--CHAINS: When a chain is specified, all the links along the chain (including endpoints) are included in the group. Additionally, all the joints that are parents to included links are also included. This means that joints along the chain and the parent joint of the base link are included in the group-->
-    <!--SUBGROUPS: Groups can also be formed by referencing to already defined group names-->
+    <!--GROUPS-->
     <group name="ARM">
-        <chain base_link="base_link" tip_link="link6_2006roll"/>
+        <chain base_link="base_link" tip_link="link6"/>
     </group>
-    <!--GROUP STATES: Purpose: Define a named state for a particular group, in terms of joint values. This is useful to define states like 'folded arms'-->
+    <!--GROUP STATES: 新臂初始位置待标定后更新 -->
     <group_state name="Escape" group="ARM">
         <joint name="joint_1" value="0"/>
-        <joint name="joint_2" value="3.0359"/>
-        <joint name="joint_3" value="1.2664"/>
-        <joint name="joint_4" value="1.7175"/>
+        <joint name="joint_2" value="0"/>
+        <joint name="joint_3" value="0"/>
+        <joint name="joint_4" value="0"/>
         <joint name="joint_5" value="0"/>
         <joint name="joint_6" value="0"/>
     </group_state>
     <group_state name="Start" group="ARM">
         <joint name="joint_1" value="0"/>
-        <joint name="joint_2" value="2.342"/>
-        <joint name="joint_3" value="0.9888"/>
+        <joint name="joint_2" value="0"/>
+        <joint name="joint_3" value="0"/>
         <joint name="joint_4" value="0"/>
         <joint name="joint_5" value="0"/>
         <joint name="joint_6" value="0"/>
     </group_state>
-    <!--VIRTUAL JOINT: Purpose: this element defines a virtual joint between a robot link and an external frame of reference (considered fixed with respect to the robot)-->
+    <!--VIRTUAL JOINT-->
     <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="base_link"/>
-    <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
-    <disable_collisions link1="base_link" link2="link1_double8009" reason="Adjacent"/>
-    <disable_collisions link1="base_link" link2="link3_sight" reason="Never"/>
-    <disable_collisions link1="link1_double8009" link2="link2_arm1" reason="Adjacent"/>
-    <disable_collisions link1="link1_double8009" link2="link3_sight" reason="Never"/>
-    <disable_collisions link1="link2_arm1" link2="link3_sight" reason="Adjacent"/>
-    <disable_collisions link1="link3_sight" link2="link4_arm2" reason="Adjacent"/>
-    <disable_collisions link1="link3_sight" link2="link5_4310pitch" reason="Never"/>
-    <disable_collisions link1="link3_sight" link2="link6_2006roll" reason="Never"/>
-    <disable_collisions link1="link4_arm2" link2="link5_4310pitch" reason="Adjacent"/>
-    <disable_collisions link1="link5_4310pitch" link2="link6_2006roll" reason="Adjacent"/>
+    <!--DISABLE COLLISIONS: 基于新臂连杆结构生成，建议后续用 Setup Assistant 重新生成完整碰撞矩阵 -->
+    <!-- 相邻连杆（必然接触） -->
+    <disable_collisions link1="base_link" link2="link1" reason="Adjacent"/>
+    <disable_collisions link1="link1" link2="link2" reason="Adjacent"/>
+    <disable_collisions link1="link2" link2="link3" reason="Adjacent"/>
+    <disable_collisions link1="link3" link2="link4" reason="Adjacent"/>
+    <disable_collisions link1="link4" link2="link5" reason="Adjacent"/>
+    <disable_collisions link1="link5" link2="link6" reason="Adjacent"/>
+    <disable_collisions link1="link6" link2="link_gripper1" reason="Adjacent"/>
+    <disable_collisions link1="link6" link2="link_gripper2" reason="Adjacent"/>
+    <disable_collisions link1="link_gripper1" link2="link_gripper2" reason="Adjacent"/>
+    <!-- 几何上不可能碰撞的连杆对 -->
+    <disable_collisions link1="base_link" link2="link2" reason="Never"/>
+    <disable_collisions link1="link1" link2="link3" reason="Never"/>
+    <disable_collisions link1="link2" link2="link4" reason="Never"/>
+    <disable_collisions link1="link3" link2="link5" reason="Never"/>
+    <disable_collisions link1="link3" link2="link6" reason="Never"/>
+    <disable_collisions link1="link4" link2="link6" reason="Never"/>
+    <disable_collisions link1="link3" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="link3" link2="link_gripper2" reason="Never"/>
 </robot>

@@ -62,6 +62,17 @@
                 <state_interface name="velocity"/>
                 <state_interface name="effort"/>
             </joint>
+            <!-- 夹爪主动关节 -->
+            <joint name="joint_gripper1">
+                <command_interface name="position"/>
+                <command_interface name="effort"/>  <!-- 添加力矩命令接口 -->
+                <state_interface name="position">
+                  <param name="initial_value">${initial_positions['joint_gripper1']}</param>
+                </state_interface>
+                <state_interface name="velocity"/>
+                <state_interface name="effort"/>
+            </joint>
+            <!-- joint_gripper2 是 mimic 关节，由 robot_state_publisher 自动计算，不加 ros2_control 接口 -->
 
         </ros2_control>
     </xacro:macro>
