@@ -543,4 +543,10 @@
       multiplier="-1"
       offset="0" />
   </joint>
+  <link name="world"/>
+  <joint name="world_fixed" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.35" rpy="0 0 0"/>    
+  </joint>
 </robot>
