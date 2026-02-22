@@ -47,7 +47,7 @@ public:
     // 动态获取包路径（编译时查表，零运行时开销）
     try {
       pkg_share_dir_ = ament_index_cpp::get_package_share_directory("arv_v1_model");
-      urdf_path_ = pkg_share_dir_ + "/urdf/arv_v1_model.urdf";
+      urdf_path_ = pkg_share_dir_ + "/urdf/arv_v1.urdf";
       mesh_dir_ = pkg_share_dir_ + "/meshes";
 
       RCLCPP_INFO(this->get_logger(), "[OK] Package path: %s", pkg_share_dir_.c_str());

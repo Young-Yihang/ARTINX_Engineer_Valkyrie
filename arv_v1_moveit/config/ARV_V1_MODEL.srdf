@@ -26,7 +26,7 @@
         <joint name="joint_5"/>
         <joint name="joint_6"/>
         <joint name="joint_tcp"/>
-        <chain base_link="base_link" tip_link="link6"/>
+        <chain base_link="base_link" tip_link="tcp"/>
     </group>
     <group name="Gripper_Actuator">
         <joint name="joint_gripper1"/>
