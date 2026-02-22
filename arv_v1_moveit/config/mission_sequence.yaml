@@ -1,0 +1,43 @@
+# =============================================================================
+# 任务状态机序列配置
+#
+# 格式说明:
+#   states[] 定义有序状态链, 按数组顺序执行
+#   每个 state:
+#     id:          唯一标识 (英文+下划线)
+#     trajectory:  对应 config/trajectories/ 下的 YAML 文件名 (不含.yaml)
+#                  为空 "" 表示该状态不执行轨迹 (如 IDLE 等待状态)
+#     description: TUI 中显示的中文描述
+#
+# TUI 操作:
+#   [E] 执行当前状态绑定的轨迹 → 成功后自动推进到下一状态
+#   [X] 全局复位 → 执行 reset_trajectory → 回到 states[0]
+#   [T] 切换到轨迹管理视图 (CRUD)
+#   [Q] 退出
+#
+# 使用方式:
+#   1. 在 RViz 中用笛卡尔或手动规划找到目标位姿
+#   2. Plan & Execute → TUI 轨迹视图按 [S] 保存为 YAML
+#   3. 在此文件中绑定 trajectory 字段
+#   4. 重启 mission_executor, 按 [E] 逐步执行
+# =============================================================================
+
+mission:
+  name: "pick_and_deliver"
+  description: "取矿+兑矿 完整流程"
+
+  # 复位时执行的轨迹 (回 Home 位), 为空则直接复位索引不执行轨迹
+  reset_trajectory: ""
+
+  states:
+    - id: "IDLE"
+      trajectory: ""
+      description: "Home位 等待指令"
+
+    - id: "PICK_ORE_1"
+      trajectory: ""
+      description: "取1号位能量单元"
+
+    - id: "DELIVER_1"
+      trajectory: ""
+      description: "送到兑矿站"

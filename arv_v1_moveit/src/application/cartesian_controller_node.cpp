@@ -457,7 +457,11 @@ void CartesianControllerNode::publishStatus(const std::string& status) {
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<CartesianControllerNode>();
-  rclcpp::spin(node);
+  // MultiThreadedExecutor: 避免 MoveIt 内部 joint_states 回调
+  // 与 publishCurrentPose/planAndExecute 阻塞调用死锁
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(node);
+  executor.spin();
   rclcpp::shutdown();
   return 0;
 }
