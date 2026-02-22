@@ -15,7 +15,7 @@
     cascade_pid:
       joint_1:
         # 外环（位置）：只用P
-        pos_Kp: 3.0    # 从30降低10倍，避免振荡
+        pos_Kp: 4.0    # 从30降低10倍，避免振荡
         pos_Ki: 0.0    # 外环不用积分
         pos_Kd: 0.0    # 外环不用微分
         # 内环（速度）：使用PI
@@ -25,7 +25,7 @@
         vel_limit: 10.0 # 速度限幅 rad/s
       
       joint_2:
-        pos_Kp: 5.0    # 降低10倍
+        pos_Kp: 6.0    # 降低10倍
         pos_Ki: 0.0
         pos_Kd: 0.0
         vel_Kp: 7.0
@@ -34,7 +34,7 @@
         vel_limit: 10.0
       
       joint_3:
-        pos_Kp: 3.0    # 降低10倍
+        pos_Kp: 4.0    # 降低10倍
         pos_Ki: 0.0
         pos_Kd: 0.0
         vel_Kp: 6.0
@@ -52,7 +52,7 @@
         vel_limit: 10.0
       
       joint_5:
-        pos_Kp: 0.05    # 进一步降低，消除振荡和饱和
+        pos_Kp: 1.5    # 进一步降低，消除振荡和饱和
         pos_Ki: 0.0
         pos_Kd: 0.0
         vel_Kp: 1.0
@@ -61,7 +61,7 @@
         vel_limit: 10.0
       
       joint_6:
-        pos_Kp: 0.05    # 进一步降低，消除振荡和饱和
+        pos_Kp: 1.00    # 进一步降低，消除振荡和饱和
         pos_Ki: 0.0
         pos_Kd: 0.0
         vel_Kp: 1.0
