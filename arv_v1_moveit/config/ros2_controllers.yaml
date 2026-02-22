@@ -10,11 +10,6 @@ controller_manager:
     # 力矩控制器（接收 torque_controller_node 的力矩命令）
     effort_controller:
       type: effort_controllers/JointGroupEffortController
-
-    # 关节状态发布器（发布 Gazebo 的反馈状态）
-    #joint_state_broadcaster:
-     # type: joint_state_broadcaster/JointStateBroadcaster
-
 # 力矩控制器配置
 effort_controller:
   ros__parameters:

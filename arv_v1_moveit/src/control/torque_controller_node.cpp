@@ -511,7 +511,7 @@ void TorqueControllerActionServer::jointStateCallback(
   std::unique_lock<std::mutex> state_lock(state_mutex_);
 
   // 验证数据
-  if (msg->position.size() != 6 || msg->velocity.size() != 6) {
+  if (msg->position.size() != 7 || msg->velocity.size() != 7) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(),
                          1000,  // 每秒最多打印一次
                          "[WARN] Incomplete joint state data: position=%zu, velocity=%zu",
@@ -646,7 +646,7 @@ bool TorqueControllerActionServer::initializeDynamics() {
   std::string urdf_path;
   try {
     std::string pkg_path = ament_index_cpp::get_package_share_directory("arv_v1_model");
-    urdf_path = pkg_path + "/urdf/arv_v1_model.urdf";
+    urdf_path = pkg_path + "/urdf/arv_v1.urdf";
   } catch (const std::exception &e) {
     RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to find arv_v1_model package: %s", e.what());
     return false;
@@ -705,8 +705,8 @@ bool TorqueControllerActionServer::initializeDynamics() {
     return false;
   }
 
-  // 4. 获取运动链（从 base_link 到 link6_2006roll）
-  if (!kdl_tree.getChain("base_link", "link6_2006roll", kdl_chain_)) {
+  // 4. 获取运动链（从 base_link 到 link6）
+  if (!kdl_tree.getChain("base_link", "link6", kdl_chain_)) {
     RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to extract kinematic chain");
     return false;
   }

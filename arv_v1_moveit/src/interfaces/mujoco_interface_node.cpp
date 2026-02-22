@@ -201,7 +201,8 @@ private:
 
   // ========== 关节名称 ==========
   const std::vector<std::string> joint_names_ = {"joint_1", "joint_2", "joint_3",
-                                                 "joint_4", "joint_5", "joint_6"};
+                                                 "joint_4", "joint_5", "joint_6",
+                                                 "joint_gripper1"};
 
   // ========== 磁力吸引系统 ==========
   struct MagnetAnchor {
@@ -514,7 +515,8 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
 }
 
 void MuJoCoInterfaceNode::setInitialPose() {
-  double initial_q[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};  // 新臂零位，标定后按实际修改
+  double initial_q[6] = {0.0,    2.1746, 0.937,
+                         -1.326, 1.5028, -1.6796};  // 新臂零位，标定后按实际修改
   for (int i = 0; i < 6; i++) {
     data_->qpos[i] = initial_q[i];
   }
@@ -881,6 +883,9 @@ void MuJoCoInterfaceNode::publishJointStates() {
     msg.position.push_back(data_->qpos[i]);
     msg.velocity.push_back(data_->qvel[i]);
   }
+  // joint_gripper1: qpos[6]（夹爪主动关节）
+  msg.position.push_back(data_->qpos[6]);
+  msg.velocity.push_back(data_->qvel[6]);
 
   joint_state_pub_->publish(msg);
 }

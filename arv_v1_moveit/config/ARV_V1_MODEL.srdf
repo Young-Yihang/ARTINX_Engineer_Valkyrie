@@ -69,4 +69,5 @@
     <disable_collisions link1="link5" link2="link_gripper2" reason="Never"/>
     <disable_collisions link1="link6" link2="link_gripper1" reason="Adjacent"/>
     <disable_collisions link1="link6" link2="link_gripper2" reason="Adjacent"/>
+    <disable_collisions link1="link_gripper1" link2="link_gripper2" reason="Adjacent"/>
 </robot>
