@@ -1,16 +1,16 @@
 moveit_setup_assistant_config:
   urdf:
-    package: ARV_V1_MODEL
-    relative_path: urdf/ARV_V1_MODEL.urdf
+    package: arv_v1_model
+    relative_path: urdf/arv_v1.urdf
   srdf:
     relative_path: config/ARV_V1_MODEL.srdf
   package_settings:
     author_name: WuHuan
     author_email: 3119801747@qq.com
-    generated_timestamp: 1761500269
+    generated_timestamp: 1771784519
   control_xacro:
     command:
-      - position
+      - effort
     state:
       - position
       - velocity
@@ -20,7 +20,7 @@ moveit_setup_assistant_config:
       - control_xacro
   control_xacro:
     command:
-      - position
+      - effort
     state:
       - position
       - velocity
