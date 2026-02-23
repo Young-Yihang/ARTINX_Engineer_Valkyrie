@@ -23,6 +23,7 @@
 #include "kalman_filter.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
+#include "arv_v1_interfaces/srv/gripper_control.hpp"
 
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GoalHandleFJT = rclcpp_action::ServerGoalHandle<FollowJointTrajectory>;
@@ -199,6 +200,13 @@ public:  // 构造函数log
 
     RCLCPP_INFO(this->get_logger(), "[OK] Torque publisher created: /effort_controller/commands");
 
+    // ========== 创建夹爪控制服务 ==========
+    gripper_service_ = this->create_service<arv_v1_interfaces::srv::GripperControl>(
+        "/gripper_control",
+        std::bind(&TorqueControllerActionServer::gripperControlCallback, this,
+                  std::placeholders::_1, std::placeholders::_2));
+    RCLCPP_INFO(this->get_logger(), "[OK] Gripper control service created: /gripper_control");
+
     // ========== 创建轨迹转发发布者 ==========
     // 用于将接收到的轨迹转发给 trajectory_manager_node 进行保存
     trajectory_forward_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
@@ -262,6 +270,12 @@ private:
   double max_velocity_sanity_ = 20.0;
   double max_position_error_ = 0.8;
 
+  // 夹爪控制
+  std::mutex gripper_mutex_;
+  double gripper_torque_cmd_ = 0.0;     // 当前夹爪力矩指令
+  double gripper_max_torque_ = 5.0;     // 夹爪力矩限幅
+  rclcpp::Service<arv_v1_interfaces::srv::GripperControl>::SharedPtr gripper_service_;
+
   // Action 回调函数
   rclcpp_action::GoalResponse handleGoal(const rclcpp_action::GoalUUID &uuid,
                                          std::shared_ptr<const FollowJointTrajectory::Goal> goal);
@@ -278,7 +292,7 @@ private:
 
     // 1. Send zero torque immediately
     std_msgs::msg::Float64MultiArray safe_msg;
-    safe_msg.data.resize(6, 0.0);
+    safe_msg.data.resize(7, 0.0);
     torque_pub_->publish(safe_msg);
 
     // 2. Execute complete recovery ceremony
@@ -328,12 +342,14 @@ private:
         dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
 
         std_msgs::msg::Float64MultiArray torque_msg;
-        torque_msg.data.resize(6);
+        torque_msg.data.resize(7);
         for (size_t i = 0; i < 6; i++) {
           double limit =
               (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
           torque_msg.data[i] = std::clamp(tau_gravity(i), -limit, limit);
         }
+        // 夹爪: 紧急停止时设为0
+        torque_msg.data[6] = 0.0;
         torque_pub_->publish(torque_msg);
       }
     }
@@ -360,6 +376,18 @@ private:
   // 参数变化回调函数
   rcl_interfaces::msg::SetParametersResult parametersCallback(
       const std::vector<rclcpp::Parameter> &parameters);
+
+  // 夹爪控制服务回调
+  void gripperControlCallback(
+      const std::shared_ptr<arv_v1_interfaces::srv::GripperControl::Request> request,
+      std::shared_ptr<arv_v1_interfaces::srv::GripperControl::Response> response) {
+    std::lock_guard<std::mutex> lock(gripper_mutex_);
+    double clamped = std::clamp(request->torque, -gripper_max_torque_, gripper_max_torque_);
+    gripper_torque_cmd_ = clamped;
+    response->success = true;
+    response->message = "Gripper torque set to " + std::to_string(clamped) + " Nm";
+    RCLCPP_INFO(this->get_logger(), "[GRIPPER] Torque command: %.3f Nm", clamped);
+  }
 };
 
 rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
@@ -935,7 +963,7 @@ void TorqueControllerActionServer::controlLoop() {
       }
 
       std_msgs::msg::Float64MultiArray safe_msg;
-      safe_msg.data.resize(6);
+      safe_msg.data.resize(7);
       if (can_compute_gravity) {
         // 使用重力补偿维持位置
         for (size_t i = 0; i < 6; i++) {
@@ -949,9 +977,14 @@ void TorqueControllerActionServer::controlLoop() {
                              "[SAFETY] Timeout: Publishing gravity compensation only");
       } else {
         // 无法计算，发送零力矩
-        for (size_t i = 0; i < 6; i++) {
+        for (size_t i = 0; i < 7; i++) {
           safe_msg.data[i] = 0.0;
         }
+      }
+      // 夹爪: timeout时保持当前力矩指令
+      {
+        std::lock_guard<std::mutex> glock(gripper_mutex_);
+        safe_msg.data[6] = gripper_torque_cmd_;
       }
       torque_pub_->publish(safe_msg);
 
@@ -986,7 +1019,7 @@ void TorqueControllerActionServer::controlLoop() {
 
     // 发布力矩：重力补偿 + PD 控制
     std_msgs::msg::Float64MultiArray torque_msg;
-    torque_msg.data.resize(6);
+    torque_msg.data.resize(7);
     for (size_t i = 0; i < 6; i++) {
       torque_msg.data[i] = tau_gravity(i) + tau_pd(i);
 
@@ -1008,6 +1041,11 @@ void TorqueControllerActionServer::controlLoop() {
       } else if (torque_msg.data[i] < -joint_limit) {
         torque_msg.data[i] = -joint_limit;
       }
+    }
+    // 夹爪: 透传当前力矩指令
+    {
+      std::lock_guard<std::mutex> glock(gripper_mutex_);
+      torque_msg.data[6] = gripper_torque_cmd_;
     }
     torque_pub_->publish(torque_msg);
 
@@ -1060,7 +1098,7 @@ void TorqueControllerActionServer::controlLoop() {
 
     // 发布力矩：重力补偿 + PD 控制
     std_msgs::msg::Float64MultiArray hold_torque;
-    hold_torque.data.resize(6);
+    hold_torque.data.resize(7);
     for (size_t i = 0; i < 6; i++) {
       hold_torque.data[i] = tau_gravity(i) + tau_pd(i);
 
@@ -1074,6 +1112,11 @@ void TorqueControllerActionServer::controlLoop() {
       double joint_limit =
           (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
       hold_torque.data[i] = std::max(-joint_limit, std::min(joint_limit, hold_torque.data[i]));
+    }
+    // 夹爪: 透传当前力矩指令
+    {
+      std::lock_guard<std::mutex> glock(gripper_mutex_);
+      hold_torque.data[6] = gripper_torque_cmd_;
     }
     torque_pub_->publish(hold_torque);
 
@@ -1133,7 +1176,7 @@ void TorqueControllerActionServer::controlLoop() {
 
   // 发送力矩到 ros2_control effort_controller
   std_msgs::msg::Float64MultiArray torque_msg;
-  torque_msg.data.resize(6);
+  torque_msg.data.resize(7);
   for (size_t i = 0; i < 6; i++) {
     // ========== SAFETY: NaN/Inf check before publishing ==========
     if (!std::isfinite(tau_total(i))) {
@@ -1155,6 +1198,11 @@ void TorqueControllerActionServer::controlLoop() {
                            "[SAFETY] Joint %zu total torque saturated: %.2f -> %.2f Nm", i,
                            tau_total(i), torque_msg.data[i]);
     }
+  }
+  // 夹爪: 透传当前力矩指令
+  {
+    std::lock_guard<std::mutex> glock(gripper_mutex_);
+    torque_msg.data[6] = gripper_torque_cmd_;
   }
   torque_pub_->publish(torque_msg);
 

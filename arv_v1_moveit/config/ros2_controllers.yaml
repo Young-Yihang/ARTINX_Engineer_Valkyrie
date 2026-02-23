@@ -20,4 +20,5 @@ effort_controller:
       - joint_4
       - joint_5
       - joint_6
+      - joint_gripper1
     interface_name: effort  # 使用力矩接口

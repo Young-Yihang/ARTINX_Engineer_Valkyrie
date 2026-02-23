@@ -16,24 +16,18 @@ namespace SerialProtocol {
 constexpr uint8_t SOF = 0xA5;
 constexpr uint16_t CMD_TORQUE_CONTROL = 0x0002;
 constexpr uint16_t CMD_JOINT_FEEDBACK = 0x0001;
-constexpr uint16_t CMD_GRIPPER_CONTROL = 0x0103;
-
-constexpr size_t NUM_JOINTS = 6;
+constexpr size_t NUM_ARM_JOINTS = 6;    // 机械臂关节数 (KDL 动力学链)
+constexpr size_t NUM_ALL_JOINTS = 7;    // 含夹爪的总关节数
 
 // Data Structures (Logical)
 struct TorqueCommand {
-  std::array<float, NUM_JOINTS> torques;
-};
-
-struct GripperCommand {
-  float position;  // 0.0 (close) - 1.0 (open)
-  float force;     // 0.0 - 1.0
+  std::array<float, NUM_ALL_JOINTS> torques;  // [J1..J6, Gripper]
 };
 
 struct JointFeedback {
-  std::array<float, NUM_JOINTS> positions;
-  std::array<float, NUM_JOINTS> velocities;
-  std::array<uint32_t, NUM_JOINTS> islive;  // 每关节存活状态标志（暂不使用）
+  std::array<float, NUM_ALL_JOINTS> positions;
+  std::array<float, NUM_ALL_JOINTS> velocities;
+  std::array<uint32_t, NUM_ALL_JOINTS> islive;  // 每关节存活状态标志（暂不使用）
 };
 
 // CRC Helpers - delegate to centralized Crc implementation
@@ -130,30 +124,7 @@ inline std::vector<uint8_t> buildTorquePacket(const TorqueCommand &cmd) {
   return packet;
 }
 
-inline std::vector<uint8_t> buildGripperPacket(const GripperCommand &cmd) {
-  std::vector<uint8_t> packet;
-  packet.reserve(32);
-
-  packet.push_back(SOF);
-  packet.push_back(0);
-  packet.push_back(0);
-  packet.push_back(0);
-
-  append_uint16(packet, CMD_GRIPPER_CONTROL);
-  append_uint16(packet, 0x0000);
-  append_float(packet, cmd.position);
-  append_float(packet, cmd.force);
-
-  uint16_t data_len = packet.size() - 4;
-  packet[1] = static_cast<uint8_t>(data_len & 0xFF);
-  packet[2] = static_cast<uint8_t>((data_len >> 8) & 0xFF);
-  packet[3] = Get_CRC8_Check_Sum(packet.data(), 3, 0xFF);
-
-  uint16_t crc16 = Get_CRC16_Check_Sum(packet.data(), packet.size(), 0xFFFF);
-  append_uint16(packet, crc16);
-
-  return packet;
-}
+// buildGripperPacket 已废弃: 夹爪作为第7关节统一在 buildTorquePacket 中发送
 
 // CRC tables are centralized in Crc.{hpp,cpp}; avoid duplicating them here to ensure a single
 // source of truth.

@@ -1,0 +1,6 @@
+# 夹爪力矩控制
+# 正值=夹紧方向, 负值=松开方向, 0=停止
+float64 torque
+---
+bool success
+string message

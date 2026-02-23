@@ -19,6 +19,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # cartesian_executor_node 服务
   "srv/cartesian_executor/MoveToCartesianRPY.srv"
   "srv/cartesian_executor/StopCartesianMotion.srv"
+  # gripper 控制服务
+  "srv/GripperControl.srv"
   DEPENDENCIES trajectory_msgs service_msgs geometry_msgs
 )
 

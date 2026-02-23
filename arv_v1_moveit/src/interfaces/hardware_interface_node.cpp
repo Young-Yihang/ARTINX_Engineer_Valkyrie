@@ -14,7 +14,7 @@
 class HardwareInterfaceNode : public rclcpp::Node {
 public:
   HardwareInterfaceNode()
-      : Node("hardware_interface_node"), num_joints_(6), running_(false), simulation_mode_(false) {
+      : Node("hardware_interface_node"), num_joints_(7), running_(false), simulation_mode_(false) {
     // 1. 声明参数
     this->declare_parameter("serial_port", "/dev/ttyACM0");
     this->declare_parameter("baud_rate", 921600);
@@ -117,12 +117,12 @@ private:
 
   // 数据缓存
   std::mutex data_mutex_;
-  float current_positions_[6] = {0};
-  float current_velocities_[6] = {0};
+  float current_positions_[7] = {0};
+  float current_velocities_[7] = {0};
 
   // 力矩缓存（解耦架构）
   std::mutex torque_cache_mutex_;
-  float cached_torques_[6] = {0};
+  float cached_torques_[7] = {0};
   rclcpp::Time last_torque_update_;
   bool torque_data_valid_ = false;
 
@@ -287,7 +287,7 @@ private:
       return;  // 串口未打开，等待自动重连
     }
 
-    float torques_to_send[6];
+    float torques_to_send[7];
     bool data_fresh = false;
 
     // 1. 读取缓存的力矩数据
@@ -310,19 +310,19 @@ private:
 
       // 应用 force_zero_torque 安全开关
       if (this->get_parameter("force_zero_torque").as_bool()) {
-        std::fill(torques_to_send, torques_to_send + 6, 0.0f);
+        std::fill(torques_to_send, torques_to_send + num_joints_, 0.0f);
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                              "[SAFETY] Force zero torque mode enabled - sending all zeros");
       } else if (data_fresh) {
-        std::copy(cached_torques_, cached_torques_ + 6, torques_to_send);
+        std::copy(cached_torques_, cached_torques_ + num_joints_, torques_to_send);
       } else {
-        std::fill(torques_to_send, torques_to_send + 6, 0.0f);
+        std::fill(torques_to_send, torques_to_send + num_joints_, 0.0f);
       }
     }
 
     // 2. 构建并发送SEASKY数据包
     SerialProtocol::TorqueCommand cmd;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < num_joints_; ++i) {
       cmd.torques[i] = torques_to_send[i];
     }
 
@@ -354,7 +354,7 @@ private:
     SerialProtocol::TorqueCommand cmd;
     {
       std::lock_guard<std::mutex> lock(torque_cache_mutex_);
-      for (int i = 0; i < 6; ++i) cmd.torques[i] = cached_torques_[i];
+      for (int i = 0; i < num_joints_; ++i) cmd.torques[i] = cached_torques_[i];
     }
 
     std::vector<uint8_t> packet = SerialProtocol::buildTorquePacket(cmd);
@@ -498,13 +498,13 @@ private:
     uint16_t flags = SerialProtocol::read_uint16(packet.data(), offset);  // offset becomes 8
 
     if (cmd_id == SerialProtocol::CMD_JOINT_FEEDBACK) {
-      float positions[6];
-      float velocities[6];
-      uint32_t islive[6];  // 存活状态（暂不使用）
+      float positions[7];
+      float velocities[7];
+      uint32_t islive[7];  // 存活状态（暂不使用）
 
-      // 新协议格式：每关节交替读取 Position, Speed, IsLive
-      // Payload: [Pos0, Spd0, IsLive0, Pos1, Spd1, IsLive1, ...]
-      for (int i = 0; i < 6; ++i) {
+      // 协议格式：每关节交替读取 Position, Speed, IsLive
+      // Payload: [Pos0, Spd0, IsLive0, ..., Pos6(Gripper), Spd6, IsLive6]
+      for (int i = 0; i < num_joints_; ++i) {
         positions[i] = SerialProtocol::read_float(packet.data(), offset);
         velocities[i] = SerialProtocol::read_float(packet.data(), offset);
         islive[i] = SerialProtocol::read_uint32(packet.data(), offset);  // 读取但暂不使用
@@ -514,29 +514,27 @@ private:
     }
   }
 
-  void updateAndPublishJointStates(const float positions[6], const float velocities[6]) {
+  void updateAndPublishJointStates(const float positions[7], const float velocities[7]) {
     // 1. 更新缓存
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
-      std::memcpy(current_positions_, positions, sizeof(float) * 6);
-      std::memcpy(current_velocities_, velocities, sizeof(float) * 6);
+      std::memcpy(current_positions_, positions, sizeof(float) * num_joints_);
+      std::memcpy(current_velocities_, velocities, sizeof(float) * num_joints_);
     }
 
     // 2. 发布 ROS2 消息
     auto msg = sensor_msgs::msg::JointState();
     msg.header.stamp = this->now();
-    msg.name = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"};
+    msg.name = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_gripper1"};
 
-    msg.position.resize(6);
-    msg.velocity.resize(6);
-    for (int i = 0; i < 6; ++i) {
+    msg.position.resize(num_joints_);
+    msg.velocity.resize(num_joints_);
+    for (int i = 0; i < num_joints_; ++i) {
       msg.position[i] = positions[i];
       msg.velocity[i] = velocities[i];
     }
 
     joint_state_pub_->publish(msg);
-
-    // RCLCPP_DEBUG(this->get_logger(), "[RX] Published joint states");
   }
 
   void healthCheck() {

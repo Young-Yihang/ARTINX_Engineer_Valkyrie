@@ -80,6 +80,7 @@
         joint_4: 1.2   
         joint_5: 7.0   
         joint_6: 1.0
+        joint_gripper1: 3.0   # 夹爪力矩限幅
 
       # Global fallback if neither config nor URDF specified
       max_torque_default: 20.0              # Nm - conservative default

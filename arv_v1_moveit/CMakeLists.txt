@@ -174,6 +174,7 @@ ament_target_dependencies(torque_controller_node
   orocos_kdl
   Eigen3
   ament_index_cpp
+  arv_v1_interfaces
 )
 
 # -------------------------------------------

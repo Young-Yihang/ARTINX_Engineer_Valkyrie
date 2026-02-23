@@ -335,6 +335,8 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
       "ctrlrange=\"-20 20\"/>\n"
       "    <motor name=\"actuator_6\" joint=\"joint_6\" gear=\"1\" ctrllimited=\"true\" "
       "ctrlrange=\"-20 20\"/>\n"
+      "    <motor name=\"actuator_gripper\" joint=\"joint_gripper1\" gear=\"1\" ctrllimited=\"true\" "
+      "ctrlrange=\"-5 5\"/>\n"
       "  </actuator>\n";
 
   size_t mujoco_end = mjcf_string.find("</mujoco>");
@@ -523,13 +525,14 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
 }
 
 void MuJoCoInterfaceNode::setInitialPose() {
-  double initial_q[6] = {0.0,    2.1746, 0.937,
-                         -1.326, 1.5028, -1.6796};  // 新臂零位，标定后按实际修改
-  for (int i = 0; i < 6; i++) {
+  double initial_q[7] = {0.0,    2.1746, 0.937,
+                         -1.326, 1.5028, -1.6796,
+                         0.0};  // 新臂零位 + 夹爪张开状态
+  for (int i = 0; i < 7; i++) {
     data_->qpos[i] = initial_q[i];
   }
   mj_forward(model_, data_);
-  RCLCPP_INFO(this->get_logger(), "[OK] Initial pose set");
+  RCLCPP_INFO(this->get_logger(), "[OK] Initial pose set (7 joints including gripper)");
 }
 
 std::string MuJoCoInterfaceNode::loadObstacleURDF(const std::string &id,
@@ -830,8 +833,9 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
 }
 
 void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-  if (msg->data.size() != 6) {
-    RCLCPP_ERROR(this->get_logger(), "[ERROR] Torque array size mismatch!");
+  if (msg->data.size() != 7) {
+    RCLCPP_ERROR(this->get_logger(), "[ERROR] Torque array size mismatch! Expected 7, got %zu",
+                msg->data.size());
     return;
   }
 
@@ -843,22 +847,22 @@ void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray:
 
   command_rx_count_++;
 
-  for (size_t i = 0; i < 6; i++) {
+  for (size_t i = 0; i < 7; i++) {
     data_->ctrl[i] = msg->data[i];
   }
 }
 
 // 数字孪生模式: 接收外部关节状态，更新MuJoCo显示
 void MuJoCoInterfaceNode::jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
-  if (msg->position.size() < 6) {
+  if (msg->position.size() < 7) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                         "[WARN] JointState size < 6, ignoring");
+                         "[WARN] JointState size < 7, ignoring");
     return;
   }
 
   std::lock_guard<std::mutex> lock(sim_mutex_);
-  // 更新 MuJoCo qpos 用于3D渲染
-  for (size_t i = 0; i < 6 && i < msg->position.size(); ++i) {
+  // 更新 MuJoCo qpos 用于3D渲染 (6轴 + 夹爪)
+  for (size_t i = 0; i < 7 && i < msg->position.size(); ++i) {
     data_->qpos[i] = msg->position[i];
   }
   // 更新前向运动学（仅用于渲染，不做物理仿真）
