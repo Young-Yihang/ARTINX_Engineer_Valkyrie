@@ -79,6 +79,7 @@ nodes=(
     "static_transform_publisher"
     "ros2_control_node"
     "controller_manager"
+    "cartesian_controller_node"
 )
 
 for node in "${nodes[@]}"; do
