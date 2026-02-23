@@ -200,9 +200,8 @@ private:
   rclcpp::TimerBase::SharedPtr health_timer_;
 
   // ========== 关节名称 ==========
-  const std::vector<std::string> joint_names_ = {"joint_1", "joint_2", "joint_3",
-                                                 "joint_4", "joint_5", "joint_6",
-                                                 "joint_gripper1"};
+  const std::vector<std::string> joint_names_ = {"joint_1", "joint_2", "joint_3",       "joint_4",
+                                                 "joint_5", "joint_6", "joint_gripper1"};
 
   // ========== 磁力吸引系统 ==========
   struct MagnetAnchor {
@@ -357,10 +356,19 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
   mujoco_end = mjcf_string.find("</mujoco>");
   mjcf_string.insert(mujoco_end, visual_mjcf);
 
-  // 碰撞组设置:
-  //   机械臂 geom  → contype=1, conaffinity=3 (只与虚拟建模组碰撞)
-  //   障碍物 geom  → contype=2, conaffinity=2 (不碰撞)
-  //   虚拟障碍物 geom  -> contype=3, conaffinity=1 （只与机械臂碰撞）
+  // 碰撞组设置 (MuJoCo规则: A与B碰撞 ⟺ (A.contype & B.conaffinity) != 0):
+  //
+  //   机械臂 geom             contype=1  conaffinity=4
+  //   URDF 视觉 mesh (有vcol) contype=0  conaffinity=0  ← 纯视觉, 不参与碰撞
+  //   静态障碍物 vcol         contype=2  conaffinity=1  ← 与机械臂碰撞 (1&1=1)
+  //   可抓取物体 vcol         contype=8  conaffinity=3  ← 与机械臂 (1&3=1) 和静态vcol (2&3=2) 碰撞
+  //   原始几何障碍物(fallback) contype=4  conaffinity=1  ← 与机械臂碰撞 (1&1=1 / 4&4=4)
+  //
+  //   碰撞矩阵:        机械臂  静态vcol  可抓取  原始障碍
+  //     机械臂           ✗      ✓        ✓      ✓
+  //     静态vcol         ✓      ✗        ✓      ✗
+  //     可抓取           ✓      ✓        ✗      ✗
+  //     原始障碍         ✓      ✗        ✗      ✗
   // 结果: 机械臂自碰 (1&2)=0 禁止; 机械臂-障碍物 (1&1)≠0 允许
   {
     size_t obs_start = mjcf_string.find("<body name=\"obstacle_");
@@ -384,8 +392,8 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
       }
     };
 
-    inject_contype(robot_part, " contype=\"1\" conaffinity=\"2\"");
-    inject_contype(obs_part, " contype=\"2\" conaffinity=\"1\"");
+    inject_contype(robot_part, " contype=\"1\" conaffinity=\"4\"");
+    inject_contype(obs_part, " contype=\"4\" conaffinity=\"1\"");
     mjcf_string = robot_part + obs_part;
   }
 
@@ -758,10 +766,13 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
           } else if (st == "sphere") {
             gs << " type=\"sphere\" size=\"" << shape["dimensions"][0].as<double>(0.05) << "\"";
           }
-          // graspable 物体需要与地面/矿框/彼此碰撞 → contype=3, conaffinity=3
-          // 静态障碍物只需与机械臂碰撞 → contype=2, conaffinity=1
+          // graspable vcol: contype=8, conaffinity=3(0b011)
+          //   响应机械臂(bit0) 和 静态障碍物vcol(bit1) → 矿核坐在矿框里、被机械臂推动
+          //   graspable 之间 8&3=0 → 互不碰撞 (多个矿核不堆叠碰撞)
+          // 静态障碍物 vcol: contype=2, conaffinity=1
+          //   仅响应机械臂(bit0) → 机械臂碰矿框, 矿框不自碰
           if (graspable) {
-            gs << " rgba=\"" << rgba << "\" contype=\"3\" conaffinity=\"3\"/>\n";
+            gs << " rgba=\"" << rgba << "\" contype=\"8\" conaffinity=\"3\"/>\n";
           } else {
             gs << " rgba=\"" << rgba << "\" contype=\"2\" conaffinity=\"1\"/>\n";
           }
