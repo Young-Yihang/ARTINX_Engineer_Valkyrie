@@ -14,7 +14,7 @@
 class HardwareInterfaceNode : public rclcpp::Node {
 public:
   HardwareInterfaceNode()
-      : Node("hardware_interface_node"), num_joints_(7), running_(false), simulation_mode_(false) {
+      : Node("hardware_interface_node"), num_joints_(SerialProtocol::NUM_ALL_JOINTS), running_(false), simulation_mode_(false) {
     // 1. 声明参数
     this->declare_parameter("serial_port", "/dev/ttyACM0");
     this->declare_parameter("baud_rate", 921600);
