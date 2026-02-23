@@ -319,6 +319,7 @@ add_executable(mission_executor_node
 target_link_libraries(mission_executor_node
   ${rclcpp_LIBRARIES}
   yaml-cpp  # For reading trajectory info
+  ncurses   # For the TUI
 )
 
 ament_target_dependencies(mission_executor_node

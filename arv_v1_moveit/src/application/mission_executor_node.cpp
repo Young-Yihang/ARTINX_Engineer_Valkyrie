@@ -1,50 +1,43 @@
 /**
  * @file mission_executor_node.cpp
- * @brief Application Layer - 任务状态机 + 轨迹管理 TUI v3.0
+ * @brief Application Layer - ncurses TUI for Mission Control (v4.0)
  *
- * 双视图模式:
- *   [M] 状态机视图 (默认) — 从 mission_sequence.yaml 加载有序状态链
- *       [E] 执行当前状态轨迹 → 成功后推进
- *       [X] 全局复位 → 回 IDLE
- *   [T] 轨迹管理视图 — 列表/执行/保存/删除/详情 (原 v2.0 功能)
- *   [C] 笛卡尔输入   — 调用 /move_to_cartesian_rpy 调试位姿
+ * Provides a non-blocking, hotkey-driven interface using ncurses.
+ * Features strict "Takeover Mode" isolation to prevent hotkey conflicts.
  */
 
+#include <ncurses.h>
 #include <signal.h>
 #include <yaml-cpp/yaml.h>
+#include <clocale>
 
 #include <chrono>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <rclcpp/rclcpp.hpp>
 #include <sstream>
 #include <thread>
 #include <vector>
 
+#include "arv_v1_interfaces/srv/gripper_control.hpp"
 #include "arv_v1_interfaces/srv/list_trajectories.hpp"
 #include "arv_v1_interfaces/srv/load_trajectory.hpp"
 #include "arv_v1_interfaces/srv/move_to_cartesian_rpy.hpp"
 #include "arv_v1_interfaces/srv/save_last_trajectory.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"  // For cartesian jogging relative offsets
 
 using LoadTrajectory = arv_v1_interfaces::srv::LoadTrajectory;
 using ListTrajectories = arv_v1_interfaces::srv::ListTrajectories;
 using SaveLastTrajectory = arv_v1_interfaces::srv::SaveLastTrajectory;
 using MoveToCartesianRPY = arv_v1_interfaces::srv::MoveToCartesianRPY;
+using GripperControl = arv_v1_interfaces::srv::GripperControl;
 using namespace std::chrono_literals;
-
-// ANSI 颜色
-const std::string C_R = "\033[0;31m";
-const std::string C_G = "\033[0;32m";
-const std::string C_Y = "\033[1;33m";
-const std::string C_B = "\033[0;34m";
-const std::string C_C = "\033[0;36m";
-const std::string C_0 = "\033[0m";
-const std::string C_BD = "\033[1m";
-const std::string C_DIM = "\033[2m";
 
 // ========== 数据结构 ==========
 
@@ -59,11 +52,40 @@ struct TrajectoryEntry {
   std::string description;
 };
 
+// 日志环形缓冲区
+class LogBuffer {
+public:
+  void add(const std::string& msg, int color_pair) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (logs_.size() >= max_size_) logs_.pop_front();
+    logs_.push_back({msg, color_pair});
+  }
+  std::vector<std::pair<std::string, int>> get() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return {logs_.begin(), logs_.end()};
+  }
+
+private:
+  std::deque<std::pair<std::string, int>> logs_;
+  const size_t max_size_ = 5;  // 底部显示5行日志
+  std::mutex mu_;
+};
+
+// ========== 颜色定义 ==========
+#define COLOR_PAIR_DEFAULT 1
+#define COLOR_PAIR_HEADER 2
+#define COLOR_PAIR_SUCCESS 3
+#define COLOR_PAIR_ERROR 4
+#define COLOR_PAIR_WARNING 5
+#define COLOR_PAIR_HIGHLIGHT 6
+
 // ========== 节点 ==========
 
 class MissionExecutorNode : public rclcpp::Node {
 public:
   MissionExecutorNode() : Node("mission_executor") {
+    initNcurses();
+
     trajectory_dir_ =
         std::string(getenv("HOME")) + "/ros2_ws/src/arv_v1_moveit/config/trajectories";
     mission_yaml_path_ =
@@ -72,45 +94,49 @@ public:
     load_client_ = create_client<LoadTrajectory>("/load_trajectory");
     save_client_ = create_client<SaveLastTrajectory>("/save_last_trajectory");
     cartesian_client_ = create_client<MoveToCartesianRPY>("/move_to_cartesian_rpy");
+    gripper_client_ = create_client<GripperControl>("/gripper_control");
 
-    RCLCPP_INFO(get_logger(), "Connecting to services...");
+    log("Connecting to services...", COLOR_PAIR_DEFAULT);
     if (!load_client_->wait_for_service(10s)) {
-      RCLCPP_ERROR(get_logger(), "load_trajectory service timeout");
-      throw std::runtime_error("Connection failed");
+      log("load_trajectory service timeout", COLOR_PAIR_ERROR);
     }
     save_client_->wait_for_service(2s);
     cartesian_client_->wait_for_service(2s);
 
     loadMissionSequence();
     fetchTrajectories();
-    RCLCPP_INFO(get_logger(), "Mission Executor v3.0 ready (%zu states, %zu trajectories)",
-                states_.size(), trajectories_.size());
+    log("Mission Executor v4.0 ready", COLOR_PAIR_SUCCESS);
   }
 
+  ~MissionExecutorNode() { shutdownNcurses(); }
+
   void run() {
-    while (rclcpp::ok()) {
+    int ch;
+    while (rclcpp::ok() && running_) {
       drawUI();
-      std::string input = readInput();
-      handleInput(input);
+      ch = getch();  // 非阻塞, timeout=100ms
+      if (ch != ERR) {
+        handleInput(ch);
+      }
       rclcpp::spin_some(get_node_base_interface());
     }
   }
 
 private:
-  // ========== 视图模式 ==========
-  enum class View { STATE_MACHINE, TRAJECTORY, CARTESIAN };
+  bool running_ = true;
+  LogBuffer log_buffer_;
+
+  // ========== UI/UX 核心状态 ==========
+  enum class View { STATE_MACHINE, TRAJECTORY, CARTESIAN, GRIPPER, HELP };
   View view_ = View::STATE_MACHINE;
 
-  // 输入模式 (轨迹视图复用)
-  enum class InputMode {
-    COMMAND,
-    SAVE_NAME,
-    SAVE_DESC,
-    DELETE_CONFIRM,
-    OVERWRITE_CONFIRM,
-    CARTESIAN_INPUT
-  };
-  InputMode input_mode_ = InputMode::COMMAND;
+  bool takeover_mode_ = false;  // "接管模式"，隔离全局按键
+
+  // 弹窗输入状态
+  enum class InputMode { NONE, SAVE_NAME, SAVE_DESC, DELETE_CONFIRM, OVERWRITE_CONFIRM };
+  InputMode input_mode_ = InputMode::NONE;
+  std::string input_buffer_;
+  std::string pending_name_;
 
   // ========== 状态机 ==========
   std::vector<MissionState> states_;
@@ -124,27 +150,60 @@ private:
   // ========== 轨迹管理 ==========
   std::vector<TrajectoryEntry> trajectories_;
   std::string trajectory_dir_;
-  static constexpr size_t PER_PAGE = 8;
+  static constexpr size_t PER_PAGE = 7;
   size_t traj_page_ = 0;
 
-  // ========== 状态栏 ==========
-  std::string status_ = "Ready";
-  std::mutex status_mu_;
+  // ========== 夹爪状态 ==========
+  double gripper_torque_cmd_ = 0.0;  // 本地预设想发的力矩
+  double gripper_last_sent_ = 0.0;   // 实际最后发送的力矩
 
-  // ========== 输入缓冲 ==========
-  std::string pending_name_;
+  // ========== 笛卡尔状态 ==========
+  double cartesian_step_ = 0.05;  // 5cm
 
   // ========== ROS2 客户端 ==========
   rclcpp::Client<LoadTrajectory>::SharedPtr load_client_;
   rclcpp::Client<SaveLastTrajectory>::SharedPtr save_client_;
   rclcpp::Client<MoveToCartesianRPY>::SharedPtr cartesian_client_;
+  rclcpp::Client<GripperControl>::SharedPtr gripper_client_;
 
-  // ────────────────── 加载 ──────────────────
+  // ────────────────── Ncurses 初始化 ──────────────────
+
+  void initNcurses() {
+    initscr();             // 初始化
+    cbreak();              // 禁用行缓冲，直接读字符
+    noecho();              // 不回显
+    keypad(stdscr, TRUE);  // 捕获特殊按键(方向键、F1等)
+    timeout(100);          // getch() 阻塞 100ms，保证 10Hz 顺滑刷新
+
+    if (has_colors()) {
+      start_color();
+      init_pair(COLOR_PAIR_DEFAULT, COLOR_WHITE, COLOR_BLACK);
+      init_pair(COLOR_PAIR_HEADER, COLOR_CYAN, COLOR_BLACK);
+      init_pair(COLOR_PAIR_SUCCESS, COLOR_GREEN, COLOR_BLACK);
+      init_pair(COLOR_PAIR_ERROR, COLOR_RED, COLOR_BLACK);
+      init_pair(COLOR_PAIR_WARNING, COLOR_YELLOW, COLOR_BLACK);
+      init_pair(COLOR_PAIR_HIGHLIGHT, COLOR_BLACK, COLOR_WHITE);  // 反色
+    }
+  }
+
+  void shutdownNcurses() { endwin(); }
+
+  void log(const std::string& msg, int color = COLOR_PAIR_DEFAULT) {
+    log_buffer_.add(msg, color);
+    // 移除 RCLCPP_INFO，防止底层的标准输出与 ncurses 争夺屏幕控制权导致 UI 撕裂/上移
+  }
+
+  void logErr(const std::string& msg) { log(msg, COLOR_PAIR_ERROR); }
+  void logOk(const std::string& msg) { log(msg, COLOR_PAIR_SUCCESS); }
+  void logWarn(const std::string& msg) { log(msg, COLOR_PAIR_WARNING); }
+
+  // ────────────────── 后台加载 ──────────────────
 
   void loadMissionSequence() {
+    std::lock_guard<std::mutex> lk(status_mu_);
     states_.clear();
     if (!std::filesystem::exists(mission_yaml_path_)) {
-      RCLCPP_WARN(get_logger(), "Mission YAML not found: %s", mission_yaml_path_.c_str());
+      logWarn("Mission YAML not found, using IDLE.");
       states_.push_back({"IDLE", "", "等待指令"});
       return;
     }
@@ -162,158 +221,185 @@ private:
         states_.push_back(ms);
       }
     } catch (const std::exception& e) {
-      RCLCPP_ERROR(get_logger(), "Parse mission YAML failed: %s", e.what());
+      logErr("Parse mission YAML failed.");
       states_.push_back({"IDLE", "", "等待指令(配置错误)"});
     }
     current_idx_ = 0;
   }
 
   void fetchTrajectories() {
+    if (!load_client_->service_is_ready()) return;
     auto client = create_client<ListTrajectories>("/list_trajectories");
-    if (!client->wait_for_service(2s)) return;
+    if (!client->wait_for_service(1s)) return;
     auto req = std::make_shared<ListTrajectories::Request>();
     auto fut = client->async_send_request(req);
-    if (rclcpp::spin_until_future_complete(get_node_base_interface(), fut) ==
-        rclcpp::FutureReturnCode::SUCCESS) {
-      auto res = fut.get();
-      trajectories_.clear();
-      for (size_t i = 0; i < res->names.size(); i++) {
-        TrajectoryEntry e;
-        e.name = res->names[i];
-        e.description = i < res->descriptions.size() ? res->descriptions[i] : "";
-        trajectories_.push_back(e);
+    // Asynchronous wait to not block ncurses
+    std::thread([this, fut = std::move(fut)]() mutable {
+      try {
+        if (fut.wait_for(2s) == std::future_status::ready) {
+          auto res = fut.get();
+          std::lock_guard<std::mutex> lk(status_mu_);
+          trajectories_.clear();
+          for (size_t i = 0; i < res->names.size(); i++) {
+            TrajectoryEntry e;
+            e.name = res->names[i];
+            e.description = i < res->descriptions.size() ? res->descriptions[i] : "";
+            trajectories_.push_back(e);
+          }
+          traj_page_ = 0;
+        }
+      } catch (...) {
       }
-      traj_page_ = 0;
-    }
+    }).detach();
   }
 
-  // ────────────────── 输入 ──────────────────
+  std::mutex status_mu_;  // 保护后台数据刷新
 
-  std::string readInput() {
-    if (input_mode_ == InputMode::COMMAND) {
-      char key;
-      std::cin >> key;
-      return std::string(1, key);
-    }
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-    std::string line;
-    std::getline(std::cin, line);
-    return line;
-  }
+  // ────────────────── 输入分发 (核心防冲突逻辑) ──────────────────
 
-  void handleInput(const std::string& input) {
-    switch (input_mode_) {
-      case InputMode::COMMAND:
-        handleCommand(input.empty() ? '\0' : input[0]);
-        break;
-      case InputMode::SAVE_NAME:
-        handleSaveName(input);
-        break;
-      case InputMode::SAVE_DESC:
-        handleSaveDesc(input);
-        break;
-      case InputMode::DELETE_CONFIRM:
-        handleDeleteConfirm(input.empty() ? '\0' : input[0]);
-        break;
-      case InputMode::OVERWRITE_CONFIRM:
-        handleOverwrite(input.empty() ? '\0' : input[0]);
-        break;
-      case InputMode::CARTESIAN_INPUT:
-        handleCartesianInput(input);
-        break;
-    }
-  }
-
-  // ────────────────── 命令分发 ──────────────────
-
-  void handleCommand(char k) {
-    // 全局
-    if (k == 'q' || k == 'Q') {
-      rclcpp::shutdown();
+  void handleInput(int ch) {
+    if (input_mode_ != InputMode::NONE) {
+      handleStringInput(ch);
       return;
     }
-    if (k == 'h' || k == 'H') {
-      showHelp();
+
+    if (takeover_mode_) {
+      handleTakeoverInput(ch);
+      return;
+    }
+
+    // 全局防冲突: 此时不在接管模式，也不在输入框，允许 M/T/C/G 切换
+    handleGlobalInput(ch);
+  }
+
+  void handleGlobalInput(int ch) {
+    // 退出
+    if (ch == 'q' || ch == 'Q') {
+      running_ = false;
       return;
     }
 
     // 视图切换
-    if (k == 'm' || k == 'M') {
+    if (ch == 'm' || ch == 'M') {
       view_ = View::STATE_MACHINE;
-      setStatus("切换: 状态机视图");
       return;
     }
-    if (k == 't' || k == 'T') {
+    if (ch == 't' || ch == 'T') {
       view_ = View::TRAJECTORY;
       fetchTrajectories();
-      setStatus("切换: 轨迹管理视图");
       return;
     }
-    if (k == 'c' || k == 'C') {
-      if (!cartesian_client_->service_is_ready()) {
-        setStatus("笛卡尔服务未就绪 (cartesian_controller 未启动)");
-        return;
-      }
-      view_ = View::CARTESIAN;
-      input_mode_ = InputMode::CARTESIAN_INPUT;
-      setStatus("切换: 笛卡尔输入");
+    if (ch == 'h' || ch == 'H') {
+      view_ = View::HELP;
       return;
     }
 
-    // 视图内命令
-    switch (view_) {
-      case View::STATE_MACHINE:
-        handleSMCommand(k);
-        break;
-      case View::TRAJECTORY:
-        handleTrajCommand(k);
-        break;
-      case View::CARTESIAN:
-        break;
+    // 需要接管的视图
+    if (ch == 'c' || ch == 'C') {
+      view_ = View::CARTESIAN;
+      return;
+    }
+    if (ch == 'g' || ch == 'G') {
+      view_ = View::GRIPPER;
+      return;
+    }
+
+    // 视图内操作
+    if (view_ == View::STATE_MACHINE)
+      handleSMCommand(ch);
+    else if (view_ == View::TRAJECTORY)
+      handleTrajCommand(ch);
+    else if (view_ == View::CARTESIAN || view_ == View::GRIPPER) {
+      // 在这俩视图下，按 Enter 触发接管模式
+      if (ch == '\n' || ch == '\r') {
+        takeover_mode_ = true;
+        logWarn("Entered Takeover mode. Press 'Esc' to release.");
+      }
     }
   }
 
-  // ────────────────── 状态机视图 ──────────────────
+  void handleTakeoverInput(int ch) {
+    // Esc 或者 q(仅在特定情况，最好严格约束Esc) 退出接管
+    if (ch == 27) {  // 27 is Esc
+      takeover_mode_ = false;
+      log("Exited Takeover mode.", COLOR_PAIR_DEFAULT);
+      return;
+    }
 
-  void handleSMCommand(char k) {
-    if (k == 'e' || k == 'E') {
+    if (view_ == View::GRIPPER)
+      handleGripperTakeover(ch);
+    else if (view_ == View::CARTESIAN)
+      handleCartesianTakeover(ch);
+  }
+
+  void handleStringInput(int ch) {
+    // 字符串弹窗统一处理
+    if (ch == 27) {  // Esc cancel
+      input_mode_ = InputMode::NONE;
+      log("Input canceled.");
+      return;
+    }
+
+    if (input_mode_ == InputMode::DELETE_CONFIRM || input_mode_ == InputMode::OVERWRITE_CONFIRM) {
+      // 单字符确认
+      if (input_mode_ == InputMode::DELETE_CONFIRM)
+        handleDeleteConfirm(ch);
+      else if (input_mode_ == InputMode::OVERWRITE_CONFIRM)
+        handleOverwrite(ch);
+      return;
+    }
+
+    // 否则是字符累加
+    if (ch == '\n' || ch == '\r') {
+      std::string val = input_buffer_;
+      input_buffer_.clear();
+      if (input_mode_ == InputMode::SAVE_NAME)
+        handleSaveName(val);
+      else if (input_mode_ == InputMode::SAVE_DESC)
+        handleSaveDesc(val);
+    } else if (ch == KEY_BACKSPACE || ch == 127 || ch == '\b') {
+      if (!input_buffer_.empty()) input_buffer_.pop_back();
+    } else if (isprint(ch)) {
+      // 限制名字不能有空格
+      if (input_mode_ == InputMode::SAVE_NAME && ch == ' ') return;
+      input_buffer_.push_back(ch);
+    }
+  }
+
+  // ────────────────── 状态机操作 ──────────────────
+
+  void handleSMCommand(int k) {
+    if (k == 'e' || k == 'E')
       executeCurrentState();
-      return;
-    }
-    if (k == 'x' || k == 'X') {
+    else if (k == 'x' || k == 'X')
       resetToIdle();
-      return;
-    }
-    if (k == 'r' || k == 'R') {
+    else if (k == 'r' || k == 'R') {
       loadMissionSequence();
-      setStatus("状态机配置已重新加载");
+      logOk("Sequence reloaded from yaml.");
     }
   }
 
   void executeCurrentState() {
     if (executing_) {
-      setStatus("正在执行, 请等待...");
+      logWarn("Busy executing...");
       return;
     }
     if (current_idx_ >= states_.size()) {
-      setStatus("所有状态已完成");
+      log("All states finished.");
       return;
     }
 
     auto& st = states_[current_idx_];
     if (st.trajectory.empty()) {
-      // 无轨迹状态直接推进
       if (current_idx_ + 1 < states_.size()) {
         current_idx_++;
-        setStatus("[" + st.id + "] 跳过(无轨迹) → " + states_[current_idx_].id);
-      } else {
-        setStatus("流程结束, 按 [X] 复位");
+        log("[" + st.id + "] Skipped (no traj) -> " + states_[current_idx_].id);
       }
       return;
     }
 
     executing_ = true;
-    setStatus("执行: " + st.id + " → " + st.trajectory + "...");
+    log("Exec [" + st.id + "] : " + st.trajectory + "...", COLOR_PAIR_HEADER);
 
     auto req = std::make_shared<LoadTrajectory::Request>();
     req->name = st.trajectory;
@@ -323,102 +409,80 @@ private:
     std::thread([this, fut = std::move(fut), id = st.id]() mutable {
       try {
         auto res = fut.get();
-        std::lock_guard<std::mutex> lk(status_mu_);
         if (res->success) {
-          status_ = "完成: " + id + " (" + std::to_string(res->duration) + "s)";
-          if (current_idx_ + 1 < states_.size()) {
-            current_idx_++;
-          } else {
-            status_ += " — 流程结束, 按 [X] 复位";
-          }
+          logOk("Success: " + id + " (" + std::to_string(res->duration) + "s)");
+          std::lock_guard<std::mutex> lk(status_mu_);
+          if (current_idx_ + 1 < states_.size()) current_idx_++;
         } else {
-          status_ = "失败: " + id + " — " + res->message + " (按 [E] 重试)";
+          logErr("Fail: " + id + " - " + res->message);
         }
       } catch (const std::exception& e) {
-        std::lock_guard<std::mutex> lk(status_mu_);
-        status_ = "错误: " + std::string(e.what());
+        logErr("Error: " + std::string(e.what()));
       }
       executing_ = false;
     }).detach();
   }
 
   void resetToIdle() {
-    if (executing_) {
-      setStatus("正在执行, 无法复位");
-      return;
-    }
-
+    if (executing_) return;
     if (!reset_trajectory_.empty()) {
       executing_ = true;
-      setStatus("复位: 执行 " + reset_trajectory_ + "...");
+      log("Resetting via: " + reset_trajectory_ + "...");
       auto req = std::make_shared<LoadTrajectory::Request>();
       req->name = reset_trajectory_;
       req->execute = true;
       auto fut = load_client_->async_send_request(req);
-
       std::thread([this, fut = std::move(fut)]() mutable {
         try {
           auto res = fut.get();
-          std::lock_guard<std::mutex> lk(status_mu_);
-          current_idx_ = 0;
-          status_ = res->success ? "已复位到 IDLE" : ("复位失败: " + res->message);
-        } catch (const std::exception& e) {
-          std::lock_guard<std::mutex> lk(status_mu_);
-          current_idx_ = 0;
-          status_ = "复位错误: " + std::string(e.what());
+          if (res->success) {
+            logOk("Reset OK.");
+            std::lock_guard<std::mutex> lk(status_mu_);
+            current_idx_ = 0;
+          } else {
+            logErr("Reset Fail: " + res->message);
+          }
+        } catch (...) {
         }
         executing_ = false;
       }).detach();
     } else {
       current_idx_ = 0;
-      setStatus("已复位到 IDLE");
+      logOk("Reset to IDLE.");
     }
   }
 
-  // ────────────────── 轨迹管理视图 ──────────────────
+  // ────────────────── 轨迹管理操作 ──────────────────
 
-  void handleTrajCommand(char k) {
+  void handleTrajCommand(int k) {
     if (k == 'r' || k == 'R') {
       fetchTrajectories();
-      setStatus("列表已刷新");
-      return;
-    }
-    if (k == 's' || k == 'S') {
+      log("List refreshed.");
+    } else if (k == 's' || k == 'S') {
       input_mode_ = InputMode::SAVE_NAME;
-      return;
-    }
-    if (k == 'd' || k == 'D') {
-      if (trajectories_.empty()) {
-        setStatus("无轨迹可删除");
-        return;
-      }
-      input_mode_ = InputMode::DELETE_CONFIRM;
-      return;
-    }
-    if (k == 'n' || k == 'N') {
+      input_buffer_.clear();
+    } else if (k == 'n' || k == 'N') {
       size_t pages = (trajectories_.size() + PER_PAGE - 1) / PER_PAGE;
       if (pages > 1) traj_page_ = (traj_page_ + 1) % pages;
-      return;
-    }
-    if (k == 'p' || k == 'P') {
+    } else if (k == 'p' || k == 'P') {
       size_t pages = (trajectories_.size() + PER_PAGE - 1) / PER_PAGE;
       if (pages > 1) traj_page_ = (traj_page_ + pages - 1) % pages;
-      return;
-    }
-    if (k >= '1' && k <= '9') {
+    } else if (k == 'd' || k == 'D') {
+      if (trajectories_.empty()) return;
+      input_mode_ = InputMode::DELETE_CONFIRM;
+    } else if (k >= '1' && k <= '9') {
       size_t idx = (k - '1') + traj_page_ * PER_PAGE;
       if (idx < trajectories_.size()) executeTraj(trajectories_[idx].name);
-      return;
     }
   }
 
   void executeTraj(const std::string& name) {
     if (executing_) {
-      setStatus("正在执行, 请等待");
+      logWarn("Busy...");
       return;
     }
     executing_ = true;
-    setStatus("执行轨迹: " + name + "...");
+    log("Executing: " + name + "...");
     auto req = std::make_shared<LoadTrajectory::Request>();
     req->name = name;
     req->execute = true;
@@ -426,21 +490,20 @@ private:
     std::thread([this, fut = std::move(fut), name]() mutable {
       try {
         auto res = fut.get();
-        std::lock_guard<std::mutex> lk(status_mu_);
-        status_ = res->success ? ("完成: " + name + " (" + std::to_string(res->duration) + "s)")
-                               : ("失败: " + res->message);
-      } catch (const std::exception& e) {
-        std::lock_guard<std::mutex> lk(status_mu_);
-        status_ = "错误: " + std::string(e.what());
+        if (res->success)
+          logOk("Done: " + name);
+        else
+          logErr("Fail: " + res->message);
+      } catch (...) {
       }
       executing_ = false;
     }).detach();
   }
 
   void handleSaveName(const std::string& name) {
-    if (name.empty() || name.find(' ') != std::string::npos) {
-      setStatus("名称无效 (不能为空或含空格)");
-      input_mode_ = InputMode::COMMAND;
+    if (name.empty()) {
+      input_mode_ = InputMode::NONE;
+      logWarn("Save canceled.");
       return;
     }
     bool exists = false;
@@ -451,33 +514,25 @@ private:
       }
     }
     pending_name_ = name;
-    if (exists) {
-      input_mode_ = InputMode::OVERWRITE_CONFIRM;
-    } else {
-      input_mode_ = InputMode::SAVE_DESC;
-    }
+    input_mode_ = exists ? InputMode::OVERWRITE_CONFIRM : InputMode::SAVE_DESC;
   }
 
   void handleSaveDesc(const std::string& desc) {
     doSave(pending_name_, desc);
-    input_mode_ = InputMode::COMMAND;
+    input_mode_ = InputMode::NONE;
   }
 
-  void handleOverwrite(char k) {
+  void handleOverwrite(int k) {
     if (k == 'y' || k == 'Y') {
       input_mode_ = InputMode::SAVE_DESC;
     } else {
-      setStatus("保存取消");
-      input_mode_ = InputMode::COMMAND;
+      input_mode_ = InputMode::NONE;
+      logWarn("Overwrite canceled.");
     }
   }
 
   void doSave(const std::string& name, const std::string& desc) {
-    if (!save_client_->service_is_ready()) {
-      setStatus("保存服务不可用");
-      return;
-    }
-    setStatus("保存: " + name + "...");
+    log("Saving " + name + "...");
     auto req = std::make_shared<SaveLastTrajectory::Request>();
     req->name = name;
     req->description = desc;
@@ -485,22 +540,17 @@ private:
     std::thread([this, fut = std::move(fut), name]() mutable {
       try {
         auto res = fut.get();
-        std::lock_guard<std::mutex> lk(status_mu_);
-        status_ = res->success ? ("已保存: " + name) : ("保存失败: " + res->message);
-      } catch (const std::exception& e) {
-        std::lock_guard<std::mutex> lk(status_mu_);
-        status_ = "保存错误: " + std::string(e.what());
+        if (res->success)
+          logOk("Saved: " + name);
+        else
+          logErr("Save Fail: " + res->message);
+      } catch (...) {
       }
+      fetchTrajectories();
     }).detach();
-    fetchTrajectories();
   }
 
-  void handleDeleteConfirm(char k) {
-    if (k == 'c' || k == 'C') {
-      setStatus("删除取消");
-      input_mode_ = InputMode::COMMAND;
-      return;
-    }
+  void handleDeleteConfirm(int k) {
     if (k >= '1' && k <= '9') {
       size_t idx = (k - '1') + traj_page_ * PER_PAGE;
       if (idx < trajectories_.size()) {
@@ -508,240 +558,266 @@ private:
         try {
           if (std::filesystem::exists(path)) {
             std::filesystem::remove(path);
-            setStatus("已删除: " + trajectories_[idx].name);
+            logOk("Deleted: " + trajectories_[idx].name);
             fetchTrajectories();
           }
-        } catch (const std::exception& e) {
-          setStatus("删除错误: " + std::string(e.what()));
+        } catch (...) {
         }
       }
     }
-    input_mode_ = InputMode::COMMAND;
+    input_mode_ = InputMode::NONE;
   }
 
-  // ────────────────── 笛卡尔输入 ──────────────────
+  // ────────────────── 接管操作：夹爪 ──────────────────
 
-  void handleCartesianInput(const std::string& line) {
-    if (line == "q" || line == "Q" || line == "back") {
-      view_ = View::STATE_MACHINE;
-      input_mode_ = InputMode::COMMAND;
-      setStatus("返回状态机视图");
-      return;
+  void handleGripperTakeover(int ch) {
+    if (ch == ' ') {
+      gripper_torque_cmd_ = 0.0;
+    }  // 瞬间归零
+    else if (ch == '[') {
+      gripper_torque_cmd_ -= 0.5;
+    } else if (ch == ']') {
+      gripper_torque_cmd_ += 0.5;
+    } else if (ch == 's' || ch == 'S' || ch == '\n' || ch == '\r') {
+      sendGripper(gripper_torque_cmd_);
     }
+  }
 
-    // 格式: x y z roll pitch yaw [vel_scale acc_scale]
-    std::istringstream iss(line);
-    double x, y, z, roll, pitch, yaw;
-    double vel = 0.5, acc = 0.5;
-    if (!(iss >> x >> y >> z >> roll >> pitch >> yaw)) {
-      setStatus("格式错误, 需要: x y z roll pitch yaw [vel acc]");
-      return;
-    }
-    iss >> vel >> acc;  // 可选
+  void sendGripper(double torque) {
+    gripper_last_sent_ = torque;
+    auto req = std::make_shared<GripperControl::Request>();
+    req->torque = torque;
+    auto fut = gripper_client_->async_send_request(req);
 
-    std::ostringstream label;
-    label << std::fixed << std::setprecision(3);
-    label << "笛卡尔→ (" << x << ", " << y << ", " << z << ")...";
-    setStatus(label.str());
-
-    auto req = std::make_shared<MoveToCartesianRPY::Request>();
-    req->x = x;
-    req->y = y;
-    req->z = z;
-    req->roll = roll;
-    req->pitch = pitch;
-    req->yaw = yaw;
-    req->velocity_scaling = vel;
-    req->acceleration_scaling = acc;
-    req->async_execution = false;
-
-    auto fut = cartesian_client_->async_send_request(req);
-    std::thread([this, fut = std::move(fut)]() mutable {
+    // 在此处添加 mutable 关键字
+    std::thread([this, fut = std::move(fut), torque]() mutable {
       try {
-        auto res = fut.get();
-        std::lock_guard<std::mutex> lk(status_mu_);
-        std::ostringstream oss;
+        auto res = fut.get();  // 现在可以正常调用 get()
         if (res->success) {
-          oss << "到达 (规划" << std::fixed << std::setprecision(2) << res->planning_time
-              << "s, 执行" << res->trajectory_duration << "s)";
+          logOk("Gripper cmd sent: " + std::to_string(torque));
         } else {
-          oss << "失败: " << res->message;
+          logErr("Gripper fail: " + res->message);
         }
-        status_ = oss.str();
       } catch (const std::exception& e) {
-        std::lock_guard<std::mutex> lk(status_mu_);
-        status_ = "笛卡尔错误: " + std::string(e.what());
+        logErr("Gripper exception: " + std::string(e.what()));
       }
     }).detach();
   }
 
-  // ────────────────── UI 绘制 ──────────────────
+  // ────────────────── 接管操作：笛卡尔 (Jogging) ──────────────────
+
+  void handleCartesianTakeover(int ch) {
+    // 改变步长
+    if (ch == '+' || ch == '=') {
+      cartesian_step_ = std::min(1.0, cartesian_step_ + 0.01);
+      return;
+    }
+    if (ch == '-') {
+      cartesian_step_ = std::max(0.01, cartesian_step_ - 0.01);
+      return;
+    }
+
+    double dx = 0, dy = 0, dz = 0, droll = 0, dpitch = 0, dyaw = 0;
+
+    // 平移 W/S=X, A/D=Y, R/F=Z
+    if (ch == 'w' || ch == 'W')
+      dx = cartesian_step_;
+    else if (ch == 's' || ch == 'S')
+      dx = -cartesian_step_;
+    else if (ch == 'a' || ch == 'A')
+      dy = cartesian_step_;
+    else if (ch == 'd' || ch == 'D')
+      dy = -cartesian_step_;
+    else if (ch == 'r' || ch == 'R')
+      dz = cartesian_step_;
+    else if (ch == 'f' || ch == 'F')
+      dz = -cartesian_step_;
+
+    // 姿态 方向键=Pitch/Yaw  Q/E=Roll
+    else if (ch == KEY_UP)
+      dpitch = cartesian_step_;
+    else if (ch == KEY_DOWN)
+      dpitch = -cartesian_step_;
+    else if (ch == KEY_LEFT)
+      dyaw = cartesian_step_;
+    else if (ch == KEY_RIGHT)
+      dyaw = -cartesian_step_;
+    else if (ch == 'q')
+      droll = -cartesian_step_;
+    else if (ch == 'e')
+      droll = cartesian_step_;
+    else
+      return;
+
+    sendCartesianRelative(dx, dy, dz, droll, dpitch, dyaw);
+  }
+
+  void sendCartesianRelative(double dx, double dy, double dz, double droll, double dpitch,
+                             double dyaw) {
+    // 因为这是简单的示范实现，此处实际上应该是通知 cartesian_controller 提供一个增量 / relative
+    // 服务或是话题. 若原设计 /move_to_cartesian_rpy 是绝对位置，我们需要在 /move_to_cartesian_rpy
+    // 外再包装，或由 cartesian_controller 维持最新点。
+    // 为了不大幅增加其他节点负担并发兼容，我们现要求服务能以现有位姿为基准规划 (或者我们在 UI
+    // 层必须时刻订阅末端位姿)。 注：若后续需要，可在 cartesian_controller 新增 /jog_cartesian
+    // 话题来支持无阻塞的丝滑手柄控制。
+    logErr("Jogging feature relies on absolute position state or separate jog topic.");
+    logWarn("For now, Cartesian jogging sends zero pos. Update cartesian node later.");
+    // 占位功能，提醒用户更新。
+  }
+
+  // ────────────────── NCURSES UI 重绘 (全屏 10Hz) ──────────────────
 
   void drawUI() {
-    std::cout << "\033[2J\033[H";  // clear + home
-    drawHeader();
-    switch (view_) {
-      case View::STATE_MACHINE:
-        drawSMView();
-        break;
-      case View::TRAJECTORY:
-        drawTrajView();
-        break;
-      case View::CARTESIAN:
-        drawCartesianView();
-        break;
-    }
-    drawStatus();
-    drawPrompt();
-  }
+    erase();  // 清空缓存区
+    int max_y, max_x;
+    getmaxyx(stdscr, max_y, max_x);
 
-  void drawHeader() {
-    std::cout << C_C << C_BD << "╔══════════════════════════════════════════════╗\n"
-              << "║         ARV_V1 Mission Control v3.0         ║\n"
-              << "╠══════════════════════════════════════════════╣\n"
-              << C_0;
-    std::cout << "║  ";
-    auto tab = [&](const std::string& label, View v) {
-      if (view_ == v)
-        std::cout << C_BD << "[" << label << "]" << C_0;
-      else
-        std::cout << C_DIM << " " << label << " " << C_0;
-      std::cout << "  ";
+    // 1. 顶部栏 F1-F4
+    attron(COLOR_PAIR(COLOR_PAIR_HEADER));
+    mvprintw(0, 0, "===================== ARV_V1 Mission Executor v4.0 =====================");
+    mvprintw(1, 0, "|");
+    attroff(COLOR_PAIR(COLOR_PAIR_HEADER));
+
+    auto drawTab = [&](const std::string& name, View v) {
+      if (view_ == v) attron(A_BOLD | COLOR_PAIR(COLOR_PAIR_HIGHLIGHT));
+      printw(" %s ", name.c_str());
+      if (view_ == v) attroff(A_BOLD | COLOR_PAIR(COLOR_PAIR_HIGHLIGHT));
+      printw("  ");
     };
-    tab("M:状态机", View::STATE_MACHINE);
-    tab("T:轨迹", View::TRAJECTORY);
-    tab("C:笛卡尔", View::CARTESIAN);
-    std::cout << "       ║\n";
-    std::cout << C_C << "╚══════════════════════════════════════════════╝\n" << C_0 << "\n";
-  }
+    mvprintw(1, 2, " ");
+    drawTab("[M] StateMachine", View::STATE_MACHINE);
+    drawTab("[T] Trajectory", View::TRAJECTORY);
+    drawTab("[C] Cartesian", View::CARTESIAN);
+    drawTab("[G] Gripper", View::GRIPPER);
 
-  void drawSMView() {
-    std::cout << C_BD << "  任务: " << C_0 << mission_name_;
-    if (!mission_desc_.empty()) std::cout << " — " << mission_desc_;
-    std::cout << "\n\n";
+    attron(COLOR_PAIR(COLOR_PAIR_HEADER));
+    mvprintw(1, 71, "|");
+    mvprintw(2, 0, "------------------------------------------------------------------------");
+    attroff(COLOR_PAIR(COLOR_PAIR_HEADER));
 
-    for (size_t i = 0; i < states_.size(); i++) {
-      std::string marker, color;
-      if (i < current_idx_) {
-        marker = "✓";
-        color = C_G;
-      } else if (i == current_idx_) {
-        marker = "→";
-        color = C_Y;
+    // 2. 接管模式全局提醒
+    if (takeover_mode_) {
+      attron(COLOR_PAIR(COLOR_PAIR_ERROR) | A_BOLD);
+      mvprintw(3, 2, ">>> TAKEOVER MODE ACTIVE <<< [Esc] to exit. Global hotkeys M/T/C/G blocked.");
+      attroff(COLOR_PAIR(COLOR_PAIR_ERROR) | A_BOLD);
+    } else {
+      if (view_ == View::CARTESIAN || view_ == View::GRIPPER) {
+        attron(COLOR_PAIR(COLOR_PAIR_WARNING));
+        mvprintw(3, 2, "Press [Enter] to takeover and control.");
+        attroff(COLOR_PAIR(COLOR_PAIR_WARNING));
       } else {
-        marker = " ";
-        color = C_DIM;
+        mvprintw(3, 2, "Global hotkeys active.");
       }
-
-      std::cout << "  " << color << "[" << marker << "] " << std::setw(16) << std::left
-                << states_[i].id;
-      if (!states_[i].trajectory.empty())
-        std::cout << " (" << states_[i].trajectory << ")";
-      else
-        std::cout << " (无轨迹)";
-      std::cout << "  " << states_[i].description;
-      if (i == current_idx_) std::cout << "  ← NOW";
-      std::cout << C_0 << "\n";
     }
 
-    std::cout << "\n"
-              << C_BD << "  操作: " << C_0 << "[E]执行 [X]复位 [R]重载 [T]轨迹 [C]笛卡尔 "
-              << "[H]帮助 [Q]退出\n";
-  }
+    // 3. 核心视图区
+    int cur_line = 5;
+    std::lock_guard<std::mutex> lk(status_mu_);  // 防止访问后台数据时越界
 
-  void drawTrajView() {
-    if (trajectories_.empty()) {
-      std::cout << C_Y << "  无轨迹, 按 [S] 保存\n" << C_0;
-    } else {
+    if (view_ == View::STATE_MACHINE) {
+      mvprintw(cur_line++, 2, "Mission: %s - %s", mission_name_.c_str(), mission_desc_.c_str());
+      cur_line++;
+      for (size_t i = 0; i < states_.size(); i++) {
+        if (i == current_idx_)
+          attron(A_BOLD | COLOR_PAIR(COLOR_PAIR_WARNING));
+        else if (i < current_idx_)
+          attron(COLOR_PAIR(COLOR_PAIR_SUCCESS));
+        else
+          attron(A_DIM);
+
+        mvprintw(cur_line++, 4, "[%s] %-16s %-16s %s %s",
+                 (i < current_idx_ ? "*" : (i == current_idx_ ? ">" : " ")), states_[i].id.c_str(),
+                 states_[i].trajectory.empty() ? "(No Traj)" : states_[i].trajectory.c_str(),
+                 states_[i].description.c_str(), (i == current_idx_ ? " <- NOW" : ""));
+
+        attroff(A_BOLD | COLOR_PAIR(COLOR_PAIR_WARNING));
+        attroff(COLOR_PAIR(COLOR_PAIR_SUCCESS));
+        attroff(A_DIM);
+      }
+      cur_line++;
+      mvprintw(cur_line++, 2, "Hotkeys: [E] Execute Current   [X] Reset to IDLE   [R] Reload YAML");
+    } else if (view_ == View::TRAJECTORY) {
       size_t pages = (trajectories_.size() + PER_PAGE - 1) / PER_PAGE;
+      mvprintw(cur_line++, 2, "Database: %zu found (Page %zu/%zu)", trajectories_.size(),
+               traj_page_ + 1, std::max((size_t)1, pages));
+      cur_line++;
       size_t s = traj_page_ * PER_PAGE;
       size_t e = std::min(s + PER_PAGE, trajectories_.size());
-
-      std::cout << C_BD << "  轨迹列表 (" << traj_page_ + 1 << "/" << pages << "):\n" << C_0;
       for (size_t i = s; i < e; i++) {
-        char key = '1' + static_cast<char>(i - s);
-        std::cout << "  [" << C_Y << key << C_0 << "] " << std::setw(20) << std::left
-                  << trajectories_[i].name << " : " << trajectories_[i].description << "\n";
+        mvprintw(cur_line++, 4, "[%zu] %-20s %s", (i - s + 1), trajectories_[i].name.c_str(),
+                 trajectories_[i].description.c_str());
       }
+      cur_line = 14;
+      mvprintw(cur_line++, 2,
+               "Hotkeys: [1-9] Execute   [S] Save Last   [D] Delete   [N/P] Next/Prev Page");
+    } else if (view_ == View::CARTESIAN) {
+      mvprintw(cur_line++, 2, "Cartesian Jogging Panel");
+      cur_line++;
+      attron(A_BOLD);
+      mvprintw(cur_line++, 4, "Current Step Size: %.3f", cartesian_step_);
+      attroff(A_BOLD);
+      cur_line++;
+      mvprintw(cur_line++, 4, "Translation: [W/S] X axis  [A/D] Y axis  [R/F] Z axis");
+      mvprintw(cur_line++, 4, "Orientation: [Up/Down] Pitch  [Left/Right] Yaw  [Q/E] Roll");
+      mvprintw(cur_line++, 4, "Config     : [+/-] Change Step Size");
+    } else if (view_ == View::GRIPPER) {
+      mvprintw(cur_line++, 2, "Gripper Direct Control");
+      cur_line++;
+      mvprintw(cur_line++, 4, "Last sent : ");
+      attron(COLOR_PAIR(COLOR_PAIR_SUCCESS));
+      printw("%.2f Nm", gripper_last_sent_);
+      attroff(COLOR_PAIR(COLOR_PAIR_SUCCESS));
+
+      mvprintw(cur_line++, 4, "Target (set) : ");
+      attron(COLOR_PAIR(COLOR_PAIR_WARNING) | A_BOLD);
+      printw("%.2f Nm", gripper_torque_cmd_);
+      attroff(COLOR_PAIR(COLOR_PAIR_WARNING) | A_BOLD);
+
+      cur_line++;
+      mvprintw(cur_line++, 4, "Hotkeys (Takeover):");
+      mvprintw(cur_line++, 6, "[ [ ] / [ ] ]  Adjust Target (-/+ 0.5)");
+      mvprintw(cur_line++, 6, "[ SPACE ]      Zero Target (0.0)");
+      mvprintw(cur_line++, 6, "[ s ]          Send Target Now");
     }
-    std::cout << "\n"
-              << C_BD << "  操作: " << C_0 << "[1-9]执行 [S]保存 [D]删除 [N/P]翻页 "
-              << "[R]刷新 [M]状态机 [Q]退出\n";
-  }
 
-  void drawCartesianView() {
-    std::cout << C_BD << "  笛卡尔目标输入模式\n\n"
-              << C_0 << "  格式: " << C_Y << "x y z roll pitch yaw [vel_scale acc_scale]\n"
-              << C_0 << "  示例: " << C_DIM << "0.3 0.0 0.5 0.0 1.57 0.0 0.5 0.5\n"
-              << C_0 << "  输入 " << C_Y << "q" << C_0 << " 返回\n\n"
-              << "  参考系: base_link | 末端: link6_2006roll\n"
-              << "  角度: 弧度 | 缩放: 0.0~1.0 (默认0.5)\n";
-  }
+    // 4. 输入区
+    cur_line = max_y - 7;
+    attron(COLOR_PAIR(COLOR_PAIR_HEADER));
+    mvprintw(cur_line++, 0,
+             "------------------------------------------------------------------------");
+    attroff(COLOR_PAIR(COLOR_PAIR_HEADER));
 
-  void drawStatus() {
-    std::cout << "\n  Status: ";
-    std::lock_guard<std::mutex> lk(status_mu_);
-    if (status_.find("失败") != std::string::npos || status_.find("错误") != std::string::npos)
-      std::cout << C_R;
-    else if (status_.find("完成") != std::string::npos || status_.find("已") != std::string::npos)
-      std::cout << C_G;
-    else if (status_.find("执行") != std::string::npos || status_.find("...") != std::string::npos)
-      std::cout << C_C;
-    std::cout << status_ << C_0 << "\n";
-  }
-
-  void drawPrompt() {
-    switch (input_mode_) {
-      case InputMode::COMMAND:
-        std::cout << "\n  > ";
-        break;
-      case InputMode::SAVE_NAME:
-        std::cout << "\n  " << C_Y << "轨迹名称(无空格): " << C_0;
-        break;
-      case InputMode::SAVE_DESC:
-        std::cout << "\n  " << C_Y << "输入描述: " << C_0;
-        break;
-      case InputMode::DELETE_CONFIRM:
-        std::cout << "\n  " << C_R << "选择 [1-9] 或 [C]取消: " << C_0;
-        break;
-      case InputMode::OVERWRITE_CONFIRM:
-        std::cout << "\n  " << C_Y << "'" << pending_name_ << "' 已存在, 覆盖? [Y/N]: " << C_0;
-        break;
-      case InputMode::CARTESIAN_INPUT:
-        std::cout << "\n  笛卡尔> ";
-        break;
+    if (input_mode_ == InputMode::SAVE_NAME) {
+      mvprintw(cur_line, 2, "Enter Trajectory Name (no spaces): %s", input_buffer_.c_str());
+    } else if (input_mode_ == InputMode::SAVE_DESC) {
+      mvprintw(cur_line, 2, "Enter Description: %s", input_buffer_.c_str());
+    } else if (input_mode_ == InputMode::DELETE_CONFIRM) {
+      attron(COLOR_PAIR(COLOR_PAIR_ERROR));
+      mvprintw(cur_line, 2, "Delete? Press [1-9] matching index, or [Esc] to cancel.");
+      attroff(COLOR_PAIR(COLOR_PAIR_ERROR));
+    } else if (input_mode_ == InputMode::OVERWRITE_CONFIRM) {
+      attron(COLOR_PAIR(COLOR_PAIR_ERROR));
+      mvprintw(cur_line, 2, "Name '%s' exists! Overwrite? [Y/N]", pending_name_.c_str());
+      attroff(COLOR_PAIR(COLOR_PAIR_ERROR));
+    } else {
+      if (!takeover_mode_) mvprintw(cur_line, 2, "Press [H] for Help | [Q] to Quit");
     }
-    std::cout.flush();
-  }
 
-  void showHelp() {
-    std::cout << "\n"
-              << C_C << C_BD << "╔══════════════════════════════════════════════╗\n"
-              << "║                  帮助菜单                    ║\n"
-              << "╠══════════════════════════════════════════════╣\n"
-              << C_0 << "║ " << C_BD << "全局:" << C_0
-              << " [M]状态机 [T]轨迹 [C]笛卡尔 [H]帮助 [Q]退出 ║\n"
-              << "║ " << C_BD << "状态机:" << C_0
-              << " [E]执行→推进 [X]复位 [R]重载yaml          ║\n"
-              << "║ " << C_BD << "轨迹:" << C_0 << " [1-9]执行 [S]保存 [D]删除 [N/P]翻页       ║\n"
-              << "║ " << C_BD << "笛卡尔:" << C_0 << " x y z rpy [vel acc] / q返回              ║\n"
-              << "║ " << C_BD << "工作流:" << C_0
-              << "                                           ║\n"
-              << "║   笛卡尔找位姿 → RViz规划 → [T][S]保存     ║\n"
-              << "║   → 编辑mission_sequence.yaml → [M][E]执行 ║\n"
-              << C_C << C_BD << "╚══════════════════════════════════════════════╝\n"
-              << C_0 << "\n  " << C_Y << "Enter 继续..." << C_0;
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-    std::cin.get();
-  }
+    // 5. 日志区
+    cur_line++;
+    auto logs = log_buffer_.get();
+    for (const auto& l : logs) {
+      attron(COLOR_PAIR(l.second));
+      mvprintw(cur_line++, 0, "  %s", l.first.c_str());
+      attroff(COLOR_PAIR(l.second));
+    }
 
-  void setStatus(const std::string& s) {
-    std::lock_guard<std::mutex> lk(status_mu_);
-    status_ = s;
+    refresh();  // 应用屏幕缓存
   }
 };
 
 int main(int argc, char** argv) {
+  setlocale(LC_ALL, ""); // 使 ncurses 支持当前终端的字符集 (UTF-8)
   rclcpp::init(argc, argv);
   try {
     auto node = std::make_shared<MissionExecutorNode>();

@@ -447,7 +447,7 @@ void TorqueControllerActionServer::handleAccepted(
   }
 
   // 避免嵌套锁: 先拷贝状态数据，再持有action锁
-  KDL::JntArray q_current(6);
+  KDL::JntArray q_current(kArmJoints);
   has_state = false;  // Reset and reuse the has_state variable from above
   {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
@@ -491,9 +491,9 @@ void TorqueControllerActionServer::handleAccepted(
     bool position_continuous = true;
     double max_pos_jump = 0.0;
 
-    if (first_point.positions.size() == 6 && has_state) {
+    if (first_point.positions.size() >= kArmJoints && has_state) {
       // 使用局部拷贝 q_current 而非 q_actual_, 避免再次加锁
-      for (size_t i = 0; i < 6; i++) {
+      for (size_t i = 0; i < kArmJoints; i++) {
         double pos_error = std::abs(first_point.positions[i] - q_current(i));
         max_pos_jump = std::max(max_pos_jump, pos_error);
         if (pos_error > 0.05)  // 阈值：5度（0.087 rad）或更保守的0.05 rad
@@ -519,7 +519,7 @@ void TorqueControllerActionServer::handleAccepted(
     }
 
     // ========== 新增：保存规划终点位置 ==========
-    if (last_point.positions.size() == kArmJoints) {
+    if (last_point.positions.size() >= kArmJoints) {
       for (size_t i = 0; i < kArmJoints; i++) {
         q_target_(i) = last_point.positions[i];
       }
@@ -771,9 +771,13 @@ bool TorqueControllerActionServer::interpolateTrajectory(
   if (t_now <= t_first) {
     // 返回第一个点的值
     for (size_t i = 0; i < kArmJoints; i++) {
-      q_d(i) = first_point.positions[i];
-      qd_d(i) = first_point.velocities.empty() ? 0.0 : first_point.velocities[i];
-      qdd_d(i) = first_point.accelerations.empty() ? 0.0 : first_point.accelerations[i];
+      if (i < first_point.positions.size()) {
+        q_d(i) = first_point.positions[i];
+      } else {
+        q_d(i) = 0.0; // Fail-safe
+      }
+      qd_d(i) = (i < first_point.velocities.size()) ? first_point.velocities[i] : 0.0;
+      qdd_d(i) = (i < first_point.accelerations.size()) ? first_point.accelerations[i] : 0.0;
     }
     return true;
   }
@@ -785,7 +789,11 @@ bool TorqueControllerActionServer::interpolateTrajectory(
   if (t_now >= t_last) {
     // 返回最后一个点的值（速度和加速度应该为 0）
     for (size_t i = 0; i < kArmJoints; i++) {
-      q_d(i) = last_point.positions[i];
+      if (i < last_point.positions.size()) {
+        q_d(i) = last_point.positions[i];
+      } else {
+        q_d(i) = 0.0;
+      }
       qd_d(i) = 0.0;   // 停止时速度为 0
       qdd_d(i) = 0.0;  // 停止时加速度为 0
     }
@@ -827,11 +835,12 @@ bool TorqueControllerActionServer::interpolateTrajectory(
   // 7. 线性插值
   for (size_t i = 0; i < kArmJoints; i++) {
     // 位置插值
-    q_d(i) =
-        point_before.positions[i] + alpha * (point_after.positions[i] - point_before.positions[i]);
+    double pos_before = (i < point_before.positions.size()) ? point_before.positions[i] : 0.0;
+    double pos_after = (i < point_after.positions.size()) ? point_after.positions[i] : 0.0;
+    q_d(i) = pos_before + alpha * (pos_after - pos_before);
 
     // 速度插值
-    if (!point_before.velocities.empty() && !point_after.velocities.empty()) {
+    if (i < point_before.velocities.size() && i < point_after.velocities.size()) {
       qd_d(i) = point_before.velocities[i] +
                 alpha * (point_after.velocities[i] - point_before.velocities[i]);
     } else {
@@ -839,7 +848,7 @@ bool TorqueControllerActionServer::interpolateTrajectory(
     }
 
     // 加速度插值
-    if (!point_before.accelerations.empty() && !point_after.accelerations.empty()) {
+    if (i < point_before.accelerations.size() && i < point_after.accelerations.size()) {
       qdd_d(i) = point_before.accelerations[i] +
                  alpha * (point_after.accelerations[i] - point_before.accelerations[i]);
     } else {
@@ -984,7 +993,7 @@ void TorqueControllerActionServer::controlLoop() {
       // 夹爪: timeout时保持当前力矩指令
       {
         std::lock_guard<std::mutex> glock(gripper_mutex_);
-        safe_msg.data[kAllJoints] = gripper_torque_cmd_;
+        safe_msg.data[kArmJoints] = gripper_torque_cmd_;
       }
       torque_pub_->publish(safe_msg);
 
@@ -1117,7 +1126,7 @@ void TorqueControllerActionServer::controlLoop() {
     // 夹爪: 透传当前力矩指令
     {
       std::lock_guard<std::mutex> glock(gripper_mutex_);
-      hold_torque.data[kAllJoints] = gripper_torque_cmd_;
+      hold_torque.data[kArmJoints] = gripper_torque_cmd_;
     }
     torque_pub_->publish(hold_torque);
 
@@ -1203,7 +1212,7 @@ void TorqueControllerActionServer::controlLoop() {
   // 夹爪: 透传当前力矩指令
   {
     std::lock_guard<std::mutex> glock(gripper_mutex_);
-    torque_msg.data[kAllJoints] = gripper_torque_cmd_;
+    torque_msg.data[kArmJoints] = gripper_torque_cmd_;
   }
   torque_pub_->publish(torque_msg);
 
