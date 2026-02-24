@@ -7,6 +7,7 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <serial_driver/serial_driver.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/u_int8.hpp>
 #include <thread>
 
 #include "serial_protocol.hpp"
@@ -14,7 +15,7 @@
 class HardwareInterfaceNode : public rclcpp::Node {
 public:
   HardwareInterfaceNode()
-      : Node("hardware_interface_node"), num_joints_(SerialProtocol::NUM_ALL_JOINTS), running_(false), simulation_mode_(false) {
+      : Node("hardware_interface_node"), running_(false), simulation_mode_(false) {
     // 1. 声明参数
     this->declare_parameter("serial_port", "/dev/ttyACM0");
     this->declare_parameter("baud_rate", 921600);
@@ -98,7 +99,6 @@ public:
 
 private:
   // ========== 成员变量 ==========
-  int num_joints_;
   std::atomic<bool> running_;
   bool simulation_mode_;  // 新增：是否为仿真模式（不从串口读取）
 
@@ -113,18 +113,23 @@ private:
   // ROS2 通信
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr torque_sub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
-  rclcpp::TimerBase::SharedPtr send_timer_;  // 新增：200Hz发送定时器
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr
+      robot_state_cmd_pub_;                  // 转发下位机状态切换通知
+  rclcpp::TimerBase::SharedPtr send_timer_;  // 200Hz发送定时器
 
   // 数据缓存
   std::mutex data_mutex_;
-  float current_positions_[7] = {0};
-  float current_velocities_[7] = {0};
+  float current_positions_[SerialProtocol::NUM_ALL_JOINTS] = {0};
+  float current_velocities_[SerialProtocol::NUM_ALL_JOINTS] = {0};
 
-  // 力矩缓存（解耦架构）
+  // 力矩缓存（解耦架构）：index 0-5 = 6轴, index 6 = 夹爪力矩
   std::mutex torque_cache_mutex_;
-  float cached_torques_[7] = {0};
+  float cached_torques_[SerialProtocol::NUM_ALL_JOINTS] = {0};
   rclcpp::Time last_torque_update_;
   bool torque_data_valid_ = false;
+
+  // 夹爪分频计数（50Hz = 每4个200Hz周期发一次）
+  uint8_t gripper_counter_ = 0;
 
   // Health monitoring
   std::atomic<std::chrono::steady_clock::time_point> last_rx_activity_;
@@ -250,33 +255,41 @@ private:
   }
 
   void initROS2Communication() {
-    // 订阅力矩命令
+    // 订阅7轴力矩命令 (index 0-5=臂关节, index 6=夹爪力矩, 由sendLoop做阈值→flag转换)
     torque_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/effort_controller/commands", 10,
         std::bind(&HardwareInterfaceNode::torqueCallback, this, std::placeholders::_1));
 
     // 发布关节状态到标准话题 (MoveIt/RViz/数字孪生都订阅此话题)
     joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
-    RCLCPP_INFO(this->get_logger(), "[INIT] Publishing to /joint_states");
+
+    // 发布下位机状态切换通知到 /robot_state_cmd (mission_executor 订阅)
+    robot_state_cmd_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/robot_state_cmd", 10);
+
+    RCLCPP_INFO(this->get_logger(), "[INIT] Publishing to /joint_states and /robot_state_cmd");
   }
 
   // ========== 回调函数 ==========
 
   void torqueCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-    if (msg->data.size() != static_cast<size_t>(num_joints_)) {
-      RCLCPP_WARN(this->get_logger(), "[WARN] Invalid torque size: %zu", msg->data.size());
+    // index 0-5: 6轴臂关节力矩; index 6(可选): 夹爪力矩
+    // 至少需要6个元素，第7个若不存在则夹爪保持STOP
+    if (msg->data.size() < SerialProtocol::NUM_ARM_JOINTS) {
+      RCLCPP_WARN(this->get_logger(), "[WARN] Torque msg size %zu < %zu", msg->data.size(),
+                  SerialProtocol::NUM_ARM_JOINTS);
       return;
     }
-
-    // 解耦架构：仅缓存数据，不立即发送（由sendLoop定时器负责发送）
     std::lock_guard<std::mutex> lock(torque_cache_mutex_);
-    for (int i = 0; i < num_joints_; ++i) {
+    const size_t n = std::min(msg->data.size(), SerialProtocol::NUM_ALL_JOINTS);
+    for (size_t i = 0; i < n; ++i) {
       cached_torques_[i] = static_cast<float>(msg->data[i]);
+    }
+    // 若消息只有6个元素，第7个(夹爪)置0 → STOP
+    if (msg->data.size() < SerialProtocol::NUM_ALL_JOINTS) {
+      cached_torques_[SerialProtocol::NUM_ARM_JOINTS] = 0.0f;
     }
     last_torque_update_ = this->now();
     torque_data_valid_ = true;
-
-    // 不再调用 sendTorqueCommand()！发送由定时器驱动
   }
 
   // ========== 串口收发函数 ==========
@@ -287,14 +300,13 @@ private:
       return;  // 串口未打开，等待自动重连
     }
 
-    float torques_to_send[7];
-    bool data_fresh = false;
+    const bool force_zero = this->get_parameter("force_zero_torque").as_bool();
 
-    // 1. 读取缓存的力矩数据
+    // ── 1. 读取缓存的6轴力矩数据 ──
+    float torques_to_send[SerialProtocol::NUM_ARM_JOINTS];
+    bool data_fresh = false;
     {
       std::lock_guard<std::mutex> lock(torque_cache_mutex_);
-
-      // 检查数据新鲜度（10ms超时阈值）
       if (torque_data_valid_) {
         double age = (this->now() - last_torque_update_).seconds();
         if (age > 0.01) {
@@ -308,71 +320,65 @@ private:
                              "[WARN] No torque data received yet, sending zeros");
       }
 
-      // 应用 force_zero_torque 安全开关
-      if (this->get_parameter("force_zero_torque").as_bool()) {
-        std::fill(torques_to_send, torques_to_send + num_joints_, 0.0f);
+      if (force_zero) {
+        std::fill(torques_to_send, torques_to_send + SerialProtocol::NUM_ARM_JOINTS, 0.0f);
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                              "[SAFETY] Force zero torque mode enabled - sending all zeros");
       } else if (data_fresh) {
-        std::copy(cached_torques_, cached_torques_ + num_joints_, torques_to_send);
+        std::copy(cached_torques_, cached_torques_ + SerialProtocol::NUM_ARM_JOINTS,
+                  torques_to_send);
       } else {
-        std::fill(torques_to_send, torques_to_send + num_joints_, 0.0f);
+        std::fill(torques_to_send, torques_to_send + SerialProtocol::NUM_ARM_JOINTS, 0.0f);
       }
     }
 
-    // 2. 构建并发送SEASKY数据包
+    // ── 2. 发送6轴力矩包 (200Hz) ──
     SerialProtocol::TorqueCommand cmd;
-    for (int i = 0; i < num_joints_; ++i) {
+    for (size_t i = 0; i < SerialProtocol::NUM_ARM_JOINTS; ++i) {
       cmd.torques[i] = torques_to_send[i];
     }
 
-    std::vector<uint8_t> packet = SerialProtocol::buildTorquePacket(cmd);
+    auto sendRaw = [&](const std::vector<uint8_t> &pkt) {
+      try {
+        const size_t sent = serial_port_->send(pkt);
+        if (sent != pkt.size()) {
+          RCLCPP_WARN(this->get_logger(), "[WARN] Partial send: %zu/%zu", sent, pkt.size());
+        } else {
+          tx_packet_count_++;
+        }
+      } catch (const std::exception &e) {
+        RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                              "[ERROR] Send failed: %s", e.what());
+        try {
+          serial_port_->close();
+        } catch (...) {
+        }
+      }
+    };
 
-    try {
-      const size_t sent = serial_port_->send(packet);
-      if (sent != packet.size()) {
-        RCLCPP_WARN(this->get_logger(), "[WARN] Partial send: %zu/%zu", sent, packet.size());
+    sendRaw(SerialProtocol::buildTorquePacket(cmd));
+
+    // ── 3. 分频发送夹爪包 (50Hz = 每4个周期一次) ──
+    // 从力矩缓存的 index 6 推导 GripperAction（边界转换，ROS2侧仍用语义力矩）
+    gripper_counter_ = (gripper_counter_ + 1) % 4;
+    if (gripper_counter_ == 0) {
+      SerialProtocol::GripperAction action;
+      if (force_zero) {
+        action = SerialProtocol::GripperAction::STOP;
       } else {
-        tx_packet_count_++;
+        std::lock_guard<std::mutex> glock(torque_cache_mutex_);
+        const float g = cached_torques_[SerialProtocol::NUM_ARM_JOINTS];  // index 6
+        if (g > 0.1f)
+          action = SerialProtocol::GripperAction::GRIP;
+        else if (g < -0.1f)
+          action = SerialProtocol::GripperAction::RELEASE;
+        else
+          action = SerialProtocol::GripperAction::STOP;
       }
-    } catch (const std::exception &e) {
-      RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "[ERROR] Send failed: %s",
-                            e.what());
-      try {
-        serial_port_->close();
-      } catch (...) {
-      }
+      sendRaw(SerialProtocol::buildGripperPacket(action));
     }
   }
 
-  // 保留旧函数供兼容（但不再使用）
-  void sendTorqueCommand() {
-    if (!serial_port_ || !serial_port_->is_open()) {
-      return;
-    }
-
-    SerialProtocol::TorqueCommand cmd;
-    {
-      std::lock_guard<std::mutex> lock(torque_cache_mutex_);
-      for (int i = 0; i < num_joints_; ++i) cmd.torques[i] = cached_torques_[i];
-    }
-
-    std::vector<uint8_t> packet = SerialProtocol::buildTorquePacket(cmd);
-
-    try {
-      const size_t sent = serial_port_->send(packet);
-      if (sent != packet.size()) {
-        RCLCPP_WARN(this->get_logger(), "[WARN] Partial send: %zu/%zu", sent, packet.size());
-      }
-      // RCLCPP_DEBUG(this->get_logger(), "[TX] Sent %zu bytes", packet.size());
-    } catch (const std::exception &e) {
-      RCLCPP_ERROR(this->get_logger(), "[ERROR] Send failed: %s", e.what());
-      try {
-        serial_port_->close();
-      } catch (...) {
-      }
-    }
-  }
 
   void receiveLoop() {
     // State Machine for SEASKY Protocol
@@ -496,30 +502,40 @@ private:
     size_t offset = 4;
     uint16_t cmd_id = SerialProtocol::read_uint16(packet.data(), offset);
     uint16_t flags = SerialProtocol::read_uint16(packet.data(), offset);  // offset becomes 8
+    (void)flags;
 
     if (cmd_id == SerialProtocol::CMD_JOINT_FEEDBACK) {
-      float positions[7];
-      float velocities[7];
-      uint32_t islive[7];  // 存活状态（暂不使用）
+      float positions[SerialProtocol::NUM_ALL_JOINTS];
+      float velocities[SerialProtocol::NUM_ALL_JOINTS];
+      uint32_t islive[SerialProtocol::NUM_ALL_JOINTS];  // 存活状态（暂不使用）
 
-      // 协议格式：每关节交替读取 Position, Speed, IsLive
       // Payload: [Pos0, Spd0, IsLive0, ..., Pos6(Gripper), Spd6, IsLive6]
-      for (int i = 0; i < num_joints_; ++i) {
+      for (size_t i = 0; i < SerialProtocol::NUM_ALL_JOINTS; ++i) {
         positions[i] = SerialProtocol::read_float(packet.data(), offset);
         velocities[i] = SerialProtocol::read_float(packet.data(), offset);
-        islive[i] = SerialProtocol::read_uint32(packet.data(), offset);  // 读取但暂不使用
+        islive[i] = SerialProtocol::read_uint32(packet.data(), offset);
       }
-
       updateAndPublishJointStates(positions, velocities);
+
+    } else if (cmd_id == SerialProtocol::CMD_ROBOT_STATE_REQ) {
+      // 下位机 → 上位机：任务状态切换通知，转发到 /robot_state_cmd
+      if (packet.size() > offset) {
+        const uint8_t raw_cmd = packet[offset];
+        auto msg = std_msgs::msg::UInt8();
+        msg.data = raw_cmd;
+        robot_state_cmd_pub_->publish(msg);
+        RCLCPP_INFO(this->get_logger(), "[RX] RobotStateCmd 0x%02X -> /robot_state_cmd", raw_cmd);
+      }
     }
   }
 
-  void updateAndPublishJointStates(const float positions[7], const float velocities[7]) {
+  void updateAndPublishJointStates(const float positions[SerialProtocol::NUM_ALL_JOINTS],
+                                   const float velocities[SerialProtocol::NUM_ALL_JOINTS]) {
     // 1. 更新缓存
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
-      std::memcpy(current_positions_, positions, sizeof(float) * num_joints_);
-      std::memcpy(current_velocities_, velocities, sizeof(float) * num_joints_);
+      std::memcpy(current_positions_, positions, sizeof(float) * SerialProtocol::NUM_ALL_JOINTS);
+      std::memcpy(current_velocities_, velocities, sizeof(float) * SerialProtocol::NUM_ALL_JOINTS);
     }
 
     // 2. 发布 ROS2 消息
@@ -527,9 +543,9 @@ private:
     msg.header.stamp = this->now();
     msg.name = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_gripper1"};
 
-    msg.position.resize(num_joints_);
-    msg.velocity.resize(num_joints_);
-    for (int i = 0; i < num_joints_; ++i) {
+    msg.position.resize(SerialProtocol::NUM_ALL_JOINTS);
+    msg.velocity.resize(SerialProtocol::NUM_ALL_JOINTS);
+    for (size_t i = 0; i < SerialProtocol::NUM_ALL_JOINTS; ++i) {
       msg.position[i] = positions[i];
       msg.velocity[i] = velocities[i];
     }

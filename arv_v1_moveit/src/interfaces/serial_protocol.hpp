@@ -10,20 +10,57 @@
 
 // SEASKY协议: [SOF(1)][Len(2)][CRC8(1)][CmdID(2)][Flags(2)][Payload(N)][CRC16(2)]
 // DataLen = sizeof(CmdID) + sizeof(Flags) + sizeof(Payload)
+//
+// 包汇总 (TX: 上位机 → 下位机):
+//   0x0002  CMD_TORQUE_CONTROL   200Hz  6×float = 24 B   6轴力矩
+//   0x0004  CMD_GRIPPER_CONTROL   50Hz  1×uint8 = 1  B   夹爪动作flag(由力矩阈值转换)
+// 包汇总 (RX: 下位机 → 上位机):
+//   0x0001  CMD_JOINT_FEEDBACK   200Hz  7×(float+float+uint32) = 84 B  7关节状态
+//   0x0005  CMD_ROBOT_STATE_REQ  按需    1×uint8                        任务状态切换通知
 
 namespace SerialProtocol {
-// Constants
+// ─────────── 基础常量 ───────────
 constexpr uint8_t SOF = 0xA5;
-constexpr uint16_t CMD_TORQUE_CONTROL = 0x0002;
-constexpr uint16_t CMD_JOINT_FEEDBACK = 0x0001;
-constexpr size_t NUM_ARM_JOINTS = 6;    // 机械臂关节数 (KDL 动力学链)
-constexpr size_t NUM_ALL_JOINTS = 7;    // 含夹爪的总关节数
 
-// Data Structures (Logical)
-struct TorqueCommand {
-  std::array<float, NUM_ALL_JOINTS> torques;  // [J1..J6, Gripper]
+// CmdID 定义
+constexpr uint16_t CMD_JOINT_FEEDBACK = 0x0001;   // RX: 7关节状态反馈
+constexpr uint16_t CMD_TORQUE_CONTROL = 0x0002;   // TX: 6轴力矩 200Hz
+constexpr uint16_t CMD_GRIPPER_OFF = 0x0003;      // 保留（兼容旧固件）
+constexpr uint16_t CMD_GRIPPER_CONTROL = 0x0004;  // TX: 夹爪控制 50Hz（力矩阈值→flag）
+constexpr uint16_t CMD_ROBOT_STATE_REQ = 0x0005;  // RX: 下位机→上位机 任务状态切换通知
+
+constexpr size_t NUM_ARM_JOINTS = 6;  // 机械臂关节数 (KDL 动力学链)
+constexpr size_t NUM_ALL_JOINTS = 7;  // 含夹爪的总关节数（反馈帧使用）
+
+// ─────────── 任务状态切换通知枚举 ───────────
+// RX方向：下位机主动推送（限位触发、传感器事件等），通知上位机状态机推进
+enum class RobotStateCmd : uint8_t {
+  EMERGENCY_RESET = 0x01,  // 紧急复位：停止一切运动，回原点
+  START_ORE_PICK = 0x02,   // 开始取矿1：进入取矿执行序列第一步
+  NEXT_STEP = 0x03,        // 下一步：推进当前任务序列到下一状态
+  // 预留扩展位: 0x04~0xFF
 };
 
+// ─────────── 数据结构 ───────────
+
+// 力矩控制包 Payload (6 关节, 200Hz)
+struct TorqueCommand {
+  std::array<float, NUM_ARM_JOINTS> torques;  // [J1..J6], 不含夹爪
+};
+
+// 夹爪控制包 Payload (1 byte flag, 50Hz)
+enum class GripperAction : uint8_t {
+  RELEASE = 0x00,  // 松开
+  GRIP = 0x01,     // 夹紧
+  STOP = 0x02,     // 停止保持
+};
+
+// 任务状态切换请求包 Payload (1 byte cmd, 按需发送)
+struct RobotCmdPacket {
+  RobotStateCmd cmd;  // 见 RobotStateCmd 枚举
+};
+
+// 关节状态反馈包 Payload (7 关节, 200Hz, 下位机 → 上位机)
 struct JointFeedback {
   std::array<float, NUM_ALL_JOINTS> positions;
   std::array<float, NUM_ALL_JOINTS> velocities;
@@ -80,51 +117,55 @@ inline uint32_t read_uint32(const uint8_t *buffer, size_t &offset) {
   return value;
 }
 
-// Packet Builder
-template <typename T>
-std::vector<uint8_t> buildPacket(uint16_t cmd_id, const T &data) {
-  std::vector<uint8_t> packet;
-  packet.reserve(64);  // Pre-allocate reasonable size
+// ─────────── 基础构建器（内部复用，帧结构唯一来源） ───────────
+// payload 已经序列化完毕的字节序列，函数负责封装 SOF/Len/CRC8/CRC16
+inline std::vector<uint8_t> buildPacket(uint16_t cmd_id, uint16_t flags,
+                                        const std::vector<uint8_t> &payload) {
+  std::vector<uint8_t> pkt;
+  pkt.reserve(4 + 2 + 2 + payload.size() + 2);  // Header+CmdID+Flags+Payload+CRC16
 
-  // 1. Payload Serialization
-  std::vector<uint8_t> payload_bytes;
-  // This part needs specialization or a generic way.
-  // For simplicity, let's do it manually in specific builders.
-  return packet;
+  // ── Header placeholder ──
+  pkt.push_back(SOF);
+  pkt.push_back(0);  // Len L (填后)
+  pkt.push_back(0);  // Len H (填后)
+  pkt.push_back(0);  // CRC8  (填后)
+
+  // ── Body ──
+  append_uint16(pkt, cmd_id);
+  append_uint16(pkt, flags);
+  pkt.insert(pkt.end(), payload.begin(), payload.end());
+
+  // ── DataLen = CmdID(2) + Flags(2) + Payload ──
+  const uint16_t data_len = static_cast<uint16_t>(pkt.size() - 4);
+  pkt[1] = static_cast<uint8_t>(data_len & 0xFF);
+  pkt[2] = static_cast<uint8_t>((data_len >> 8) & 0xFF);
+
+  // ── Header CRC8 (SOF + Len_L + Len_H) ──
+  pkt[3] = Get_CRC8_Check_Sum(pkt.data(), 3, 0xFF);
+
+  // ── Whole-packet CRC16 ──
+  const uint16_t crc16 = Get_CRC16_Check_Sum(pkt.data(), pkt.size(), 0xFFFF);
+  append_uint16(pkt, crc16);
+
+  return pkt;
 }
 
-// Specific Builders
+// ─────────── 具体包构建器（仅负责序列化 payload） ───────────
+
+// 6轴力矩包 (TX, 200Hz)
 inline std::vector<uint8_t> buildTorquePacket(const TorqueCommand &cmd) {
-  std::vector<uint8_t> packet;
-  packet.reserve(64);
-
-  // Header Placeholder
-  packet.push_back(SOF);
-  packet.push_back(0);  // Len L
-  packet.push_back(0);  // Len H
-  packet.push_back(0);  // CRC8
-
-  // Body
-  append_uint16(packet, CMD_TORQUE_CONTROL);
-  append_uint16(packet, 0x0000);  // Flags
-  for (float t : cmd.torques) append_float(packet, t);
-
-  // Calculate DataLen (CmdID + Flags + Payload)
-  uint16_t data_len = packet.size() - 4;  // Current size - Header size
-  packet[1] = static_cast<uint8_t>(data_len & 0xFF);
-  packet[2] = static_cast<uint8_t>((data_len >> 8) & 0xFF);
-
-  // Calculate CRC8 (SOF + Len_L + Len_H)
-  packet[3] = Get_CRC8_Check_Sum(packet.data(), 3, 0xFF);
-
-  // Calculate CRC16 (Whole packet so far)
-  uint16_t crc16 = Get_CRC16_Check_Sum(packet.data(), packet.size(), 0xFFFF);
-  append_uint16(packet, crc16);
-
-  return packet;
+  std::vector<uint8_t> payload;
+  payload.reserve(NUM_ARM_JOINTS * 4);
+  for (size_t i = 0; i < NUM_ARM_JOINTS; ++i) append_float(payload, cmd.torques[i]);
+  return buildPacket(CMD_TORQUE_CONTROL, 0x0000, payload);
 }
 
-// buildGripperPacket 已废弃: 夹爪作为第7关节统一在 buildTorquePacket 中发送
+// 夹爪动作包 (TX, 50Hz，force→flag 转换由调用方完成)
+inline std::vector<uint8_t> buildGripperPacket(GripperAction action) {
+  std::vector<uint8_t> payload = {static_cast<uint8_t>(action)};
+  return buildPacket(CMD_GRIPPER_CONTROL, 0x0000, payload);
+}
+
 
 // CRC tables are centralized in Crc.{hpp,cpp}; avoid duplicating them here to ensure a single
 // source of truth.

@@ -9,9 +9,9 @@
 #include <ncurses.h>
 #include <signal.h>
 #include <yaml-cpp/yaml.h>
-#include <clocale>
 
 #include <chrono>
+#include <clocale>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -31,6 +31,7 @@
 #include "arv_v1_interfaces/srv/move_to_cartesian_rpy.hpp"
 #include "arv_v1_interfaces/srv/save_last_trajectory.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"  // For cartesian jogging relative offsets
+#include "std_msgs/msg/u_int8.hpp"             // /robot_state_cmd from hardware_interface
 
 using LoadTrajectory = arv_v1_interfaces::srv::LoadTrajectory;
 using ListTrajectories = arv_v1_interfaces::srv::ListTrajectories;
@@ -95,6 +96,11 @@ public:
     save_client_ = create_client<SaveLastTrajectory>("/save_last_trajectory");
     cartesian_client_ = create_client<MoveToCartesianRPY>("/move_to_cartesian_rpy");
     gripper_client_ = create_client<GripperControl>("/gripper_control");
+
+    // 订阅下位机状态切换通知 (除键盘输入外的另一输入源)
+    robot_state_cmd_sub_ = create_subscription<std_msgs::msg::UInt8>(
+        "/robot_state_cmd", 10,
+        std::bind(&MissionExecutorNode::onRobotStateCmd, this, std::placeholders::_1));
 
     log("Connecting to services...", COLOR_PAIR_DEFAULT);
     if (!load_client_->wait_for_service(10s)) {
@@ -165,6 +171,7 @@ private:
   rclcpp::Client<SaveLastTrajectory>::SharedPtr save_client_;
   rclcpp::Client<MoveToCartesianRPY>::SharedPtr cartesian_client_;
   rclcpp::Client<GripperControl>::SharedPtr gripper_client_;
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr robot_state_cmd_sub_;  // 下位机状态通知
 
   // ────────────────── Ncurses 初始化 ──────────────────
 
@@ -363,6 +370,38 @@ private:
       // 限制名字不能有空格
       if (input_mode_ == InputMode::SAVE_NAME && ch == ' ') return;
       input_buffer_.push_back(ch);
+    }
+  }
+
+  // 下位机状态切换通知回调（与键盘是工作在同一个状态机上的两个并行输入源）
+  void onRobotStateCmd(const std_msgs::msg::UInt8::SharedPtr msg) {
+    // 枚举和 serial_protocol.hpp 中 RobotStateCmd 对应
+    switch (msg->data) {
+      case 0x01:  // EMERGENCY_RESET
+        logWarn("[HW] Emergency reset from MCU");
+        resetToIdle();
+        break;
+      case 0x02:  // START_ORE_PICK
+        logOk("[HW] StartOrePick from MCU -> execute current state");
+        executeCurrentState();
+        break;
+      case 0x03:  // NEXT_STEP
+        logOk("[HW] NextStep from MCU -> advance state");
+        {
+          std::lock_guard<std::mutex> lk(status_mu_);
+          if (current_idx_ + 1 < states_.size()) {
+            current_idx_++;
+            log("State advanced to: " + states_[current_idx_].id, COLOR_PAIR_WARNING);
+          }
+        }
+        break;
+      default:
+        logWarn("[HW] Unknown RobotStateCmd: 0x" + [](uint8_t v) {
+          char b[8];
+          snprintf(b, 8, "%02X", v);
+          return std::string(b);
+        }(msg->data));
+        break;
     }
   }
 
@@ -817,7 +856,7 @@ private:
 };
 
 int main(int argc, char** argv) {
-  setlocale(LC_ALL, ""); // 使 ncurses 支持当前终端的字符集 (UTF-8)
+  setlocale(LC_ALL, "");  // 使 ncurses 支持当前终端的字符集 (UTF-8)
   rclcpp::init(argc, argv);
   try {
     auto node = std::make_shared<MissionExecutorNode>();
