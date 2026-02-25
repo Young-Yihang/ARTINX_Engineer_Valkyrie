@@ -57,6 +57,9 @@ enum class TaskCmd : uint8_t {
 
   // ── 末端 0x4X ──
   GRIPPER_CMD = 0x40,  // 夹爪直接控制: param = GripperAction (0松/1夹/2停)
+
+  // ── 控制模式 0x5X ──
+  SET_CONTROL_MODE = 0x50,  // 设置控制模式: param = ControlMode (0/1/2)
 };
 
 // ─────────── 0x0006 机械臂状态反馈枚举 (上位机 → 下位机, 4B, 10Hz) ───────────
@@ -69,6 +72,17 @@ enum class ArmState : uint8_t {
   HOLDING = 0x02,    // 保持位置 (轨迹完成后)
   ERROR = 0x03,      // 出错
   HOMING = 0x04,     // 正在回 Home
+  RELAX = 0x05,      // 全零力矩 (电机断力)
+  FREEDRIVE = 0x06,  // 仅重力补偿 (可手动推臂)
+};
+
+// ─────────── 控制模式枚举 (torque_controller 使用) ───────────
+// 通过 /control_mode (UInt8) topic 由 mission_executor 统一管理
+enum class ControlMode : uint8_t {
+  RELAX = 0,      // 全零力矩: 电机断力, 上电默认
+  FREEDRIVE = 1,  // 仅重力补偿: G(q), 无PD, 可手动推臂
+  HOLD = 2,       // 重力补偿+PD: G(q)+PD, 锁定位置
+  EXECUTE = 3,    // 轨迹执行: 全动力学前馈+反馈 (action server 内部切换)
 };
 
 enum class ArmError : uint8_t {

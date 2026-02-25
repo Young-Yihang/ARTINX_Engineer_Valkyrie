@@ -35,7 +35,16 @@
 #include "arv_v1_interfaces/srv/save_last_trajectory.hpp"
 #include "arv_v1_interfaces/srv/stop_cartesian_motion.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
-#include "std_msgs/msg/int32.hpp"  // /task_command from hardware_interface
+#include "std_msgs/msg/int32.hpp"   // /task_command from hardware_interface
+#include "std_msgs/msg/u_int8.hpp"  // /control_mode
+
+// 控制模式常量 (与 serial_protocol.hpp ControlMode 保持同步)
+namespace ControlMode {
+constexpr uint8_t RELAX = 0;      // 全零力矩
+constexpr uint8_t FREEDRIVE = 1;  // 仅重力补偿
+constexpr uint8_t HOLD = 2;       // 重力补偿+PD
+constexpr uint8_t EXECUTE = 3;    // 轨迹执行
+}  // namespace ControlMode
 
 using LoadTrajectory = arv_v1_interfaces::srv::LoadTrajectory;
 using ListTrajectories = arv_v1_interfaces::srv::ListTrajectories;
@@ -117,6 +126,9 @@ public:
         "/task_command", 10,
         std::bind(&MissionExecutorNode::onTaskCommand, this, std::placeholders::_1));
 
+    // 控制模式发布者
+    control_mode_pub_ = create_publisher<std_msgs::msg::UInt8>("/control_mode", 10);
+
     log("Connecting to services...", COLOR_PAIR_DEFAULT);
     if (!load_client_->wait_for_service(10s)) {
       log("load_trajectory service timeout", COLOR_PAIR_ERROR);
@@ -126,6 +138,9 @@ public:
 
     loadMissionSequence();
     fetchTrajectories();
+
+    // 启动时发布默认模式 HOLD
+    publishControlMode(ControlMode::HOLD);
     log("Mission Executor v4.0 ready", COLOR_PAIR_SUCCESS);
   }
 
@@ -230,6 +245,20 @@ private:
   geometry_msgs::msg::PoseStamped current_ee_pose_;
   std::mutex pose_mu_;
   bool has_ee_pose_ = false;
+
+  // --- 控制模式 ---
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr control_mode_pub_;
+  uint8_t control_mode_ = ControlMode::HOLD;
+
+  void publishControlMode(uint8_t mode) {
+    control_mode_ = mode;
+    auto msg = std_msgs::msg::UInt8();
+    msg.data = mode;
+    control_mode_pub_->publish(msg);
+    static const char* names[] = {"RELAX", "FREEDRIVE", "HOLD", "EXECUTE"};
+    log(std::string("[MODE] -> ") + (mode <= 3 ? names[mode] : "?"),
+        mode == 0 ? COLOR_PAIR_WARNING : COLOR_PAIR_SUCCESS);
+  }
 
   // --- ROS2 客户端 ---
   rclcpp::Client<LoadTrajectory>::SharedPtr load_client_;
@@ -507,6 +536,15 @@ private:
         logOk(log_buf);
         sendGripper(param == 1 ? 5.0 : (param == 0 ? -5.0 : 0.0));
         break;
+      case 0x50:  // SET_CONTROL_MODE
+        snprintf(log_buf, sizeof(log_buf), "[HW] SET_CONTROL_MODE param=%u", param);
+        logOk(log_buf);
+        if (param <= ControlMode::EXECUTE) {
+          publishControlMode(param);
+        } else {
+          logWarn("[HW] Invalid control mode value");
+        }
+        break;
       default:
         snprintf(log_buf, sizeof(log_buf), "[HW] Unknown TaskCmd 0x%02X param=%u", cmd, param);
         logWarn(log_buf);
@@ -516,6 +554,10 @@ private:
 
   // 按轨迹名执行 (供 TaskCmd 和 TUI 共用)
   void executeTrajectoryByKey(const std::string& name) {
+    if (control_mode_ != ControlMode::HOLD) {
+      logWarn("须先切到 HOLD 模式才能执行: " + name);
+      return;
+    }
     if (executing_) {
       logWarn("Busy, ignoring: " + name);
       return;
@@ -551,9 +593,20 @@ private:
       loadMissionSequence();
       logOk("Sequence reloaded from yaml.");
     }
+    // 控制模式切换: [0] RELAX  [1] FREEDRIVE  [2] HOLD
+    else if (k == '0')
+      publishControlMode(ControlMode::RELAX);
+    else if (k == '1')
+      publishControlMode(ControlMode::FREEDRIVE);
+    else if (k == '2')
+      publishControlMode(ControlMode::HOLD);
   }
 
   void executeCurrentState() {
+    if (control_mode_ != ControlMode::HOLD) {
+      logWarn("须先切到 HOLD 模式 [2] 才能执行轨迹");
+      return;
+    }
     if (executing_) {
       logWarn("Busy executing...");
       return;
@@ -920,6 +973,17 @@ private:
     drawTab("[C] Cartesian", View::CARTESIAN);
     drawTab("[G] Gripper", View::GRIPPER);
 
+    // 控制模式指示器
+    {
+      static const char* mode_labels[] = {"RELAX", "FREEDRIVE", "HOLD", "EXECUTE"};
+      int mode_color = (control_mode_ == ControlMode::RELAX) ? COLOR_PAIR_ERROR :
+                        (control_mode_ == ControlMode::FREEDRIVE) ? COLOR_PAIR_WARNING :
+                        COLOR_PAIR_SUCCESS;
+      attron(A_BOLD | COLOR_PAIR(mode_color));
+      printw(" [%s] ", control_mode_ <= 3 ? mode_labels[control_mode_] : "?");
+      attroff(A_BOLD | COLOR_PAIR(mode_color));
+    }
+
     attron(COLOR_PAIR(COLOR_PAIR_HEADER));
     mvprintw(1, 71, "|");
     mvprintw(2, 0, "------------------------------------------------------------------------");
@@ -965,7 +1029,7 @@ private:
         attroff(A_DIM);
       }
       cur_line++;
-      mvprintw(cur_line++, 2, "Hotkeys: [E] Execute Current   [X] Reset to IDLE   [R] Reload YAML");
+      mvprintw(cur_line++, 2, "Hotkeys: [E] Execute   [X] Reset   [R] Reload   [0]Relax [1]Free [2]Hold");
     } else if (view_ == View::TRAJECTORY) {
       size_t pages = (trajectories_.size() + PER_PAGE - 1) / PER_PAGE;
       mvprintw(cur_line++, 2, "Database: %zu found (Page %zu/%zu)", trajectories_.size(),

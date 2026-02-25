@@ -17,6 +17,7 @@
 #include <mutex>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>  // 力矩数组消息
+#include <std_msgs/msg/u_int8.hpp>                // 控制模式
 #include <string>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
@@ -26,6 +27,14 @@
 #include "kalman_filter.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
+
+// 控制模式常量 (与 serial_protocol.hpp ControlMode 保持同步)
+namespace ControlMode {
+constexpr uint8_t RELAX = 0;      // 全零力矩
+constexpr uint8_t FREEDRIVE = 1;  // 仅重力补偿
+constexpr uint8_t HOLD = 2;       // 重力补偿+PD
+constexpr uint8_t EXECUTE = 3;    // 轨迹执行 (action server 内部)
+}  // namespace ControlMode
 
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GoalHandleFJT = rclcpp_action::ServerGoalHandle<FollowJointTrajectory>;
@@ -227,6 +236,13 @@ public:                                 // 构造函数log
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Trajectory forward publisher created: /ARM_controller/joint_trajectory");
 
+    // --- 订阅控制模式 (由 mission_executor 统一管理) ---
+    control_mode_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
+        "/control_mode", 10,
+        std::bind(&TorqueControllerActionServer::controlModeCallback, this, std::placeholders::_1));
+    RCLCPP_INFO(this->get_logger(),
+                "[OK] Control mode subscriber created: /control_mode (default: RELAX)");
+
     RCLCPP_INFO(this->get_logger(), "[INFO] Control frequency: %.1f Hz", control_frequency_);
 
     auto period = std::chrono::duration<double, std::milli>(1000.0 / control_frequency_);
@@ -236,7 +252,7 @@ public:                                 // 构造函数log
     RCLCPP_INFO(this->get_logger(), "[INFO] Control loop timer started (%.1f Hz)",
                 control_frequency_);
 
-    RCLCPP_INFO(this->get_logger(), "[OK] Torque controller fully initialized");
+    RCLCPP_INFO(this->get_logger(), "[OK] Torque controller fully initialized (mode: RELAX)");
   }
 
   ~TorqueControllerActionServer() {
@@ -282,6 +298,10 @@ private:
   double max_torque_default_ = 20.0;
   double max_velocity_sanity_ = 20.0;
   double max_position_error_ = 0.8;
+
+  // 控制模式 (由 mission_executor 通过 /control_mode topic 管理)
+  std::atomic<uint8_t> control_mode_{ControlMode::RELAX};  // 默认 RELAX: 上电安全
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr control_mode_sub_;
 
   // 夹爪控制 (prismatic joint, 单位: N)
   std::mutex gripper_mutex_;
@@ -401,6 +421,39 @@ private:
     response->message = "Gripper torque set to " + std::to_string(clamped) + " Nm";
     RCLCPP_INFO(this->get_logger(), "[GRIPPER] Torque command: %.3f Nm", clamped);
   }
+
+  // 控制模式切换回调
+  void controlModeCallback(const std_msgs::msg::UInt8::SharedPtr msg) {
+    uint8_t new_mode = msg->data;
+    uint8_t old_mode = control_mode_.load(std::memory_order_acquire);
+    if (new_mode == old_mode) return;
+    if (new_mode > ControlMode::EXECUTE) {
+      RCLCPP_ERROR(get_logger(), "[MODE] Invalid mode value: %u, ignoring", new_mode);
+      return;
+    }
+
+    // EXECUTE 中切模式 → 先 abort 当前轨迹
+    if (is_executing_.load(std::memory_order_acquire) && new_mode != ControlMode::EXECUTE) {
+      emergencyStop("Control mode changed during execution");
+    }
+
+    // 切 HOLD 时 → 以当前位置为目标，避免突然跳到旧 target
+    if (new_mode == ControlMode::HOLD) {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (state_received_) {
+        q_target_ = q_actual_;
+        has_target_ = true;
+      }
+    }
+
+    // 切模式时 reset PID 积分器
+    if (cascade_pid_) cascade_pid_->resetAll();
+
+    control_mode_.store(new_mode, std::memory_order_release);
+
+    static const char* mode_names[] = {"RELAX", "FREEDRIVE", "HOLD", "EXECUTE"};
+    RCLCPP_WARN(get_logger(), "[MODE] %s -> %s", mode_names[old_mode], mode_names[new_mode]);
+  }
 };
 
 rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
@@ -409,6 +462,15 @@ rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
 
   RCLCPP_INFO(this->get_logger(), "[INFO] New trajectory received (%zu points)",
               goal->trajectory.points.size());
+
+  // 模式检查: 只有 HOLD 模式下才允许执行轨迹
+  uint8_t mode = control_mode_.load(std::memory_order_acquire);
+  if (mode != ControlMode::HOLD) {
+    static const char* mode_names[] = {"RELAX", "FREEDRIVE", "HOLD", "EXECUTE"};
+    RCLCPP_WARN(this->get_logger(), "[REJECT] Cannot execute trajectory in %s mode, switch to HOLD first",
+                mode <= ControlMode::EXECUTE ? mode_names[mode] : "UNKNOWN");
+    return rclcpp_action::GoalResponse::REJECT;
+  }
 
   bool currently_executing;
   {
@@ -945,9 +1007,13 @@ void TorqueControllerActionServer::controlLoop() {
     double time_since_state =
         state_received_ ? (this->now() - last_joint_state_time_).seconds() : -1.0;
 
+    static const char* mode_names[] = {"RELAX", "FREEDRIVE", "HOLD", "EXECUTE"};
+    uint8_t m = control_mode_.load(std::memory_order_acquire);
     RCLCPP_INFO(
         this->get_logger(), "[HEALTH] Loop #%zu | Mode: %s | State age: %.1f ms | Kalman: %s",
-        control_loop_count_, is_executing_.load(std::memory_order_acquire) ? "EXECUTING" : "HOLD",
+        control_loop_count_,
+        is_executing_.load(std::memory_order_acquire) ? "EXECUTE" :
+            (m <= ControlMode::EXECUTE ? mode_names[m] : "UNKNOWN"),
         time_since_state * 1000.0, kalman_filter_enabled_ ? "ON" : "OFF");
   }
 
@@ -955,12 +1021,44 @@ void TorqueControllerActionServer::controlLoop() {
   bool executing = is_executing_.load(std::memory_order_acquire);
 
   if (!executing) {
-    // 没有活动轨迹时，发送重力补偿力矩保持位置
+    uint8_t mode = control_mode_.load(std::memory_order_acquire);
+
+    // RELAX 模式: 发全零力矩，不需要 joint_states
+    if (mode == ControlMode::RELAX) {
+      std_msgs::msg::Float64MultiArray zero_msg;
+      zero_msg.data.resize(kAllJoints, 0.0);
+      torque_pub_->publish(zero_msg);
+      return;
+    }
+
+    // 以下模式需要 joint_states
     std::lock_guard<std::mutex> state_lock(state_mutex_);
 
     if (!state_received_) {
       return;  // 还没收到状态，无法计算
     }
+
+    // FREEDRIVE 模式: 仅重力补偿，无 PD
+    if (mode == ControlMode::FREEDRIVE) {
+      KDL::JntArray tau_gravity(kArmJoints);
+      dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
+
+      std_msgs::msg::Float64MultiArray freedrive_msg;
+      freedrive_msg.data.resize(kAllJoints);
+      for (int i = 0; i < kArmJoints; i++) {
+        double limit = (i < static_cast<int>(max_torque_per_joint_.size()))
+                           ? max_torque_per_joint_[i] : max_torque_default_;
+        freedrive_msg.data[i] = std::clamp(tau_gravity(i), -limit, limit);
+      }
+      {
+        std::lock_guard<std::mutex> glock(gripper_mutex_);
+        freedrive_msg.data[kArmJoints] = gripper_torque_cmd_;
+      }
+      torque_pub_->publish(freedrive_msg);
+      return;
+    }
+
+    // HOLD 模式: 重力补偿 + PD (现有逻辑)
 
     // --- SAFETY: Check joint state timeout ---
     double time_since_last_state = (this->now() - last_joint_state_time_).seconds();
