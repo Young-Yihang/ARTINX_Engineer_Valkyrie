@@ -505,8 +505,12 @@ private:
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<TrajectoryManagerNode>();
-  rclcpp::spin(node);
+  try {
+    auto node = std::make_shared<TrajectoryManagerNode>();
+    rclcpp::spin(node);
+  } catch (const std::exception &e) {
+    RCLCPP_FATAL(rclcpp::get_logger("trajectory_manager"), "Fatal: %s", e.what());
+  }
   rclcpp::shutdown();
   return 0;
 }

@@ -83,6 +83,7 @@ public:
 
     // 先关闭串口，解除阻塞读，确保线程可退出
     try {
+      std::lock_guard<std::mutex> slock(serial_mutex_);
       if (serial_port_ && serial_port_->is_open()) {
         serial_port_->close();
       }
@@ -108,6 +109,7 @@ private:
   std::unique_ptr<drivers::common::IoContext> io_ctx_;
   std::unique_ptr<drivers::serial_driver::SerialDriver> serial_driver_;
   std::shared_ptr<drivers::serial_driver::SerialPort> serial_port_;
+  std::mutex serial_mutex_;  // [FIX] 保护 serial_port_ 跨线程操作 (RX/TX/析构)
   std::thread receive_thread_;
 
   // ROS2 通信
@@ -165,18 +167,28 @@ private:
   }
 
   bool ensureSerialOpen(std::chrono::milliseconds backoff) {
+    std::lock_guard<std::mutex> slock(serial_mutex_);
     if (serial_port_ && serial_port_->is_open()) {
       return true;
     }
 
     try {
       if (!serial_port_) {
-        // 极端情况下（initSerial 未完成）尝试重新 init
-        return initSerial(device_name_.empty() ? std::string("/dev/ttyS4") : device_name_,
+        // 极端情况下（initSerial 未完成）尝试重新 init — 使用已声明的设备名
+        return initSerial(device_name_.empty() ? std::string("/dev/ttyACM0") : device_name_,
                           static_cast<int>(baud_rate_ == 0 ? 921600 : baud_rate_));
       }
       serial_port_->open();
-      return serial_port_->is_open();
+      if (serial_port_->is_open()) {
+        // 重连后 flush 缓冲区，避免旧数据被当新数据解析
+        try {
+          std::vector<uint8_t> flush_buf(512);
+          serial_port_->receive(flush_buf);  // 读空缓冲区
+        } catch (...) { /* 忽略 flush 错误 */ }
+        RCLCPP_WARN(this->get_logger(), "[RECONNECT] Serial reopened, buffer flushed");
+        return true;
+      }
+      return false;
     } catch (const std::exception &e) {
       RCLCPP_WARN(this->get_logger(), "[WARN] Serial reopen failed: %s", e.what());
       std::this_thread::sleep_for(backoff);
@@ -217,27 +229,31 @@ private:
         return false;
       }
 
-      if (!serial_port_ || !serial_port_->is_open()) {
-        return false;
-      }
-
       const size_t need = len - received;
       tmp.assign(need, 0);
 
       size_t n = 0;
-      try {
-        n = serial_port_->receive(tmp);
-      } catch (const std::exception &e) {
-        RCLCPP_ERROR(this->get_logger(), "[ERROR] Serial receive: %s", e.what());
-        try {
-          serial_port_->close();
-        } catch (...) {
-          RCLCPP_DEBUG(this->get_logger(), "Serial port close failed during cleanup");
+      {
+        std::lock_guard<std::mutex> slock(serial_mutex_);
+        if (!serial_port_ || !serial_port_->is_open()) {
+          return false;
         }
-        return false;
+        try {
+          n = serial_port_->receive(tmp);
+        } catch (const std::exception &e) {
+          RCLCPP_ERROR(this->get_logger(), "[ERROR] Serial receive: %s", e.what());
+          try {
+            serial_port_->close();
+          } catch (...) {
+            RCLCPP_DEBUG(this->get_logger(), "Serial port close failed during cleanup");
+          }
+          return false;
+        }
       }
 
       if (n == 0) {
+        // [FIX] 避免忙循环耗尽 CPU
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
         continue;
       }
 
@@ -297,8 +313,11 @@ private:
 
   // 新增：200Hz定时发送循环（解耦架构核心）
   void sendLoop() {
-    if (!serial_port_ || !serial_port_->is_open()) {
-      return;  // 串口未打开，等待自动重连
+    {
+      std::lock_guard<std::mutex> slock(serial_mutex_);
+      if (!serial_port_ || !serial_port_->is_open()) {
+        return;  // 串口未打开，等待自动重连
+      }
     }
 
     const bool force_zero = this->get_parameter("force_zero_torque").as_bool();
@@ -310,12 +329,18 @@ private:
       std::lock_guard<std::mutex> lock(torque_cache_mutex_);
       if (torque_data_valid_) {
         double age = (this->now() - last_torque_update_).seconds();
-        if (age > 0.01) {
+        if (age > 0.1) {
+          // 100ms 无新力矩数据 → 自动失效，发零保护
+          torque_data_valid_ = false;
+          std::fill(cached_torques_, cached_torques_ + SerialProtocol::NUM_ALL_JOINTS, 0.0f);
+          RCLCPP_ERROR(this->get_logger(),
+                       "[SAFETY] Torque data stale (%.0f ms), invalidated → sending zeros", age * 1000);
+        } else if (age > 0.01) {
           RCLCPP_WARN_THROTTLE(
               this->get_logger(), *this->get_clock(), 2000,
-              "[WARN] Torque data stale (%.1f ms old), continuing with cached values", age * 1000);
+              "[WARN] Torque data slightly stale (%.1f ms old)", age * 1000);
         }
-        data_fresh = true;
+        data_fresh = torque_data_valid_;  // 可能刚被清除
       } else {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                              "[WARN] No torque data received yet, sending zeros");
@@ -340,7 +365,9 @@ private:
     }
 
     auto sendRaw = [&](const std::vector<uint8_t> &pkt) {
+      std::lock_guard<std::mutex> slock(serial_mutex_);
       try {
+        if (!serial_port_ || !serial_port_->is_open()) return;
         const size_t sent = serial_port_->send(pkt);
         if (sent != pkt.size()) {
           RCLCPP_WARN(this->get_logger(), "[WARN] Partial send: %zu/%zu", sent, pkt.size());
@@ -459,10 +486,15 @@ private:
           } break;
 
           case READ_BODY:
+            // 防御性校验: data_len 已过 CRC8，但二次确认防止逻辑错误
+            if (data_len > 256) {
+              RCLCPP_ERROR(this->get_logger(), "[SAFETY] data_len=%u too large in READ_BODY, resync", data_len);
+              state = WAIT_SOF;
+              break;
+            }
             // Body size = CmdID(2) + DataLen + CRC16(2)
-            size_t body_size = 2 + data_len + 2;  // CmdID(2) + data_len + CRC16(2)
-
             {
+            size_t body_size = 2 + data_len + 2;  // CmdID(2) + data_len + CRC16(2)
               std::vector<uint8_t> body(body_size);
               if (!readExact(body.data(), body_size)) {
                 state = WAIT_SOF;
@@ -489,6 +521,7 @@ private:
       } catch (const std::exception &e) {
         RCLCPP_ERROR(this->get_logger(), "[ERROR] Receive: %s", e.what());
         try {
+          std::lock_guard<std::mutex> slock(serial_mutex_);
           if (serial_port_ && serial_port_->is_open()) {
             serial_port_->close();
           }
@@ -509,11 +542,19 @@ private:
     (void)flags;
 
     if (cmd_id == SerialProtocol::CMD_JOINT_FEEDBACK) {
+      // 校验 payload 长度: 7 joints × (float+float+uint32) = 7×12 = 84 bytes
+      constexpr size_t expected_payload = SerialProtocol::NUM_ALL_JOINTS * (4 + 4 + 4);
+      if (offset + expected_payload > packet.size()) {
+        RCLCPP_ERROR(this->get_logger(),
+                     "[RX] Joint feedback packet too short: %zu bytes, need %zu",
+                     packet.size(), offset + expected_payload);
+        return;
+      }
+
       float positions[SerialProtocol::NUM_ALL_JOINTS];
       float velocities[SerialProtocol::NUM_ALL_JOINTS];
-      uint32_t islive[SerialProtocol::NUM_ALL_JOINTS];  // 存活状态（暂不使用）
+      uint32_t islive[SerialProtocol::NUM_ALL_JOINTS];
 
-      // Payload: [Pos0, Spd0, IsLive0, ..., Pos6(Gripper), Spd6, IsLive6]
       for (size_t i = 0; i < SerialProtocol::NUM_ALL_JOINTS; ++i) {
         positions[i] = SerialProtocol::read_float(packet.data(), offset);
         velocities[i] = SerialProtocol::read_float(packet.data(), offset);
@@ -612,8 +653,12 @@ private:
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<HardwareInterfaceNode>();
-  rclcpp::spin(node);
+  try {
+    auto node = std::make_shared<HardwareInterfaceNode>();
+    rclcpp::spin(node);
+  } catch (const std::exception &e) {
+    RCLCPP_FATAL(rclcpp::get_logger("hardware_interface"), "Fatal: %s", e.what());
+  }
   rclcpp::shutdown();
   return 0;
 }

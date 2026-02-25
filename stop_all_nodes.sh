@@ -66,20 +66,21 @@ else
 fi
 echo -e "${YELLOW}清理残留节点...${NC}"
 
-# 节点列表 (覆盖所有模式: SIM/HARDWARE)
+# 节点列表 — 按层级顺序: 应用层→控制层→接口层→基础设施
+# [FIX] 先停应用层再停控制层，避免接口先断导致控制器发送过期力矩
 nodes=(
+    "mission_executor_node"
+    "cartesian_controller_node"
+    "trajectory_manager_node"
+    "torque_controller_node"
     "mujoco_interface_node"
     "hardware_interface_node"
-    "torque_controller_node"
-    "trajectory_manager_node"
-    "mission_executor_node"
     "move_group"
     "rviz2"
     "robot_state_publisher"
     "static_transform_publisher"
     "ros2_control_node"
     "controller_manager"
-    "cartesian_controller_node"
 )
 
 for node in "${nodes[@]}"; do

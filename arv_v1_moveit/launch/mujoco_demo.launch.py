@@ -34,6 +34,8 @@ def launch_setup(context, *args, **kwargs):
         package="moveit_ros_move_group",
         executable="move_group",
         output="screen",
+        respawn=True,
+        respawn_delay=2.0,
         parameters=[
             moveit_config.to_dict(),
             {"trajectory_execution.allowed_execution_duration_scaling": 2.0},

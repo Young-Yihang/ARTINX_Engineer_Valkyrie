@@ -101,10 +101,15 @@ public:
   MissionExecutorNode() : Node("mission_executor") {
     initNcurses();
 
-    trajectory_dir_ =
-        std::string(getenv("HOME")) + "/ros2_ws/src/arv_v1_moveit/config/trajectories";
-    mission_yaml_path_ =
-        std::string(getenv("HOME")) + "/ros2_ws/src/arv_v1_moveit/config/mission_sequence.yaml";
+    // [FIX] getenv("HOME") 可返回 nullptr，构造 std::string 是 UB
+    const char* home_env = getenv("HOME");
+    if (!home_env) {
+      RCLCPP_FATAL(get_logger(), "HOME environment variable not set");
+      throw std::runtime_error("HOME env not set");
+    }
+    std::string home(home_env);
+    trajectory_dir_ = home + "/ros2_ws/src/arv_v1_moveit/config/trajectories";
+    mission_yaml_path_ = home + "/ros2_ws/src/arv_v1_moveit/config/mission_sequence.yaml";
 
     load_client_ = create_client<LoadTrajectory>("/load_trajectory");
     save_client_ = create_client<SaveLastTrajectory>("/save_last_trajectory");
@@ -129,12 +134,14 @@ public:
     // 控制模式发布者
     control_mode_pub_ = create_publisher<std_msgs::msg::UInt8>("/control_mode", 10);
 
-    log("Connecting to services...", COLOR_PAIR_DEFAULT);
-    if (!load_client_->wait_for_service(10s)) {
-      log("load_trajectory service timeout", COLOR_PAIR_ERROR);
+    // 非阻塞服务检测 (避免 TUI 启动黑屏)
+    log("Checking services (non-blocking)...", COLOR_PAIR_DEFAULT);
+    if (!load_client_->wait_for_service(2s)) {
+      logWarn("load_trajectory service not ready, will retry on use");
     }
-    save_client_->wait_for_service(2s);
-    cartesian_client_->wait_for_service(2s);
+    // 其他服务不阻塞等待，首次调用时自然检测
+    save_client_->wait_for_service(500ms);
+    cartesian_client_->wait_for_service(500ms);
 
     loadMissionSequence();
     fetchTrajectories();
@@ -228,7 +235,7 @@ private:
   std::string mission_desc_;
   std::string reset_trajectory_;
   std::string mission_yaml_path_;
-  bool executing_ = false;
+  std::atomic<bool> executing_{false};
 
   // --- 轨迹管理 ---
   std::vector<TrajectoryEntry> trajectories_;
@@ -558,28 +565,39 @@ private:
       logWarn("须先切到 HOLD 模式才能执行: " + name);
       return;
     }
-    if (executing_) {
+    bool expected = false;
+    if (!executing_.compare_exchange_strong(expected, true)) {
       logWarn("Busy, ignoring: " + name);
       return;
     }
-    executing_ = true;
     log("Exec traj: " + name + "...", COLOR_PAIR_HEADER);
     auto req = std::make_shared<LoadTrajectory::Request>();
     req->name = name;
     req->execute = true;
-    auto fut = load_client_->async_send_request(req);
-    async_.post([this, fut = std::move(fut), name]() mutable {
-      try {
-        auto res = fut.get();
-        if (res->success)
-          logOk("Done: " + name);
-        else
-          logErr("Fail: " + name + " - " + res->message);
-      } catch (const std::exception& e) {
-        logErr("Error: " + std::string(e.what()));
-      }
+    // [FIX] try-catch 防 async_send_request 异常导致 executing_ 卡死
+    try {
+      auto fut = load_client_->async_send_request(req);
+      async_.post([this, fut = std::move(fut), name]() mutable {
+        try {
+          // [FIX] 加超时，防服务节点崩溃时永久阻塞
+          if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+            auto res = fut.get();
+            if (res->success)
+              logOk("Done: " + name);
+            else
+              logErr("Fail: " + name + " - " + res->message);
+          } else {
+            logErr("Timeout: " + name);
+          }
+        } catch (const std::exception& e) {
+          logErr("Error: " + std::string(e.what()));
+        }
+        executing_ = false;
+      });
+    } catch (const std::exception& e) {
+      logErr("Request failed: " + std::string(e.what()));
       executing_ = false;
-    });
+    }
   }
 
   // --- 状态机操作 ---
@@ -607,10 +625,6 @@ private:
       logWarn("须先切到 HOLD 模式 [2] 才能执行轨迹");
       return;
     }
-    if (executing_) {
-      logWarn("Busy executing...");
-      return;
-    }
     if (current_idx_ >= states_.size()) {
       log("All states finished.");
       return;
@@ -625,57 +639,78 @@ private:
       return;
     }
 
-    executing_ = true;
+    bool expected = false;
+    if (!executing_.compare_exchange_strong(expected, true)) {
+      logWarn("Busy executing...");
+      return;
+    }
     log("Exec [" + st.id + "] : " + st.trajectory + "...", COLOR_PAIR_HEADER);
 
     auto req = std::make_shared<LoadTrajectory::Request>();
     req->name = st.trajectory;
     req->execute = true;
-    auto fut = load_client_->async_send_request(req);
-
-    async_.post([this, fut = std::move(fut), id = st.id]() mutable {
-      try {
-        auto res = fut.get();
-        if (res->success) {
-          logOk("Success: " + id + " (" + std::to_string(res->duration) + "s)");
-          std::lock_guard<std::mutex> lk(status_mu_);
-          if (current_idx_ + 1 < states_.size()) current_idx_++;
-        } else {
-          logErr("Fail: " + id + " - " + res->message);
+    try {
+      auto fut = load_client_->async_send_request(req);
+      async_.post([this, fut = std::move(fut), id = st.id]() mutable {
+        try {
+          if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+            auto res = fut.get();
+            if (res->success) {
+              logOk("Success: " + id + " (" + std::to_string(res->duration) + "s)");
+              std::lock_guard<std::mutex> lk(status_mu_);
+              if (current_idx_ + 1 < states_.size()) current_idx_++;
+            } else {
+              logErr("Fail: " + id + " - " + res->message);
+            }
+          } else {
+            logErr("Timeout: " + id);
+          }
+        } catch (const std::exception& e) {
+          logErr("Error: " + std::string(e.what()));
         }
-      } catch (const std::exception& e) {
-        logErr("Error: " + std::string(e.what()));
-      }
+        executing_ = false;
+      });
+    } catch (const std::exception& e) {
+      logErr("Request failed: " + std::string(e.what()));
       executing_ = false;
-    });
+    }
   }
 
   void resetToIdle() {
-    if (executing_) return;
     if (!reset_trajectory_.empty()) {
-      executing_ = true;
+      bool expected = false;
+      if (!executing_.compare_exchange_strong(expected, true)) return;
       log("Resetting via: " + reset_trajectory_ + "...");
       auto req = std::make_shared<LoadTrajectory::Request>();
       req->name = reset_trajectory_;
       req->execute = true;
-      auto fut = load_client_->async_send_request(req);
-      async_.post([this, fut = std::move(fut)]() mutable {
-        try {
-          auto res = fut.get();
-          if (res->success) {
-            logOk("Reset OK.");
-            std::lock_guard<std::mutex> lk(status_mu_);
-            current_idx_ = 0;
-          } else {
-            logErr("Reset Fail: " + res->message);
+      try {
+        auto fut = load_client_->async_send_request(req);
+        async_.post([this, fut = std::move(fut)]() mutable {
+          try {
+            if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+              auto res = fut.get();
+              if (res->success) {
+                logOk("Reset OK.");
+                std::lock_guard<std::mutex> lk(status_mu_);
+                current_idx_ = 0;
+              } else {
+                logErr("Reset Fail: " + res->message);
+              }
+            } else {
+              logErr("Timeout: reset trajectory");
+            }
+          } catch (const std::exception& e) {
+            logErr(std::string("Exception: ") + e.what());
+          } catch (...) {
+            logErr("Unknown exception");
           }
-        } catch (const std::exception& e) {
-          logErr(std::string("Exception: ") + e.what());
-        } catch (...) {
-          logErr("Unknown exception");
-        }
+          executing_ = false;
+        });
+      } catch (const std::exception& e) {
+        logErr("Request failed: " + std::string(e.what()));
         executing_ = false;
-      });
+      }
     } else {
       current_idx_ = 0;
       logOk("Reset to IDLE.");
@@ -707,30 +742,39 @@ private:
   }
 
   void executeTraj(const std::string& name) {
-    if (executing_) {
+    bool expected = false;
+    if (!executing_.compare_exchange_strong(expected, true)) {
       logWarn("Busy...");
       return;
     }
-    executing_ = true;
     log("Executing: " + name + "...");
     auto req = std::make_shared<LoadTrajectory::Request>();
     req->name = name;
     req->execute = true;
-    auto fut = load_client_->async_send_request(req);
-    async_.post([this, fut = std::move(fut), name]() mutable {
-      try {
-        auto res = fut.get();
-        if (res->success)
-          logOk("Done: " + name);
-        else
-          logErr("Fail: " + res->message);
-      } catch (const std::exception& e) {
-        logErr(std::string("Exception: ") + e.what());
-      } catch (...) {
-        logErr("Unknown exception");
-      }
+    try {
+      auto fut = load_client_->async_send_request(req);
+      async_.post([this, fut = std::move(fut), name]() mutable {
+        try {
+          if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+            auto res = fut.get();
+            if (res->success)
+              logOk("Done: " + name);
+            else
+              logErr("Fail: " + res->message);
+          } else {
+            logErr("Timeout: " + name);
+          }
+        } catch (const std::exception& e) {
+          logErr(std::string("Exception: ") + e.what());
+        } catch (...) {
+          logErr("Unknown exception");
+        }
+        executing_ = false;
+      });
+    } catch (const std::exception& e) {
+      logErr("Request failed: " + std::string(e.what()));
       executing_ = false;
-    });
+    }
   }
 
   void handleSaveName(const std::string& name) {
@@ -769,21 +813,29 @@ private:
     auto req = std::make_shared<SaveLastTrajectory::Request>();
     req->name = name;
     req->description = desc;
-    auto fut = save_client_->async_send_request(req);
-    async_.post([this, fut = std::move(fut), name]() mutable {
-      try {
-        auto res = fut.get();
-        if (res->success)
-          logOk("Saved: " + name);
-        else
-          logErr("Save Fail: " + res->message);
-      } catch (const std::exception& e) {
-        logErr(std::string("Exception: ") + e.what());
-      } catch (...) {
-        logErr("Unknown exception");
-      }
-      fetchTrajectories();
-    });
+    try {
+      auto fut = save_client_->async_send_request(req);
+      async_.post([this, fut = std::move(fut), name]() mutable {
+        try {
+          if (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
+            auto res = fut.get();
+            if (res->success)
+              logOk("Saved: " + name);
+            else
+              logErr("Save Fail: " + res->message);
+          } else {
+            logErr("Save timeout: " + name);
+          }
+        } catch (const std::exception& e) {
+          logErr(std::string("Exception: ") + e.what());
+        } catch (...) {
+          logErr("Unknown exception");
+        }
+        fetchTrajectories();
+      });
+    } catch (const std::exception& e) {
+      logErr("Save request failed: " + std::string(e.what()));
+    }
   }
 
   void handleDeleteConfirm(int k) {
@@ -826,20 +878,27 @@ private:
     gripper_last_sent_ = torque;
     auto req = std::make_shared<GripperControl::Request>();
     req->torque = torque;
-    auto fut = gripper_client_->async_send_request(req);
-
-    async_.post([this, fut = std::move(fut), torque]() mutable {
-      try {
-        auto res = fut.get();
-        if (res->success) {
-          logOk("Gripper cmd sent: " + std::to_string(torque));
-        } else {
-          logErr("Gripper fail: " + res->message);
+    try {
+      auto fut = gripper_client_->async_send_request(req);
+      async_.post([this, fut = std::move(fut), torque]() mutable {
+        try {
+          if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+            auto res = fut.get();
+            if (res->success) {
+              logOk("Gripper cmd sent: " + std::to_string(torque));
+            } else {
+              logErr("Gripper fail: " + res->message);
+            }
+          } else {
+            logErr("Gripper timeout");
+          }
+        } catch (const std::exception& e) {
+          logErr("Gripper exception: " + std::string(e.what()));
         }
-      } catch (const std::exception& e) {
-        logErr("Gripper exception: " + std::string(e.what()));
-      }
-    });
+      });
+    } catch (const std::exception& e) {
+      logErr("Gripper request failed: " + std::string(e.what()));
+    }
   }
 
   // --- 接管操作：笛卡尔 (Jogging) ---
