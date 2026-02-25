@@ -17,12 +17,12 @@
 #include <fstream>
 #include <functional>
 #include <future>
-#include <queue>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <mutex>
+#include <queue>
 #include <rclcpp/rclcpp.hpp>
 #include <sstream>
 #include <thread>
@@ -155,6 +155,7 @@ private:
     std::mutex mu_;
     std::condition_variable cv_;
     std::atomic<bool> stop_{false};
+
   public:
     AsyncTaskRunner() {
       worker_ = std::thread([this] {
@@ -172,13 +173,19 @@ private:
       });
     }
     ~AsyncTaskRunner() {
-      { std::lock_guard<std::mutex> lk(mu_); stop_ = true; }
+      {
+        std::lock_guard<std::mutex> lk(mu_);
+        stop_ = true;
+      }
       cv_.notify_one();
       if (worker_.joinable()) worker_.join();
     }
     template <typename F>
     void post(F&& fn) {
-      { std::lock_guard<std::mutex> lk(mu_); tasks_.push(Task(std::forward<F>(fn))); }
+      {
+        std::lock_guard<std::mutex> lk(mu_);
+        tasks_.push(Task(std::forward<F>(fn)));
+      }
       cv_.notify_one();
     }
   };
@@ -316,8 +323,11 @@ private:
           }
           traj_page_ = 0;
         }
-      } catch (const std::exception& e) { logErr(std::string("Exception: ") + e.what()); }
-      catch (...) { logErr("Unknown exception"); }
+      } catch (const std::exception& e) {
+        logErr(std::string("Exception: ") + e.what());
+      } catch (...) {
+        logErr("Unknown exception");
+      }
     });
   }
 
@@ -606,8 +616,11 @@ private:
           } else {
             logErr("Reset Fail: " + res->message);
           }
-        } catch (const std::exception& e) { logErr(std::string("Exception: ") + e.what()); }
-        catch (...) { logErr("Unknown exception"); }
+        } catch (const std::exception& e) {
+          logErr(std::string("Exception: ") + e.what());
+        } catch (...) {
+          logErr("Unknown exception");
+        }
         executing_ = false;
       });
     } else {
@@ -658,8 +671,11 @@ private:
           logOk("Done: " + name);
         else
           logErr("Fail: " + res->message);
-      } catch (const std::exception& e) { logErr(std::string("Exception: ") + e.what()); }
-      catch (...) { logErr("Unknown exception"); }
+      } catch (const std::exception& e) {
+        logErr(std::string("Exception: ") + e.what());
+      } catch (...) {
+        logErr("Unknown exception");
+      }
       executing_ = false;
     });
   }
@@ -708,8 +724,11 @@ private:
           logOk("Saved: " + name);
         else
           logErr("Save Fail: " + res->message);
-      } catch (const std::exception& e) { logErr(std::string("Exception: ") + e.what()); }
-      catch (...) { logErr("Unknown exception"); }
+      } catch (const std::exception& e) {
+        logErr(std::string("Exception: ") + e.what());
+      } catch (...) {
+        logErr("Unknown exception");
+      }
       fetchTrajectories();
     });
   }
@@ -725,8 +744,11 @@ private:
             logOk("Deleted: " + trajectories_[idx].name);
             fetchTrajectories();
           }
-        } catch (const std::exception& e) { logErr(std::string("Exception: ") + e.what()); }
-        catch (...) { logErr("Unknown exception"); }
+        } catch (const std::exception& e) {
+          logErr(std::string("Exception: ") + e.what());
+        } catch (...) {
+          logErr("Unknown exception");
+        }
       }
     }
     input_mode_ = InputMode::NONE;

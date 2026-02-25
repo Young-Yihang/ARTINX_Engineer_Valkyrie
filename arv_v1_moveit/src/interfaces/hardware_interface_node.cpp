@@ -530,13 +530,12 @@ private:
         const uint8_t seq = packet[offset + 2];
 
         auto msg = std_msgs::msg::Int32();
-        msg.data = (static_cast<int32_t>(task_cmd) << 16) |
-                   (static_cast<int32_t>(param) << 8) |
+        msg.data = (static_cast<int32_t>(task_cmd) << 16) | (static_cast<int32_t>(param) << 8) |
                    static_cast<int32_t>(seq);
         task_command_pub_->publish(msg);
 
-        RCLCPP_INFO(this->get_logger(),
-                     "[RX] TaskCmd 0x%02X param=%u seq=%u", task_cmd, param, seq);
+        RCLCPP_INFO(this->get_logger(), "[RX] TaskCmd 0x%02X param=%u seq=%u", task_cmd, param,
+                    seq);
       }
     }
   }

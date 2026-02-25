@@ -20,21 +20,21 @@
 #include <string>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
+#include "arv_v1_interfaces/srv/gripper_control.hpp"
 #include "cascade_pid.hpp"
 #include "dynamics_computer.hpp"
 #include "kalman_filter.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
-#include "arv_v1_interfaces/srv/gripper_control.hpp"
 
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GoalHandleFJT = rclcpp_action::ServerGoalHandle<FollowJointTrajectory>;
 
 class TorqueControllerActionServer : public rclcpp::Node  // 节点类生成
 {
-  static constexpr int kArmJoints = 6;   // 6-DOF arm
-  static constexpr int kAllJoints = 7;   // 6-DOF arm + 1 gripper
-public:  // 构造函数log
+  static constexpr int kArmJoints = 6;  // 6-DOF arm
+  static constexpr int kAllJoints = 7;  // 6-DOF arm + 1 gripper
+public:                                 // 构造函数log
   TorqueControllerActionServer()
       : Node("torque_controller_action_server"),
         is_executing_(false),
@@ -119,12 +119,14 @@ public:  // 构造函数log
 
     // Load gripper force limit from config (prismatic joint, unit: N)
     this->declare_parameter("safety.max_torque_per_joint.joint_gripper1", -1.0);
-    double gripper_limit = this->get_parameter("safety.max_torque_per_joint.joint_gripper1").as_double();
+    double gripper_limit =
+        this->get_parameter("safety.max_torque_per_joint.joint_gripper1").as_double();
     if (gripper_limit > 0) {
       gripper_max_torque_ = gripper_limit;
     }
 
-    RCLCPP_INFO(this->get_logger(), "[SAFETY] Timeout: %.0f ms, Velocity sanity: %.1f rad/s, Gripper limit: %.1f N",
+    RCLCPP_INFO(this->get_logger(),
+                "[SAFETY] Timeout: %.0f ms, Velocity sanity: %.1f rad/s, Gripper limit: %.1f N",
                 joint_state_timeout_sec_ * 1000.0, max_velocity_sanity_, gripper_max_torque_);
 
     // --- 初始化动力学求解器 ---
@@ -206,17 +208,16 @@ public:  // 构造函数log
 
     // --- 创建力矩/力发布者 ---
     // 7-element array: [0-5] arm joint torques (Nm), [6] gripper force (N, prismatic)
-    torque_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
-        "/effort_controller/commands",
-        10);
+    torque_pub_ =
+        this->create_publisher<std_msgs::msg::Float64MultiArray>("/effort_controller/commands", 10);
 
-    RCLCPP_INFO(this->get_logger(), "[OK] Effort publisher created: /effort_controller/commands (6×Nm + 1×N)");
+    RCLCPP_INFO(this->get_logger(),
+                "[OK] Effort publisher created: /effort_controller/commands (6×Nm + 1×N)");
 
     // --- 创建夹爪控制服务 ---
     gripper_service_ = this->create_service<arv_v1_interfaces::srv::GripperControl>(
-        "/gripper_control",
-        std::bind(&TorqueControllerActionServer::gripperControlCallback, this,
-                  std::placeholders::_1, std::placeholders::_2));
+        "/gripper_control", std::bind(&TorqueControllerActionServer::gripperControlCallback, this,
+                                      std::placeholders::_1, std::placeholders::_2));
     RCLCPP_INFO(this->get_logger(), "[OK] Gripper control service created: /gripper_control");
 
     // --- 创建轨迹转发发布者 ---
@@ -284,8 +285,8 @@ private:
 
   // 夹爪控制 (prismatic joint, 单位: N)
   std::mutex gripper_mutex_;
-  double gripper_torque_cmd_ = 0.0;     // 当前夹爪力指令 (N)
-  double gripper_max_torque_ = 70.0;    // 夹爪力限幅 (N), 从yaml覆盖
+  double gripper_torque_cmd_ = 0.0;   // 当前夹爪力指令 (N)
+  double gripper_max_torque_ = 70.0;  // 夹爪力限幅 (N), 从yaml覆盖
   rclcpp::Service<arv_v1_interfaces::srv::GripperControl>::SharedPtr gripper_service_;
 
   // Action 回调函数
@@ -784,7 +785,7 @@ bool TorqueControllerActionServer::interpolateTrajectory(
       if (i < first_point.positions.size()) {
         q_d(i) = first_point.positions[i];
       } else {
-        q_d(i) = 0.0; // Fail-safe
+        q_d(i) = 0.0;  // Fail-safe
       }
       qd_d(i) = (i < first_point.velocities.size()) ? first_point.velocities[i] : 0.0;
       qdd_d(i) = (i < first_point.accelerations.size()) ? first_point.accelerations[i] : 0.0;
@@ -887,7 +888,8 @@ void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_
     return;
   }
 
-  std::vector<double> pos_ref(kArmJoints), pos_fdb(kArmJoints), vel_fdb(kArmJoints), torque_out(kArmJoints);
+  std::vector<double> pos_ref(kArmJoints), pos_fdb(kArmJoints), vel_fdb(kArmJoints),
+      torque_out(kArmJoints);
 
   // 准备输入数据
   for (size_t i = 0; i < kArmJoints; i++) {
@@ -1031,9 +1033,11 @@ void TorqueControllerActionServer::controlLoop() {
     // --- 修改：PD 控制目标位置 ---
     KDL::JntArray tau_pd(kArmJoints);
     if (has_target_) {
-      computeFeedbackTorque(q_target_, KDL::JntArray(kArmJoints), q_actual_, q_dot_filtered_, tau_pd);
+      computeFeedbackTorque(q_target_, KDL::JntArray(kArmJoints), q_actual_, q_dot_filtered_,
+                            tau_pd);
     } else {
-      computeFeedbackTorque(q_actual_, KDL::JntArray(kArmJoints), q_actual_, q_dot_filtered_, tau_pd);
+      computeFeedbackTorque(q_actual_, KDL::JntArray(kArmJoints), q_actual_, q_dot_filtered_,
+                            tau_pd);
     }
 
     // 发布力矩：重力补偿 + PD 控制
@@ -1108,7 +1112,8 @@ void TorqueControllerActionServer::controlLoop() {
     KDL::JntArray tau_pd(kArmJoints);
     if (has_target_) {
       // 期望位置 = 规划终点，期望速度 = 0
-      computeFeedbackTorque(q_target_, KDL::JntArray(kArmJoints), q_actual_copy, qd_filtered_copy, tau_pd);
+      computeFeedbackTorque(q_target_, KDL::JntArray(kArmJoints), q_actual_copy, qd_filtered_copy,
+                            tau_pd);
     } else {
       // 如果没有目标，PD 输出为 0
       for (int i = 0; i < kArmJoints; i++) {
@@ -1202,8 +1207,8 @@ void TorqueControllerActionServer::controlLoop() {
     if (!std::isfinite(tau_total(i))) {
       RCLCPP_ERROR(
           this->get_logger(),
-          "[SAFETY] Non-finite torque detected on joint %d during trajectory (ff=%.2f, fb=%.2f)",
-          i, tau_ff(i), tau_fb(i));
+          "[SAFETY] Non-finite torque detected on joint %d during trajectory (ff=%.2f, fb=%.2f)", i,
+          tau_ff(i), tau_fb(i));
       emergencyStop("Non-finite torque during trajectory execution");
       return;
     }

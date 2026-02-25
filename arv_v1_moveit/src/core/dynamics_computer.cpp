@@ -7,8 +7,7 @@
 #include <cmath>    // For std::isfinite
 #include <sstream>  // For std::ostringstream
 
-DynamicsComputer::DynamicsComputer(const KDL::Chain &chain,
-                                   const KDL::Vector &gravity)
+DynamicsComputer::DynamicsComputer(const KDL::Chain &chain, const KDL::Vector &gravity)
     : gravity_(gravity) {
   dyn_param_ = std::make_unique<KDL::ChainDynParam>(chain, gravity_);
 }
