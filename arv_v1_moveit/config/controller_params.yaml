@@ -5,7 +5,7 @@
   ros__parameters:
     # ========== 卡尔曼滤波器（速度滤波，降低噪声）==========
     kalman:
-      enabled: true
+      enabled: false
       Q_pos: 1.0e-5    # 过程噪声：位置
       Q_vel: 1.0e-4    # 过程噪声：速度
       R_pos: 1.0e-3    # 测量噪声：位置
@@ -14,58 +14,64 @@
     # 级联P+PI: 外环P(位置→速度), 内环PI(速度→力矩)
     cascade_pid:
       joint_1:
-        # 外环（位置）：只用P
-        pos_Kp: 4.0    # 从30降低10倍，避免振荡
-        pos_Ki: 0.0    # 外环不用积分
-        pos_Kd: 0.0    # 外环不用微分
-        # 内环（速度）：使用PI
-        vel_Kp: 7.0    # 从旧Kd_single=1.0转换
-        vel_Ki: 0.5    # 启用积分，改善速度跟随（保守值）
-        vel_Kd: 0.0    # 内环不用微分
-        vel_limit: 10.0 # 速度限幅 rad/s
-      
-      joint_2:
-        pos_Kp: 6.0    # 降低10倍
-        pos_Ki: 0.0
+        # 外环（位置）：P + 条件积分 (anti-windup clamp)
+        pos_Kp: 4.0
+        pos_Ki: 0.3    # 位置积分：消除稳态误差，2-10s收敛
         pos_Kd: 0.0
+        max_integral_pos: 2.0  # 积分限幅 → 最大积分力矩 0.3×2=0.6 Nm
+        # 内环（速度）：PI
         vel_Kp: 7.0
-        vel_Ki: 0.5    # 启用积分，改善速度跟随
+        vel_Ki: 0.5
         vel_Kd: 0.0
         vel_limit: 10.0
-      
+
+      joint_2:
+        pos_Kp: 6.0
+        pos_Ki: 0.3
+        pos_Kd: 0.0
+        max_integral_pos: 2.0  # 最大积分力矩 0.6 Nm
+        vel_Kp: 7.0
+        vel_Ki: 0.5
+        vel_Kd: 0.0
+        vel_limit: 10.0
+
       joint_3:
-        pos_Kp: 4.0    # 降低10倍
-        pos_Ki: 0.0
+        pos_Kp: 4.0
+        pos_Ki: 0.3    # 链条摩擦靠积分缓慢消除
         pos_Kd: 0.0
+        max_integral_pos: 2.0  # 最大积分力矩 0.6 Nm
         vel_Kp: 6.0
-        vel_Ki: 0.5    # 启用积分，改善速度跟随
+        vel_Ki: 0.5
         vel_Kd: 0.0
         vel_limit: 10.0
-      
+
       joint_4:
-        pos_Kp: 1.5    # 进一步降低，消除振荡和饱和
-        pos_Ki: 0.0
+        pos_Kp: 1.5
+        pos_Ki: 0.2
         pos_Kd: 0.0
+        max_integral_pos: 0.3  # 最大积分力矩 0.06 Nm (effort limit 1.2)
         vel_Kp: 6.3
-        vel_Ki: 0.3    # 启用积分，改善速度跟随（保守）
+        vel_Ki: 0.3
         vel_Kd: 0.0
         vel_limit: 10.0
-      
+
       joint_5:
-        pos_Kp: 1.5    # 进一步降低，消除振荡和饱和
-        pos_Ki: 0.0
+        pos_Kp: 1.5
+        pos_Ki: 0.2
         pos_Kd: 0.0
+        max_integral_pos: 0.5  # 最大积分力矩 0.1 Nm (effort limit 7)
         vel_Kp: 1.0
-        vel_Ki: 0.1    # 启用积分，改善速度跟随（非常保守）
+        vel_Ki: 0.1
         vel_Kd: 0.0
         vel_limit: 10.0
-      
+
       joint_6:
-        pos_Kp: 1.00    # 进一步降低，消除振荡和饱和
-        pos_Ki: 0.0
+        pos_Kp: 1.00
+        pos_Ki: 0.15
         pos_Kd: 0.0
+        max_integral_pos: 0.3  # 最大积分力矩 0.045 Nm (effort limit 1)
         vel_Kp: 1.0
-        vel_Ki: 0.1    # 启用积分，改善速度跟随（非常保守）
+        vel_Ki: 0.1
         vel_Kd: 0.0
         vel_limit: 10.0
 

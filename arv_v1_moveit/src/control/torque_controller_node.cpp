@@ -154,15 +154,16 @@ public:                                 // 构造函数log
     for (int i = 1; i <= 6; i++) {
       std::string prefix = "cascade_pid.joint_" + std::to_string(i);
 
-      // 位置环参数（只用 P）
+      // 位置环参数（P + 条件积分 anti-windup）
       this->declare_parameter(prefix + ".pos_Kp", 10.0);
-      this->declare_parameter(prefix + ".pos_Ki", 0.0);  // 外环不用积分
-      this->declare_parameter(prefix + ".pos_Kd", 0.0);  // 外环不用微分
+      this->declare_parameter(prefix + ".pos_Ki", 0.0);
+      this->declare_parameter(prefix + ".pos_Kd", 0.0);
+      this->declare_parameter(prefix + ".max_integral_pos", 2.0);
 
-      // 速度环参数（使用 PI）
+      // 速度环参数（PI）
       this->declare_parameter(prefix + ".vel_Kp", 50.0);
-      this->declare_parameter(prefix + ".vel_Ki", 5.0);  // 内环积分消除静差
-      this->declare_parameter(prefix + ".vel_Kd", 0.0);  // 内环不用微分
+      this->declare_parameter(prefix + ".vel_Ki", 5.0);
+      this->declare_parameter(prefix + ".vel_Kd", 0.0);
 
       // 速度限制
       this->declare_parameter(prefix + ".vel_limit", 2.0);
@@ -181,12 +182,13 @@ public:                                 // 构造函数log
                          this->get_parameter(prefix + ".vel_Kd").as_double());
 
       double vel_limit = this->get_parameter(prefix + ".vel_limit").as_double();
+      double max_integral_pos = this->get_parameter(prefix + ".max_integral_pos").as_double();
 
-      cascade_pid_->setJointParams(i, pos_gains, vel_gains, vel_limit);
+      cascade_pid_->setJointParams(i, pos_gains, vel_gains, vel_limit, max_integral_pos);
     }
 
     RCLCPP_INFO(this->get_logger(),
-                "[OK] Cascade P+PI initialized (Outer: Position-P, Inner: Velocity-PI)");
+                "[OK] Cascade PI+PI initialized (Outer: Position-PI w/ anti-windup, Inner: Velocity-PI)");
 
     // --- 注册参数变化回调（必须在所有参数声明之后）---
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -1463,9 +1465,10 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
                            this->get_parameter(prefix + ".vel_Kd").as_double());
 
         double vel_limit = this->get_parameter(prefix + ".vel_limit").as_double();
+        double max_integral_pos = this->get_parameter(prefix + ".max_integral_pos").as_double();
 
         // 更新级联PID
-        cascade_pid_->setJointParams(joint_idx, pos_gains, vel_gains, vel_limit);
+        cascade_pid_->setJointParams(joint_idx, pos_gains, vel_gains, vel_limit, max_integral_pos);
 
         RCLCPP_INFO(this->get_logger(), "[CONFIG] Cascade PID Joint %d updated: %s.%s = %.2f",
                     joint_idx + 1, loop_type.c_str(), gain_type.c_str(), new_value);
