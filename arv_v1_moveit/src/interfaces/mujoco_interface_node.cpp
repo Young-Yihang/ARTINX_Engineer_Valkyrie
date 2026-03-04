@@ -209,26 +209,17 @@ private:
                                                  "joint_gripper1", "joint_gripper2"};
 
   // ========== 磁力吸引系统 ==========
-  // 物理模型: 修正重力 + 3D 弹簧固定位置
-  //   重力补偿 : 实时计算 body_mass x gravity 并施加, 与姿态无关 → 无悬垂
-  //   3D弹簧   : Kp * (anchor - pos), 临界阻尼 Kd = 2*sqrt(Kp*m)
-  //   脱离      : |pos - anchor| > detach_dist 时永久脱离
-  //   取出作用力 : 机械辟施加达到 Kp*detach_dist 以上时
-  //                就能超过脱离限, force_mag = Kp*detach_dist 设计点
+  // 恒力模型: 所有矿核指向六边形中心, 被棍子碰撞挡住 → 无穿越振荡
   struct MagnetAnchor {
     int body_id;         // MuJoCo body ID
-    double anchor[3];    // 初始世界坐标 (从 data_->xpos 读取, 保证对齐)
-    double mass;         // 该 body 的质量 (kg)
-    double detach_dist;  // 脱离阈值 (m)
-    bool detached;       // 已永久脱离
+    double anchor[3];    // 锚点: 六边形中心世界坐标
+    double force_mag;    // 吸引力大小 (N)
+    double detach_dist;  // 脱离距离 (m), 从中心算
+    bool detached;       // 已脱离标志
   };
   std::vector<MagnetAnchor> magnet_anchors_;
   double magnet_force_default_ = 14.4;  // mg + 10N
-  double magnet_detach_dist_ = 0.15;    // 脱离阈值 (m)
-  // Kp 设计: Kp * detach_dist = force_mag → Kp = 14.4/0.15 = 96 N/m
-  // 但重力已独立补偿, 可适当提高 Kp 以提升位置精度
-  double magnet_kp_ = 200.0;  // 3D 弹簧刚度 (N/m)
-  // Kd 自动按临界阻尼计算, 不需要手动调节
+  double magnet_detach_dist_ = 0.25;    // 从中心脱离距 (core~0.11m离中心, 留余量)
 
   // ========== 交互状态变量 ==========
   bool button_left_ = false;
@@ -380,21 +371,24 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
   // 碰撞组设置 (MuJoCo规则: A与B碰撞 ⟺ (A.contype & B.conaffinity) != 0 OR (B.contype &
   // A.conaffinity) != 0):
   //
-  //   机械臂 geom             contype=1  conaffinity=4
-  //   URDF 视觉 mesh (有vcol) contype=0  conaffinity=0  ← 纯视觉, 不参与碰撞
-  //   静态障碍物 vcol         contype=2  conaffinity=1  ← 与机械臂碰撞 (1&1=1)
-  //   可抓取物体 vcol         contype=8  conaffinity=11  ← 与机械臂碰撞 (1&1=1)
-  //                                                       必须与静态框架碰撞 (2&1=3, 8&3=11 ✓)
-  //                                                       磁力弹簧负责固定, 避免初始穿插"爆米花"
-  //   原始几何障碍物(fallback) contype=4  conaffinity=1  ← 与机械臂碰撞 (1&1=1)
+  //   机械臂 geom             contype=1(0001)  conaffinity=4(0100)
+  //   URDF 视觉 mesh (有vcol) contype=0        conaffinity=0        ← 纯视觉
+  //   静态障碍物 vcol         contype=2(0010)  conaffinity=1(0001)  ← 碰机械臂
+  //   可抓取物体 vcol         contype=8(1000)  conaffinity=3(0011)  ← 碰机械臂+矿框
+  //   地面 ground_plane       contype=4(0100)  conaffinity=9(1001)  ← 碰机械臂+矿核
+  //   其他 fallback           contype=4(0100)  conaffinity=1(0001)  ← 碰机械臂
   //
-  //   碰撞矩阵:        机械臂  静态vcol  可抓取  原始障碍
-  //     机械臂           ✗      ✓        ✓      ✓
-  //     静态vcol         ✓      ✗        ✗      ✗
-  //     可抓取           ✓      ✗        ✗      ✗
-  //     原始障碍         ✓      ✗        ✗      ✗
-  // 结果: 机械臂自碰 (1&4=0+1&4≠0...实际: contype_arm(1)&conaffinity_arm(4)=0) 禁止;
-  //       机械臂-矿核 (1&1=1) 允许; 矿核-矿框 (8&1=0和2&1=0) 禁止(磁力替代)
+  //   碰撞矩阵 (位运算验证):
+  //     pair                contype&conaffinity    结果
+  //     机械臂↔机械臂      1&4=0, 1&4=0           ✗ (无自碰)
+  //     机械臂↔静态vcol    1&1=1                  ✓
+  //     机械臂↔可抓取      1&3=1                  ✓
+  //     机械臂↔地面        1&9=1                  ✓
+  //     静态vcol↔可抓取    2&3=2                  ✓ (矿核坐在矿框上)
+  //     地面↔可抓取        4&3=0, 8&9=8           ✓ (矿核掉落有地面兜底)
+  //     可抓取↔可抓取      8&3=0, 8&3=0           ✗ (矿核间不碰撞!)
+  //     静态vcol↔静态vcol  2&1=0                  ✗
+  //     地面↔静态vcol      4&1=0, 2&9=0           ✗
   {
     size_t obs_start = mjcf_string.find("<body name=\"obstacle_");
     if (obs_start == std::string::npos) obs_start = mjcf_string.size();
@@ -417,8 +411,15 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
       }
     };
 
-    inject_contype(robot_part, " contype=\"1\" conaffinity=\"4\" friction=\"1.8 0.05 0.001\"");
-    inject_contype(obs_part, " contype=\"4\" conaffinity=\"1\" friction=\"0.001 0.001 0.0001\"");
+    // 完全非弹性碰撞:
+    //   solref="0.005 2": 5ms时间常数(1步) + 阻尼比2(重度过阻尼, 零回弹)
+    //   solimp="0.99 0.99 0.0001 0.5 2": dmin=dmax=0.99 → 99%能量吸收
+    inject_contype(robot_part,
+                   " contype=\"1\" conaffinity=\"4\" friction=\"1.8 0.05 0.001\""
+                   " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"");
+    inject_contype(obs_part,
+                   " contype=\"4\" conaffinity=\"1\" friction=\"0.001 0.001 0.0001\""
+                   " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"");
     mjcf_string = robot_part + obs_part;
   }
 
@@ -474,7 +475,6 @@ void MuJoCoInterfaceNode::collectMagnetAnchors() {
   if (params["magnet_force_N"]) magnet_force_default_ = params["magnet_force_N"].as<double>(14.4);
   if (params["magnet_detach_dist"])
     magnet_detach_dist_ = params["magnet_detach_dist"].as<double>(0.15);
-  if (params["magnet_radial_kp"]) magnet_kp_ = params["magnet_radial_kp"].as<double>(200.0);
 
   auto obstacle_ids = params["obstacle_ids"];
   if (!obstacle_ids) return;
@@ -492,47 +492,50 @@ void MuJoCoInterfaceNode::collectMagnetAnchors() {
       continue;
     }
 
-    // 锚点 = mj_forward 后的真实初始世界坐标，与 MuJoCo 内部坐标系完全一致
+    // 锚点 = ore_frame 六边形中心 (所有core共用)
+    // X = core X, YZ = 六边形几何中心
+    // 力永远指向中心 → 被棍子碰撞挡住 → 无穿越振荡
     MagnetAnchor anchor;
     anchor.body_id = bid;
-    const double *init_pos = data_->xpos + 3 * bid;
-    anchor.anchor[0] = init_pos[0];
-    anchor.anchor[1] = init_pos[1];
-    anchor.anchor[2] = init_pos[2];
-    // 质量: 直接从模型读取
-    anchor.mass = model_->body_mass[bid];
-    if (anchor.mass < 1e-6) anchor.mass = 0.45;  // fallback: 能量单元约 0.45kg
+    anchor.anchor[0] = obs["position"][0].as<double>(0);
+    anchor.anchor[1] = 0.0;  // 六边形中心 Y
+    anchor.anchor[2] = 0.7;  // 六边形中心 Z (6棒平均高度)
+    anchor.force_mag = magnet_force_default_;
     anchor.detach_dist = magnet_detach_dist_;
     anchor.detached = false;
 
     magnet_anchors_.push_back(anchor);
-    RCLCPP_INFO(get_logger(),
-                "[MAGNET] %s (body=%d) anchor=[%.3f,%.3f,%.3f] mass=%.3fkg F_detach=%.1fN",
-                id.c_str(), bid, anchor.anchor[0], anchor.anchor[1], anchor.anchor[2], anchor.mass,
-                magnet_kp_ * magnet_detach_dist_);
+    RCLCPP_INFO(get_logger(), "[MAGNET] Anchor: %s (body=%d) pos=[%.3f,%.3f,%.3f] F=%.1fN",
+                id.c_str(), bid, anchor.anchor[0], anchor.anchor[1], anchor.anchor[2],
+                anchor.force_mag);
   }
 
   RCLCPP_INFO(get_logger(), "[MAGNET] Total %zu magnet anchors registered", magnet_anchors_.size());
 }
 
 void MuJoCoInterfaceNode::applyMagnetForces() {
-  // 重力向量 (从模型配置读取, 通常 [0,0,-9.81])
-  const double gx = model_->opt.gravity[0];
-  const double gy = model_->opt.gravity[1];
-  const double gz = model_->opt.gravity[2];
-
   for (auto &ma : magnet_anchors_) {
     if (ma.detached) continue;
 
-    // 当前 body 世界坐标
+    // 获取当前 body 世界坐标
     const double *xpos = data_->xpos + 3 * ma.body_id;
-    double dx = xpos[0] - ma.anchor[0];
-    double dy = xpos[1] - ma.anchor[1];
-    double dz = xpos[2] - ma.anchor[2];
+
+    // 计算偏移向量: 锚点 - 当前位置
+    double dx = ma.anchor[0] - xpos[0];
+    double dy = ma.anchor[1] - xpos[1];
+    double dz = ma.anchor[2] - xpos[2];
     double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-    // 超过脱离阈值 → 永久脱离
-    if (dist > ma.detach_dist) {
+    // 调试日志: 前5秒每秒输出一次锚点 vs 实际位置
+    RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "[MAGNET-DBG] body=%d anchor=[%.4f,%.4f,%.4f] xpos=[%.4f,%.4f,%.4f] dist=%.4f F=%.1fN",
+        ma.body_id, ma.anchor[0], ma.anchor[1], ma.anchor[2], xpos[0], xpos[1], xpos[2], dist,
+        ma.force_mag);
+
+    // 热身保护: 前200步(~1s@200Hz)不检测脱离, 等碰撞求解器稳定
+    // 防止初始帧碰撞弹力瞬间超 detach_dist 导致误脱离
+    if (dist > ma.detach_dist && sim_step_count_ > 200) {
       ma.detached = true;
       data_->xfrc_applied[6 * ma.body_id + 0] = 0;
       data_->xfrc_applied[6 * ma.body_id + 1] = 0;
@@ -541,18 +544,25 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
       continue;
     }
 
-    // 弹簧刚度 + 临界阻尼 (无超调, 无震荡)
-    const double Kp = magnet_kp_;
-    const double Kd = 2.0 * std::sqrt(Kp * ma.mass);
-
-    // 当前线速度 (cvel: 前3=旋转, 后3=平移)
-    const double *cvel = data_->cvel + 6 * ma.body_id;
-    const double vx = cvel[3], vy = cvel[4], vz = cvel[5];
-
-    // 合力 = 重力补偿 + 弹簧拉回锚点 + 临界阻尼
-    data_->xfrc_applied[6 * ma.body_id + 0] = -ma.mass * gx - Kp * dx - Kd * vx;
-    data_->xfrc_applied[6 * ma.body_id + 1] = -ma.mass * gy - Kp * dy - Kd * vy;
-    data_->xfrc_applied[6 * ma.body_id + 2] = -ma.mass * gz - Kp * dz - Kd * vz;
+    // 施加吸引力 (方向: 指向锚点, 恒定大小)
+    if (dist > 1e-6) {
+      double scale = ma.force_mag / dist;
+      double fx = dx * scale, fy = dy * scale, fz = dz * scale;
+      data_->xfrc_applied[6 * ma.body_id + 0] = fx;
+      data_->xfrc_applied[6 * ma.body_id + 1] = fy;
+      data_->xfrc_applied[6 * ma.body_id + 2] = fz;
+      // 前10步逐帧输出力向量, 确认方向正确
+      if (sim_step_count_ < 10) {
+        RCLCPP_WARN(get_logger(),
+                    "[MAGNET-INIT] body=%d F=[%.2f,%.2f,%.2f] dist=%.4f dx=[%.4f,%.4f,%.4f]",
+                    ma.body_id, fx, fy, fz, dist, dx, dy, dz);
+      }
+    } else {
+      // 已在锚点上，清零
+      data_->xfrc_applied[6 * ma.body_id + 0] = 0;
+      data_->xfrc_applied[6 * ma.body_id + 1] = 0;
+      data_->xfrc_applied[6 * ma.body_id + 2] = 0;
+    }
   }
 }
 
@@ -801,19 +811,19 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
           } else if (st == "sphere") {
             gs << " type=\"sphere\" size=\"" << shape["dimensions"][0].as<double>(0.05) << "\"";
           }
-          // graspable vcol: contype=8, conaffinity=11(0b1011)
-          //   仅响应机械臂(bit0) → 矿核只与机械臂碰撞，不与静态框架碰撞
-          //   graspable 之间 8&1=0 → 互不碰撞 (多个矿核不堆叠碰撞)
-          //   注意: 矿核与棒子的物理约束由磁力弹簧(applyMagnetForces)提供，
-          //         不依赖碰撞接触 — 避免初始几何穿插导致"爆米花"现象
+          // graspable vcol: contype=8(1000), conaffinity=3(0011)
+          //   bit0: 碰机械臂(ct=1) ✓  bit1: 碰矿框(ct=2) ✓
+          //   bit3不设: 矿核间(ct=8) 不碰撞 → 避免初始穿插爆炸
           // 静态障碍物 vcol: contype=2, conaffinity=1
-          //   仅响应机械臂(bit0) → 机械臂碰矿框, 矿框不自碰
+          // 完全非弹性碰撞: solref 5ms+阻尼比2, solimp 99%能量吸收
           if (graspable) {
             gs << " mass=\"0\" rgba=\"" << rgba
-               << "\" contype=\"8\" conaffinity=\"11\" friction=\"0.01 0.005 0.0001\"/>\n";
+               << "\" contype=\"8\" conaffinity=\"3\" friction=\"0.01 0.005 0.0001\""
+               << " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"/>\n";
           } else {
             gs << " mass=\"0\" rgba=\"" << rgba
-               << "\" contype=\"2\" conaffinity=\"1\" friction=\"0.001 0.001 0.0001\"/>\n";
+               << "\" contype=\"2\" conaffinity=\"1\" friction=\"0.001 0.001 0.0001\""
+               << " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"/>\n";
           }
           body_ss << gs.str();
           si++;
@@ -850,8 +860,17 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
       if (graspable) {
         body_ss << "      <freejoint name=\"fj_" << id << "\"/>\n";
       }
-      body_ss << "      <geom " << geom_attrs << " rgba=\"0.5 0.5 0.5 0.4\"/>\n"
-              << "    </body>\n";
+      // 地面: contype=4 conaffinity=9(0b1001) → 碰机械臂(bit0) + 碰矿核(bit3)
+      // 非弹性碰撞, 矿核掉地面不弹
+      if (id == "ground_plane") {
+        body_ss << "      <geom " << geom_attrs << " rgba=\"0.5 0.5 0.5 0.4\""
+                << " contype=\"4\" conaffinity=\"9\""
+                << " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"/>\n"
+                << "    </body>\n";
+      } else {
+        body_ss << "      <geom " << geom_attrs << " rgba=\"0.5 0.5 0.5 0.4\"/>\n"
+                << "    </body>\n";
+      }
     }
     count++;
   }
@@ -924,6 +943,21 @@ void MuJoCoInterfaceNode::simulationStep() {
   std::lock_guard<std::mutex> lock(sim_mutex_);
   applyMagnetForces();
   mj_step(model_, data_);
+
+  // NaN 检测: 仅日志, 不重置 (调试模式)
+  if (data_->warning[mjWARN_BADQACC].number > 0) {
+    RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000,
+                          "[SAFETY] QACC NaN detected (count=%d) — reset DISABLED for debug",
+                          data_->warning[mjWARN_BADQACC].number);
+    // TODO: 调试完毕后恢复以下重置逻辑
+    // mj_resetData(model_, data_);
+    // setInitialPose();
+    // std::fill(data_->xfrc_applied, data_->xfrc_applied + 6 * model_->nbody, 0.0);
+    // std::fill(data_->ctrl, data_->ctrl + model_->nu, 0.0);
+    // collectMagnetAnchors();
+    // received_first_command_ = false;
+  }
+
   sim_step_count_++;
   publishJointStates();
 }
@@ -1161,7 +1195,23 @@ void MuJoCoInterfaceNode::keyCallback(GLFWwindow *window, int key, int scancode,
       node->opt_.flags[mjVIS_CONTACTFORCE] = node->show_forces_;
       break;
 
-    case GLFW_KEY_R:
+    case GLFW_KEY_R: {
+      std::lock_guard<std::mutex> lock(node->sim_mutex_);
+      mj_resetData(node->model_, node->data_);
+      node->setInitialPose();
+      // 清除所有外力和控制量
+      std::fill(node->data_->xfrc_applied, node->data_->xfrc_applied + 6 * node->model_->nbody,
+                0.0);
+      std::fill(node->data_->ctrl, node->data_->ctrl + node->model_->nu, 0.0);
+      // 重置磁力锚点 (恢复 detached 状态)
+      node->collectMagnetAnchors();
+      node->sim_step_count_ = 0;
+      node->received_first_command_ = false;
+      RCLCPP_INFO(node->get_logger(), "[RESET] Simulation reset to initial pose (press R)");
+      break;
+    }
+
+    case GLFW_KEY_V:
       node->cam_.azimuth = 90.0;
       node->cam_.elevation = -20.0;
       node->cam_.distance = 3.0;
