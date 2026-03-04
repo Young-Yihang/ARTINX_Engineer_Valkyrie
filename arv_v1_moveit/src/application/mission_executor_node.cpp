@@ -344,8 +344,8 @@ private:
     if (!client->wait_for_service(1s)) return;
     auto req = std::make_shared<ListTrajectories::Request>();
     auto fut = client->async_send_request(req);
-    // Asynchronous wait to not block ncurses
-    async_.post([this, fut = std::move(fut)]() mutable {
+    // [FIX] 必须捕获 client，否则函数返回后 client 析构 → Broken promise
+    async_.post([this, client, fut = std::move(fut)]() mutable {
       try {
         if (fut.wait_for(2s) == std::future_status::ready) {
           auto res = fut.get();

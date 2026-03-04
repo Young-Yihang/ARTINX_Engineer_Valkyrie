@@ -567,8 +567,10 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
 }
 
 void MuJoCoInterfaceNode::setInitialPose() {
-  double initial_q[kSimJoints] = {0.0,    2.1746,  0.937, -1.326,
-                                  1.5028, -1.6796, 0.0,   0.0};  // 新臂零位 + 夹爪张开状态
+  // 使用 MoveIt SRDF 中定义的 "Start" 姿态值
+  // joint_1~joint_6 = {0, 2.6343, 1.0785, 0, 0, 0}
+  double initial_q[kSimJoints] = {0.0,   2.6343, 1.0785, 0.0,
+                                  0.0,   0.0,   0.0,   0.0};  // arm + gripper
   for (int i = 0; i < kSimJoints; i++) {
     data_->qpos[i] = initial_q[i];
   }
