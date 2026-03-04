@@ -211,6 +211,53 @@ ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
 
 ## Development Guidelines
 
+### Comment Standards
+
+#### File Header
+New files SHOULD have a Doxygen file header. Existing headers MUST NOT be deleted or replaced with single-line comments.
+```cpp
+/**
+ * @file filename.cpp
+ * @brief One-line English description
+ *
+ * Optional: control law formula, protocol spec, design rationale
+ */
+```
+
+#### Section Separators
+Use `// --- Section Name ---` for logical sections within a file.
+DO NOT change existing separator styles (e.g. `---` → `=====`) during unrelated changes.
+
+#### Language
+- Doxygen tags (`@file`, `@brief`, `@param`, `@return`): **English**
+- Bracketed markers (`[FIX]`, `[SAFETY]`, `[TODO]`, `[OK]`, `[ERROR]`): **English**
+- Implementation comments: Chinese or English, but stay consistent within a single function
+- DO NOT translate or rewrite existing comments during unrelated changes
+
+### Concurrency Rules
+
+#### Global Lock Ordering (torque_controller_node)
+All code paths MUST acquire locks in this order to prevent deadlocks:
+```
+action_mutex_ → state_mutex_ → filter_mutex_
+```
+**DO NOT reorder lock acquisition in any code path.** If the documented ordering comment is present, it is authoritative.
+
+#### Documentation Requirement
+Every `std::mutex` and `std::atomic` MUST have an inline comment stating:
+1. What data it protects
+2. Which threads access it
+```cpp
+std::mutex state_mutex_;  // 保护 q_actual_, q_dot_*, state_received_ (controlLoop + jointStateCallback)
+std::atomic<bool> is_executing_;  // action执行标志 (controlLoop读, handleAccepted写)
+```
+
+### Magic Numbers
+- Joint counts MUST use named constants: `kArmJoints = 6`, `kAllJoints = 7` (arm + gripper)
+- DO NOT replace named constants with literal numbers (e.g. `kArmJoints` → `6`)
+- Timing thresholds MUST include units in variable name or trailing comment:
+  `constexpr auto BYTE_TIMEOUT = std::chrono::milliseconds(200);  // 单字节超时`
+
 ### Naming Conventions (C++)
 | Element | Convention | Example |
 |---------|------------|---------|
@@ -221,6 +268,26 @@ ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
 | Member variable | `snake_case_` | `node_handle_`, `publisher_` |
 | ROS2 topics | `snake_case` | `/joint_states`, `/effort_commands` |
 | ROS2 parameters | `snake_case` | `use_cascade_pid`, `kalman.Q_vel` |
+
+### Interface Contracts (DO NOT BREAK)
+
+Changes below require **explicit approval** and hardware team coordination:
+
+#### ROS2 Topic Dimensions
+| Topic | Type | Size | Content |
+|-------|------|------|---------|
+| `/effort_controller/commands` | Float64MultiArray | **7 elements** | [J1-J6 torques (Nm), gripper force (N)] |
+| `/joint_states` | JointState | **7 joints** | 6 arm + 1 gripper (`joint_gripper1`) |
+
+#### Seasky Serial Protocol CmdIDs
+| CmdID | Direction | Freq | Payload | Description |
+|-------|-----------|------|---------|-------------|
+| `0x0001` | RX (MCU→PC) | 200Hz | 7×(float+float+uint32) = 84B | Joint feedback |
+| `0x0002` | TX (PC→MCU) | 200Hz | 6×float = 24B | Arm torques |
+| `0x0004` | TX (PC→MCU) | 50Hz | 1×uint8 | Gripper action (GRIP/RELEASE/STOP) |
+| `0x0005` | RX (MCU→PC) | On-demand | 3×uint8 | Task command (cmd+param+seq) |
+
+DO NOT change CmdID values, payload sizes, or joint counts without MCU firmware update.
 
 ### Error Handling
 ```cpp
@@ -337,6 +404,9 @@ printf("Position: %f\n", pos);
 6. **DO NOT create circular dependencies** between packages or modules
 7. **DO NOT commit untested code** to the main branch
 8. **DO NOT ignore compiler warnings** - treat `-Wall -Wextra` warnings as errors
+9. **DO NOT remove safety mechanisms** (try-catch with fallback, NaN/Inf checks, timeout protection, emergency stop paths) — degrading safety requires explicit approval
+10. **DO NOT remove existing features** (control modes, gripper control, hardware protocol support) without explicit approval — scope reduction is not refactoring
+11. **DO NOT change comment style in unrelated changes** (deleting Doxygen headers, replacing separators, translating comments) — cosmetic churn obscures real diffs
 
 ## Development Checklist
 
@@ -367,50 +437,8 @@ Before submitting code, verify:
 | ncurses | Terminal UI | mission_executor_node |
 | Pilz Industrial Motion Planner | Cartesian LIN/PTP planning | cartesian_controller_node |
 
-## Code Templates
-
-### New ROS2 Node Template
-```cpp
-#include <rclcpp/rclcpp.hpp>
-
-class MyNode : public rclcpp::Node {
-public:
-    MyNode() : Node("my_node") {
-        // Declare parameters
-        this->declare_parameter("param_name", default_value);
-
-        // Create publishers/subscribers
-        publisher_ = this->create_publisher<MsgType>("topic", 10);
-        subscription_ = this->create_subscription<MsgType>(
-            "topic", 10,
-            std::bind(&MyNode::callback, this, std::placeholders::_1));
-
-        RCLCPP_INFO(get_logger(), "Node initialized");
-    }
-
-private:
-    void callback(const MsgType::SharedPtr msg) {
-        // Process message
-    }
-
-    rclcpp::Publisher<MsgType>::SharedPtr publisher_;
-    rclcpp::Subscription<MsgType>::SharedPtr subscription_;
-};
-```
-
-### Adding New Parameters
-```yaml
-# In config/*.yaml
-my_node:
-  ros__parameters:
-    control_rate: 200.0
-    gains:
-      kp: [100.0, 80.0, 60.0, 40.0, 30.0, 20.0]
-      kd: [10.0, 8.0, 6.0, 4.0, 3.0, 2.0]
-```
-
 ---
 
-**Last Updated**: 2026-02-25
+**Last Updated**: 2026-03-02
 **Maintainer**: Young-Yihang
-**Version**: 2.3
+**Version**: 2.4

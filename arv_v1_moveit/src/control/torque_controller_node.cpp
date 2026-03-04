@@ -17,7 +17,7 @@
 #include <mutex>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>  // 力矩数组消息
-#include <std_msgs/msg/u_int8.hpp>                // 控制模式
+#include <std_msgs/msg/u_int8.hpp>               // 控制模式
 #include <string>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
@@ -187,8 +187,9 @@ public:                                 // 构造函数log
       cascade_pid_->setJointParams(i, pos_gains, vel_gains, vel_limit, max_integral_pos);
     }
 
-    RCLCPP_INFO(this->get_logger(),
-                "[OK] Cascade PI+PI initialized (Outer: Position-PI w/ anti-windup, Inner: Velocity-PI)");
+    RCLCPP_INFO(
+        this->get_logger(),
+        "[OK] Cascade PI+PI initialized (Outer: Position-PI w/ anti-windup, Inner: Velocity-PI)");
 
     // --- 注册参数变化回调（必须在所有参数声明之后）---
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -300,6 +301,9 @@ private:
   double max_torque_default_ = 20.0;
   double max_velocity_sanity_ = 20.0;
   double max_position_error_ = 0.8;
+
+  // 降级策略：异常时复用上一次有效力矩，避免零力矩导致手臂自由落体
+  std::array<double, 7> last_valid_torque_{};
 
   // 控制模式 (由 mission_executor 通过 /control_mode topic 管理)
   std::atomic<uint8_t> control_mode_{ControlMode::RELAX};  // 默认 RELAX: 上电安全
@@ -435,31 +439,30 @@ private:
       return;
     }
 
-    // 锁顺序: action_mutex_ → state_mutex_ (全局统一)
-    {
+    // [FIX] 各锁独立获取，不嵌套，消除死锁可能
+    // 1. action 域：abort 当前轨迹
+    if (is_executing_.load(std::memory_order_acquire) && new_mode != ControlMode::EXECUTE) {
       std::lock_guard<std::mutex> action_lock(action_mutex_);
-
-      // EXECUTE 中切模式 → 先 abort 当前轨迹 (已持有 action_mutex_)
-      if (is_executing_.load(std::memory_order_acquire) && new_mode != ControlMode::EXECUTE) {
+      if (is_executing_.load(std::memory_order_acquire)) {  // double-check under lock
         executionRecoveryCeremony("Control mode changed during execution");
       }
-
-      // 切 OVERDRIVE 时 → 以当前位置为目标，避免突跳
-      if (new_mode == ControlMode::OVERDRIVE) {
-        std::lock_guard<std::mutex> state_lock(state_mutex_);
-        if (state_received_) {
-          q_target_ = q_actual_;
-          has_target_ = true;
-        }
-      }
-
-      // 切模式时 reset PID 积分器
-      if (cascade_pid_) cascade_pid_->resetAll();
     }
+
+    // 2. state 域：切 OVERDRIVE 时锁定当前位置为目标
+    if (new_mode == ControlMode::OVERDRIVE) {
+      std::lock_guard<std::mutex> state_lock(state_mutex_);
+      if (state_received_) {
+        q_target_ = q_actual_;
+        has_target_ = true;
+      }
+    }
+
+    // 3. PID 无需锁保护（仅本回调和 controlLoop timer 交替访问，resetAll 本身线程安全）
+    if (cascade_pid_) cascade_pid_->resetAll();
 
     control_mode_.store(new_mode, std::memory_order_release);
 
-    static const char* mode_names[] = {"RELAX", "FREEDRIVE", "OVERDRIVE", "EXECUTE"};
+    static const char *mode_names[] = {"RELAX", "FREEDRIVE", "OVERDRIVE", "EXECUTE"};
     RCLCPP_WARN(get_logger(), "[MODE] %s -> %s", mode_names[old_mode], mode_names[new_mode]);
   }
 };
@@ -474,8 +477,9 @@ rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
   // 模式检查: 只有 OVERDRIVE 模式下才允许执行轨迹
   uint8_t mode = control_mode_.load(std::memory_order_acquire);
   if (mode != ControlMode::OVERDRIVE) {
-    static const char* mode_names[] = {"RELAX", "FREEDRIVE", "OVERDRIVE", "EXECUTE"};
-    RCLCPP_WARN(this->get_logger(), "[REJECT] Cannot execute trajectory in %s mode, switch to OVERDRIVE first",
+    static const char *mode_names[] = {"RELAX", "FREEDRIVE", "OVERDRIVE", "EXECUTE"};
+    RCLCPP_WARN(this->get_logger(),
+                "[REJECT] Cannot execute trajectory in %s mode, switch to OVERDRIVE first",
                 mode <= ControlMode::EXECUTE ? mode_names[mode] : "UNKNOWN");
     return rclcpp_action::GoalResponse::REJECT;
   }
@@ -1011,14 +1015,15 @@ void TorqueControllerActionServer::controlLoop() {
     double time_since_state =
         state_received_ ? (this->now() - last_joint_state_time_).seconds() : -1.0;
 
-    static const char* mode_names[] = {"RELAX", "FREEDRIVE", "OVERDRIVE", "EXECUTE"};
+    static const char *mode_names[] = {"RELAX", "FREEDRIVE", "OVERDRIVE", "EXECUTE"};
     uint8_t m = control_mode_.load(std::memory_order_acquire);
-    RCLCPP_INFO(
-        this->get_logger(), "[HEALTH] Loop #%zu | Mode: %s | State age: %.1f ms | Kalman: %s",
-        control_loop_count_,
-        is_executing_.load(std::memory_order_acquire) ? "EXECUTE" :
-            (m <= ControlMode::EXECUTE ? mode_names[m] : "UNKNOWN"),
-        time_since_state * 1000.0, kalman_filter_enabled_ ? "ON" : "OFF");
+    RCLCPP_INFO(this->get_logger(),
+                "[HEALTH] Loop #%zu | Mode: %s | State age: %.1f ms | Kalman: %s",
+                control_loop_count_,
+                is_executing_.load(std::memory_order_acquire)
+                    ? "EXECUTE"
+                    : (m <= ControlMode::EXECUTE ? mode_names[m] : "UNKNOWN"),
+                time_since_state * 1000.0, kalman_filter_enabled_ ? "ON" : "OFF");
   }
 
   // 检查是否正在执行轨迹（原子读取，无需锁）
@@ -1063,7 +1068,8 @@ void TorqueControllerActionServer::controlLoop() {
       freedrive_msg.data.resize(kAllJoints);
       for (int i = 0; i < kArmJoints; i++) {
         double limit = (i < static_cast<int>(max_torque_per_joint_.size()))
-                           ? max_torque_per_joint_[i] : max_torque_default_;
+                         ? max_torque_per_joint_[i]
+                         : max_torque_default_;
         freedrive_msg.data[i] = std::clamp(tau_gravity(i), -limit, limit);
       }
       {
@@ -1093,8 +1099,9 @@ void TorqueControllerActionServer::controlLoop() {
       try {
         dynamic_computer_->computeGravityTorque(q_copy, tau_gravity);
         can_compute_gravity = true;
-      } catch (...) {
-        RCLCPP_ERROR(this->get_logger(), "[SAFETY] Cannot compute gravity, sending zero torque");
+      } catch (const std::exception &e) {
+        RCLCPP_ERROR(this->get_logger(), "[SAFETY] Cannot compute gravity: %s, sending zero torque",
+                     e.what());
       }
 
       std_msgs::msg::Float64MultiArray safe_msg;
@@ -1136,17 +1143,16 @@ void TorqueControllerActionServer::controlLoop() {
 
       // --- PD 控制目标位置 ---
       if (has_target_copy) {
-        computeFeedbackTorque(q_target_copy, KDL::JntArray(kArmJoints), q_copy, qd_copy,
-                              tau_pd);
+        computeFeedbackTorque(q_target_copy, KDL::JntArray(kArmJoints), q_copy, qd_copy, tau_pd);
       } else {
-        computeFeedbackTorque(q_copy, KDL::JntArray(kArmJoints), q_copy, qd_copy,
-                              tau_pd);
+        computeFeedbackTorque(q_copy, KDL::JntArray(kArmJoints), q_copy, qd_copy, tau_pd);
       }
     } catch (const std::exception &e) {
       RCLCPP_ERROR(this->get_logger(), "[SAFETY] Dynamics exception in HOLD: %s", e.what());
-      std_msgs::msg::Float64MultiArray zero_msg;
-      zero_msg.data.resize(kAllJoints, 0.0);
-      torque_pub_->publish(zero_msg);
+      // [FIX] 复用上一次有效力矩，而非零力矩，避免手臂在重力下自由落体
+      std_msgs::msg::Float64MultiArray fallback_msg;
+      fallback_msg.data.assign(last_valid_torque_.begin(), last_valid_torque_.end());
+      torque_pub_->publish(fallback_msg);
       return;
     }
 
@@ -1162,7 +1168,6 @@ void TorqueControllerActionServer::controlLoop() {
             this->get_logger(),
             "[SAFETY] Non-finite torque detected on joint %d in idle mode (gravity=%.2f, pd=%.2f)",
             i, tau_gravity(i), tau_pd(i));
-        // [FIX] state_mutex_ 已释放，emergencyStop 可安全调用
         emergencyStop("Non-finite torque in idle mode");
         return;
       }
@@ -1182,6 +1187,11 @@ void TorqueControllerActionServer::controlLoop() {
       torque_msg.data[kArmJoints] = gripper_torque_cmd_;
     }
     torque_pub_->publish(torque_msg);
+
+    // 保存有效力矩供降级使用
+    for (int i = 0; i < kAllJoints; i++) {
+      last_valid_torque_[i] = torque_msg.data[i];
+    }
 
     return;
   }
@@ -1355,6 +1365,11 @@ void TorqueControllerActionServer::controlLoop() {
     torque_msg.data[kArmJoints] = gripper_torque_cmd_;
   }
   torque_pub_->publish(torque_msg);
+
+  // 保存有效力矩供降级使用
+  for (int i = 0; i < kAllJoints; i++) {
+    last_valid_torque_[i] = torque_msg.data[i];
+  }
 
   auto feedback = std::make_shared<FollowJointTrajectory::Feedback>();
   feedback->header.stamp = this->now();  // 获取反馈指针

@@ -34,10 +34,74 @@ mission:
       trajectory: ""
       description: "Home位 等待指令"
 
-    - id: "PICK_ORE_1"
+    - id: "PICK_ORE_1_FORWARD"
       trajectory: ""
       description: "取1号位能量单元"
 
+    - id: "PICK_ORE_1_OUT"
+      trajectory: ""
+      description: "取出1号位能量单元"
+
     - id: "DELIVER_1"
+      trajectory: ""
+      description: "送到兑矿站"
+
+    - id: "PICK_ORE_2_FORWARD"
+      trajectory: ""
+      description: "取2号位能量单元"
+
+    - id: "PICK_ORE_2_OUT"
+      trajectory: ""
+      description: "取出2号位能量单元"
+
+    - id: "DELIVER_2"
+      trajectory: ""
+      description: "送到兑矿站"
+
+    - id: "PICK_ORE_3_FORWARD"
+      trajectory: ""
+      description: "取3号位能量单元"
+
+    - id: "PICK_ORE_3_OUT"
+      trajectory: ""
+      description: "取出3号位能量单元"
+
+    - id: "DELIVER_3"
+      trajectory: ""
+      description: "送到兑矿站"
+
+    - id: "PICK_ORE_4_FORWARD"
+      trajectory: ""
+      description: "取4号位能量单元"
+
+    - id: "PICK_ORE_4_OUT"
+      trajectory: ""
+      description: "取出4号位能量单元"
+
+    - id: "DELIVER_4"
+      trajectory: ""
+      description: "送到兑矿站"
+
+    - id: "PICK_ORE_5_FORWARD"
+      trajectory: ""
+      description: "取5号位能量单元"
+
+    - id: "PICK_ORE_5_OUT"
+      trajectory: ""
+      description: "取出5号位能量单元"
+
+    - id: "DELIVER_5"
+      trajectory: ""
+      description: "送到兑矿站"
+
+    - id: "PICK_ORE_6_FORWARD"
+      trajectory: ""
+      description: "取6号位能量单元"
+
+    - id: "PICK_ORE_6_OUT"
+      trajectory: ""
+      description: "取出6号位能量单元"
+
+    - id: "DELIVER_6"
       trajectory: ""
       description: "送到兑矿站"

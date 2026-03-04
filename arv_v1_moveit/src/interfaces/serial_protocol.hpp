@@ -221,7 +221,7 @@ inline std::vector<uint8_t> buildPacket(uint16_t cmd_id, uint16_t flags,
 
 // ─────────── 具体包构建器（仅负责序列化 payload） ───────────
 
-// 6轴力矩包 (TX, 200Hz)
+// 6轴力矩包 (TX)
 inline std::vector<uint8_t> buildTorquePacket(const TorqueCommand &cmd) {
   std::vector<uint8_t> payload;
   payload.reserve(NUM_ARM_JOINTS * 4);

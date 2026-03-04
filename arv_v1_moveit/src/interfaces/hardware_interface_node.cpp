@@ -1,6 +1,7 @@
 // 硬件接口节点: 串口发送力矩指令, 接收关节状态发布至/joint_states
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <io_context/io_context.hpp>
 #include <mutex>
 #include <rclcpp/rclcpp.hpp>
@@ -19,7 +20,6 @@ public:
     // 1. 声明参数
     this->declare_parameter("serial_port", "/dev/ttyACM0");
     this->declare_parameter("baud_rate", 921600);
-    this->declare_parameter("publish_rate", 200.0);
     this->declare_parameter("simulation_mode", false);  // 新增：仿真模式参数
     this->declare_parameter("force_zero_torque",
                             false);  // 新增：强制零力矩开关（默认false允许正常控制）
@@ -27,7 +27,6 @@ public:
     // 2. 获取参数
     std::string port = this->get_parameter("serial_port").as_string();
     int baud = this->get_parameter("baud_rate").as_int();
-    double rate = this->get_parameter("publish_rate").as_double();
     simulation_mode_ = this->get_parameter("simulation_mode").as_bool();
 
     RCLCPP_INFO(this->get_logger(), "[INIT] Serial port: %s, Baud: %d", port.c_str(), baud);
@@ -81,11 +80,16 @@ public:
   ~HardwareInterfaceNode() {
     running_ = false;
 
-    // 先关闭串口，解除阻塞读，确保线程可退出
-    try {
+    // [FIX] 锁内 swap-out 端口，锁外 close，避免持锁阻塞导致 receiveLoop 死锁
+    decltype(serial_port_) port_to_close;
+    {
       std::lock_guard<std::mutex> slock(serial_mutex_);
-      if (serial_port_ && serial_port_->is_open()) {
-        serial_port_->close();
+      port_to_close = std::exchange(serial_port_, nullptr);
+    }
+    // serial_mutex_ 已释放，receiveLoop 可检测 serial_port_==null 后退出
+    try {
+      if (port_to_close && port_to_close->is_open()) {
+        port_to_close->close();
       }
     } catch (const std::exception &e) {
       RCLCPP_WARN(this->get_logger(), "[WARN] Serial close: %s", e.what());
@@ -130,7 +134,7 @@ private:
   rclcpp::Time last_torque_update_;
   bool torque_data_valid_ = false;
 
-  // 夹爪分频计数（50Hz = 每4个200Hz周期发一次）
+  // 夹爪分频计数（50Hz = 每4个200Hz周期发一次，% 4）
   uint8_t gripper_counter_ = 0;
 
   // Health monitoring
@@ -167,33 +171,31 @@ private:
   }
 
   bool ensureSerialOpen(std::chrono::milliseconds backoff) {
-    std::lock_guard<std::mutex> slock(serial_mutex_);
-    if (serial_port_ && serial_port_->is_open()) {
-      return true;
-    }
-
-    try {
-      if (!serial_port_) {
-        // 极端情况下（initSerial 未完成）尝试重新 init — 使用已声明的设备名
-        return initSerial(device_name_.empty() ? std::string("/dev/ttyACM0") : device_name_,
-                          static_cast<int>(baud_rate_ == 0 ? 921600 : baud_rate_));
-      }
-      serial_port_->open();
-      if (serial_port_->is_open()) {
-        // 重连后 flush 缓冲区，避免旧数据被当新数据解析
-        try {
-          std::vector<uint8_t> flush_buf(512);
-          serial_port_->receive(flush_buf);  // 读空缓冲区
-        } catch (...) { /* 忽略 flush 错误 */ }
-        RCLCPP_WARN(this->get_logger(), "[RECONNECT] Serial reopened, buffer flushed");
+    // [FIX] 锁内仅做状态检查和重连尝试，sleep 移到锁外避免阻塞 sendLoop/receiveLoop
+    {
+      std::lock_guard<std::mutex> slock(serial_mutex_);
+      if (serial_port_ && serial_port_->is_open()) {
         return true;
       }
-      return false;
-    } catch (const std::exception &e) {
-      RCLCPP_WARN(this->get_logger(), "[WARN] Serial reopen failed: %s", e.what());
-      std::this_thread::sleep_for(backoff);
-      return false;
+
+      const std::string dev = device_name_.empty() ? std::string("/dev/ttyACM0") : device_name_;
+      if (std::filesystem::exists(dev)) {
+        // 设备存在但端口关闭 → 完整 initSerial 重建 fd
+        const int baud = static_cast<int>(baud_rate_ == 0 ? 921600 : baud_rate_);
+        try {
+          if (initSerial(dev, baud)) {
+            RCLCPP_WARN(this->get_logger(), "[RECONNECT] Serial reinitialised: %s @ %d baud",
+                        dev.c_str(), baud);
+            return true;
+          }
+        } catch (const std::exception &e) {
+          RCLCPP_WARN(this->get_logger(), "[WARN] Serial reinit failed: %s", e.what());
+        }
+      }
     }
+    // serial_mutex_ 已释放，安全 sleep
+    std::this_thread::sleep_for(backoff);
+    return false;
   }
 
   bool readExact(uint8_t *dst, size_t len) {
@@ -311,7 +313,7 @@ private:
 
   // --- 串口收发函数 ---
 
-  // 新增：200Hz定时发送循环（解耦架构核心）
+  // 新增：定时发送循环（解耦架构核心）
   void sendLoop() {
     {
       std::lock_guard<std::mutex> slock(serial_mutex_);
@@ -334,11 +336,11 @@ private:
           torque_data_valid_ = false;
           std::fill(cached_torques_, cached_torques_ + SerialProtocol::NUM_ALL_JOINTS, 0.0f);
           RCLCPP_ERROR(this->get_logger(),
-                       "[SAFETY] Torque data stale (%.0f ms), invalidated → sending zeros", age * 1000);
+                       "[SAFETY] Torque data stale (%.0f ms), invalidated → sending zeros",
+                       age * 1000);
         } else if (age > 0.01) {
-          RCLCPP_WARN_THROTTLE(
-              this->get_logger(), *this->get_clock(), 2000,
-              "[WARN] Torque data slightly stale (%.1f ms old)", age * 1000);
+          RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                               "[WARN] Torque data slightly stale (%.1f ms old)", age * 1000);
         }
         data_fresh = torque_data_valid_;  // 可能刚被清除
       } else {
@@ -358,7 +360,7 @@ private:
       }
     }
 
-    // ── 2. 发送6轴力矩包 (200Hz) ──
+    // ── 2. 发送6轴力矩包──
     SerialProtocol::TorqueCommand cmd;
     for (size_t i = 0; i < SerialProtocol::NUM_ARM_JOINTS; ++i) {
       cmd.torques[i] = torques_to_send[i];
@@ -387,7 +389,7 @@ private:
 
     sendRaw(SerialProtocol::buildTorquePacket(cmd));
 
-    // ── 3. 分频发送夹爪包 (50Hz = 每4个周期一次) ──
+    // ── 3. 分频发送夹爪包 (50Hz = 200Hz / 4) ──
     // effort_controller/commands[6] 单位为 N (prismatic joint), 硬件只用符号判断开关:
     //   > +0.1 → GRIP,  < -0.1 → RELEASE,  else → STOP
     gripper_counter_ = (gripper_counter_ + 1) % 4;
@@ -488,13 +490,14 @@ private:
           case READ_BODY:
             // 防御性校验: data_len 已过 CRC8，但二次确认防止逻辑错误
             if (data_len > 256) {
-              RCLCPP_ERROR(this->get_logger(), "[SAFETY] data_len=%u too large in READ_BODY, resync", data_len);
+              RCLCPP_ERROR(this->get_logger(),
+                           "[SAFETY] data_len=%u too large in READ_BODY, resync", data_len);
               state = WAIT_SOF;
               break;
             }
             // Body size = CmdID(2) + DataLen + CRC16(2)
             {
-            size_t body_size = 2 + data_len + 2;  // CmdID(2) + data_len + CRC16(2)
+              size_t body_size = 2 + data_len + 2;  // CmdID(2) + data_len + CRC16(2)
               std::vector<uint8_t> body(body_size);
               if (!readExact(body.data(), body_size)) {
                 state = WAIT_SOF;
@@ -546,8 +549,8 @@ private:
       constexpr size_t expected_payload = SerialProtocol::NUM_ALL_JOINTS * (4 + 4 + 4);
       if (offset + expected_payload > packet.size()) {
         RCLCPP_ERROR(this->get_logger(),
-                     "[RX] Joint feedback packet too short: %zu bytes, need %zu",
-                     packet.size(), offset + expected_payload);
+                     "[RX] Joint feedback packet too short: %zu bytes, need %zu", packet.size(),
+                     offset + expected_payload);
         return;
       }
 

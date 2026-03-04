@@ -71,8 +71,8 @@ private:
         RCLCPP_INFO(get_logger(), "Loaded scene YAML: %s", yaml_path.c_str());
         return;
       }
-    } catch (...) {
-      RCLCPP_WARN(get_logger(), "Failed to load scene YAML from install path");
+    } catch (const std::exception& e) {
+      RCLCPP_WARN(get_logger(), "Failed to load scene YAML from install path: %s", e.what());
     }
     // 尝试源码目录
     try {
@@ -82,8 +82,8 @@ private:
         scene_yaml_ = YAML::LoadFile(src_path);
         RCLCPP_INFO(get_logger(), "Loaded scene YAML (src): %s", src_path.c_str());
       }
-    } catch (...) {
-      RCLCPP_WARN(get_logger(), "Failed to load scene YAML from source path");
+    } catch (const std::exception& e) {
+      RCLCPP_WARN(get_logger(), "Failed to load scene YAML from source path: %s", e.what());
     }
   }
 
@@ -333,8 +333,8 @@ private:
     try {
       std::string pkg_dir = ament_index_cpp::get_package_share_directory(pkg);
       return pkg_dir + uri.substr(slash);
-    } catch (...) {
-      RCLCPP_WARN(get_logger(), "Failed to resolve package URI: %s", uri.c_str());
+    } catch (const std::exception& e) {
+      RCLCPP_WARN(get_logger(), "Failed to resolve package URI '%s': %s", uri.c_str(), e.what());
       return uri;
     }
   }

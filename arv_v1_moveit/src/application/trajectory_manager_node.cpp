@@ -499,6 +499,8 @@ private:
 
     } catch (const std::exception& e) {
       RCLCPP_ERROR(this->get_logger(), "[ListTrajectories] Error: %s", e.what());
+      response->names.clear();
+      response->descriptions.clear();
     }
   }
 };
@@ -508,7 +510,7 @@ int main(int argc, char** argv) {
   try {
     auto node = std::make_shared<TrajectoryManagerNode>();
     rclcpp::spin(node);
-  } catch (const std::exception &e) {
+  } catch (const std::exception& e) {
     RCLCPP_FATAL(rclcpp::get_logger("trajectory_manager"), "Fatal: %s", e.what());
   }
   rclcpp::shutdown();
