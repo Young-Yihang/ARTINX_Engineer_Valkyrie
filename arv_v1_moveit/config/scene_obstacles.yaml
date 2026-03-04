@@ -23,7 +23,7 @@ scene_manager:
     # magnet_force_N   : 轴向恒力 = mg(≈4.4N) + 取出额外力(10N) = 14.4N
     # magnet_detach_dist: 沿轴向脱离阈值(m), 超过后磁力永久归零
     # magnet_radial_kp : 径向定心弹簧刚度(N/m), 代替套筒内壁接触, 建议50~100
-    magnet_force_N: 24.4
+    magnet_force_N: 14.4
     magnet_detach_dist: 0.15
     magnet_radial_kp: 50.0
 
