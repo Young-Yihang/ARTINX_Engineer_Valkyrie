@@ -1,7 +1,9 @@
-// 力矩控制节点 - 完整动力学前馈 + 级联P+PI反馈
-// 控制律: τ = M(q)q̈ + C(q,q̇) + G(q) + 级联PID(位置误差, 速度误差)
-// 安全机制: 超时保护(100ms)、力矩限幅、NaN检测、紧急停止自动恢复
-// 参数调节: ros2 param set /torque_controller_action_server cascade_pid.joint_X.pos_Kp 15.0
+/**
+ * @file torque_controller_node.cpp
+ * @brief Torque controller: full dynamics feedforward + cascade PID feedback
+ *
+ * Control law: τ = M(q)q̈ + C(q,q̇) + G(q) + CascadePID(e_pos, e_vel)
+ */
 
 #include <urdf/model.h>
 
@@ -87,7 +89,7 @@ public:  // 构造函数log
 
     // Kalman print removed for cleaner output
 
-    // ========== Load Safety Parameters (BEFORE initializeDynamics) ==========
+    // --- Load Safety Parameters (BEFORE initializeDynamics) ---
     this->declare_parameter("safety.max_torque_default", 20.0);
     this->declare_parameter("safety.joint_state_timeout_ms", 100);
     this->declare_parameter("safety.max_control_period_ms", 10);
@@ -115,17 +117,24 @@ public:  // 构造函数log
       }
     }
 
-    RCLCPP_INFO(this->get_logger(), "[SAFETY] Timeout: %.0f ms, Velocity sanity: %.1f rad/s",
-                joint_state_timeout_sec_ * 1000.0, max_velocity_sanity_);
+    // Load gripper force limit from config (prismatic joint, unit: N)
+    this->declare_parameter("safety.max_torque_per_joint.joint_gripper1", -1.0);
+    double gripper_limit = this->get_parameter("safety.max_torque_per_joint.joint_gripper1").as_double();
+    if (gripper_limit > 0) {
+      gripper_max_torque_ = gripper_limit;
+    }
 
-    // ========== 初始化动力学求解器 ==========
+    RCLCPP_INFO(this->get_logger(), "[SAFETY] Timeout: %.0f ms, Velocity sanity: %.1f rad/s, Gripper limit: %.1f N",
+                joint_state_timeout_sec_ * 1000.0, max_velocity_sanity_, gripper_max_torque_);
+
+    // --- 初始化动力学求解器 ---
     RCLCPP_INFO(this->get_logger(), "[INFO] Starting dynamics solver initialization...");
     if (!initializeDynamics()) {
       RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to initialize dynamics solver");
       throw std::runtime_error("Failed to initialize dynamics");
     }
 
-    // ========== 级联 P+PI 初始化（完全替代 PD）==========
+    // --- 级联 P+PI 初始化（完全替代 PD）---
     RCLCPP_INFO(this->get_logger(), "[PID] Initializing Cascade P+PI controller...");
 
     cascade_pid_ = std::make_unique<MultiJointCascadePid>(6);
@@ -168,21 +177,21 @@ public:  // 构造函数log
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Cascade P+PI initialized (Outer: Position-P, Inner: Velocity-PI)");
 
-    // ========== 注册参数变化回调（必须在所有参数声明之后）==========
+    // --- 注册参数变化回调（必须在所有参数声明之后）---
     param_callback_handle_ = this->add_on_set_parameters_callback(
         std::bind(&TorqueControllerActionServer::parametersCallback, this, std::placeholders::_1));
 
     RCLCPP_INFO(this->get_logger(),
                 "[CONFIG] Dynamic parameter tuning enabled (use 'ros2 param set' to modify)");
 
-    // ========== 订阅关节状态 ==========
+    // --- 订阅关节状态 ---
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
         "/joint_states",                                              // 话题名称
         10,                                                           // 队列大小
         std::bind(&TorqueControllerActionServer::jointStateCallback,  // 把成员回调函数绑定
                   this, std::placeholders::_1));
 
-    // ========== 创建 Action Server ==========
+    // --- 创建 Action Server ---
     // MoveIt 会发送到: /ARM_controller/follow_joint_trajectory
     action_server_ = rclcpp_action::create_server<FollowJointTrajectory>(
         this,
@@ -195,21 +204,22 @@ public:  // 构造函数log
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Action server created: /ARM_controller/follow_joint_trajectory");
 
-    // ========== 创建力矩发布者 ==========
+    // --- 创建力矩/力发布者 ---
+    // 7-element array: [0-5] arm joint torques (Nm), [6] gripper force (N, prismatic)
     torque_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
-        "/effort_controller/commands",  // ros2_control 的 effort_controller 会订阅这个话题
+        "/effort_controller/commands",
         10);
 
-    RCLCPP_INFO(this->get_logger(), "[OK] Torque publisher created: /effort_controller/commands");
+    RCLCPP_INFO(this->get_logger(), "[OK] Effort publisher created: /effort_controller/commands (6×Nm + 1×N)");
 
-    // ========== 创建夹爪控制服务 ==========
+    // --- 创建夹爪控制服务 ---
     gripper_service_ = this->create_service<arv_v1_interfaces::srv::GripperControl>(
         "/gripper_control",
         std::bind(&TorqueControllerActionServer::gripperControlCallback, this,
                   std::placeholders::_1, std::placeholders::_2));
     RCLCPP_INFO(this->get_logger(), "[OK] Gripper control service created: /gripper_control");
 
-    // ========== 创建轨迹转发发布者 ==========
+    // --- 创建轨迹转发发布者 ---
     // 用于将接收到的轨迹转发给 trajectory_manager_node 进行保存
     trajectory_forward_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
         "/ARM_controller/joint_trajectory", 10);
@@ -272,10 +282,10 @@ private:
   double max_velocity_sanity_ = 20.0;
   double max_position_error_ = 0.8;
 
-  // 夹爪控制
+  // 夹爪控制 (prismatic joint, 单位: N)
   std::mutex gripper_mutex_;
-  double gripper_torque_cmd_ = 0.0;     // 当前夹爪力矩指令
-  double gripper_max_torque_ = 5.0;     // 夹爪力矩限幅
+  double gripper_torque_cmd_ = 0.0;     // 当前夹爪力指令 (N)
+  double gripper_max_torque_ = 70.0;    // 夹爪力限幅 (N), 从yaml覆盖
   rclcpp::Service<arv_v1_interfaces::srv::GripperControl>::SharedPtr gripper_service_;
 
   // Action 回调函数
@@ -372,7 +382,7 @@ private:
 
   void controlLoop();  // 核心控制循环
 
-  // ========== 新增：参数动态调节 ==========
+  // --- 新增：参数动态调节 ---
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
   // 参数变化回调函数
@@ -486,7 +496,7 @@ void TorqueControllerActionServer::handleAccepted(
     double total_duration =
         last_point.time_from_start.sec + last_point.time_from_start.nanosec * 1e-9;
 
-    // ========== 智能积分器清零策略 ==========
+    // --- 智能积分器清零策略 ---
     // 检查位置连续性：比较轨迹起点和当前位置 (使用局部拷贝q_current)
     bool position_continuous = true;
     double max_pos_jump = 0.0;
@@ -518,7 +528,7 @@ void TorqueControllerActionServer::handleAccepted(
                   max_pos_jump);
     }
 
-    // ========== 新增：保存规划终点位置 ==========
+    // --- 新增：保存规划终点位置 ---
     if (last_point.positions.size() >= kArmJoints) {
       for (size_t i = 0; i < kArmJoints; i++) {
         q_target_(i) = last_point.positions[i];
@@ -537,7 +547,7 @@ void TorqueControllerActionServer::handleAccepted(
 
 void TorqueControllerActionServer::jointStateCallback(
     const sensor_msgs::msg::JointState::SharedPtr msg) {
-  // ========== 修复死锁 #1: 使用unique_lock手动控制锁生命周期 ==========
+  // --- 修复死锁 #1: 使用unique_lock手动控制锁生命周期 ---
   std::unique_lock<std::mutex> state_lock(state_mutex_);
 
   // 验证数据
@@ -547,7 +557,7 @@ void TorqueControllerActionServer::jointStateCallback(
     return;
   }
 
-  // ========== SAFETY: Validate sensor data for NaN/Inf and sanity ==========
+  // --- SAFETY: Validate sensor data for NaN/Inf and sanity ---
   bool has_velocity_spike = false;
   for (size_t i = 0; i < kArmJoints; i++) {
     // Check for NaN or Inf (这种情况必须完全拒绝)
@@ -588,10 +598,10 @@ void TorqueControllerActionServer::jointStateCallback(
     }
   }
 
-  // ========== 关键：即使有velocity spike也更新时间戳，避免误判timeout ==========
+  // --- 关键：即使有velocity spike也更新时间戳，避免误判timeout ---
   last_joint_state_time_ = this->now();
 
-  // ========== 修复数据竞争 #2: Kalman滤波处理 (添加filter_mutex_保护) ==========
+  // --- 修复数据竞争 #2: Kalman滤波处理 (添加filter_mutex_保护) ---
   // 注意：卡尔曼滤波器只用于速度滤波，位置保持原始测量值（编码器精度高）
   if (kalman_filter_enabled_) {
     // 获取 filter_mutex_ 保护 joint_filters_ 的访问
@@ -621,7 +631,7 @@ void TorqueControllerActionServer::jointStateCallback(
     }
   }
 
-  // ========== 修复死锁 #1: 首次接收数据时避免嵌套锁 ==========
+  // --- 修复死锁 #1: 首次接收数据时避免嵌套锁 ---
   // 策略: 先在 state_mutex_ 下拷贝数据和标记, 然后释放锁, 再获取 action_mutex_
   bool is_first_state = !state_received_;
   KDL::JntArray q_startup(kArmJoints);
@@ -632,7 +642,7 @@ void TorqueControllerActionServer::jointStateCallback(
     // 拷贝启动位置 (仍在state_mutex_保护下)
     q_startup = q_actual_;
 
-    // ========== 关键：在所有初始化完成后才标记state_received_ ==========
+    // --- 关键：在所有初始化完成后才标记state_received_ ---
     // 确保状态机闭环：只有当数据完整处理后才设置标志
     state_received_ = true;
 
@@ -697,7 +707,7 @@ bool TorqueControllerActionServer::initializeDynamics() {
     return false;
   }
 
-  // ========== SAFETY: Extract joint effort limits from URDF ==========
+  // --- SAFETY: Extract joint effort limits from URDF ---
   std::vector<std::string> joint_names = {"joint_1", "joint_2", "joint_3",
                                           "joint_4", "joint_5", "joint_6"};
   for (size_t i = 0; i < kArmJoints; i++) {
@@ -859,7 +869,7 @@ bool TorqueControllerActionServer::interpolateTrajectory(
   return true;
 }
 
-// ========== PD 反馈控制 ========== //或者双环级联PID
+// --- PD 反馈控制 ---
 void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_d,
                                                          const KDL::JntArray &qd_d,
                                                          const KDL::JntArray &q_actual,
@@ -893,7 +903,7 @@ void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_
   for (size_t i = 0; i < kArmJoints; i++) {
     tau_fb(i) = torque_out[i];
 
-    // ========== SAFETY: Torque saturation (hardware protection) ==========
+    // --- SAFETY: Torque saturation (hardware protection) ---
     double joint_limit =
         (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
     if (tau_fb(i) > joint_limit) {
@@ -911,7 +921,7 @@ void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_
 }
 
 void TorqueControllerActionServer::controlLoop() {
-  // ========== SAFETY: Monitor control loop timing ==========
+  // --- SAFETY: Monitor control loop timing ---
   rclcpp::Time now = this->now();
   if (control_loop_count_ > 0)  // Skip first iteration
   {
@@ -924,7 +934,7 @@ void TorqueControllerActionServer::controlLoop() {
   }
   last_control_loop_time_ = now;
 
-  // ========== Health monitoring ==========
+  // --- Health monitoring ---
   control_loop_count_++;
 
   // Print health status every 5 seconds (1000 loops at 200Hz)
@@ -950,7 +960,7 @@ void TorqueControllerActionServer::controlLoop() {
       return;  // 还没收到状态，无法计算
     }
 
-    // ========== SAFETY: Check joint state timeout ==========
+    // --- SAFETY: Check joint state timeout ---
     double time_since_last_state = (this->now() - last_joint_state_time_).seconds();
     if (time_since_last_state > joint_state_timeout_sec_) {
       RCLCPP_ERROR_THROTTLE(
@@ -1009,7 +1019,7 @@ void TorqueControllerActionServer::controlLoop() {
         emergencyStop("Joint state timeout");
       }
 
-      // ========== 不再return，继续等待下次循环 ==========
+      // --- 不再return，继续等待下次循环 ---
       // 这样timeout后能自动恢复，不会卡在这里
       return;
     }
@@ -1018,7 +1028,7 @@ void TorqueControllerActionServer::controlLoop() {
     KDL::JntArray tau_gravity(kArmJoints);
     dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
 
-    // ========== 修改：PD 控制目标位置 ========== //添加滤波速度
+    // --- 修改：PD 控制目标位置 ---
     KDL::JntArray tau_pd(kArmJoints);
     if (has_target_) {
       computeFeedbackTorque(q_target_, KDL::JntArray(kArmJoints), q_actual_, q_dot_filtered_, tau_pd);
@@ -1032,7 +1042,7 @@ void TorqueControllerActionServer::controlLoop() {
     for (int i = 0; i < kArmJoints; i++) {
       torque_msg.data[i] = tau_gravity(i) + tau_pd(i);
 
-      // ========== SAFETY: NaN/Inf check before publishing ==========
+      // --- SAFETY: NaN/Inf check before publishing ---
       if (!std::isfinite(torque_msg.data[i])) {
         RCLCPP_ERROR(
             this->get_logger(),
@@ -1042,7 +1052,7 @@ void TorqueControllerActionServer::controlLoop() {
         return;
       }
 
-      // ========== SAFETY: Final torque saturation ==========
+      // --- SAFETY: Final torque saturation ---
       double joint_limit =
           (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
       if (torque_msg.data[i] > joint_limit) {
@@ -1061,7 +1071,7 @@ void TorqueControllerActionServer::controlLoop() {
     return;
   }
 
-  // ========== 执行轨迹阶段 ==========
+  // --- 执行轨迹阶段 ---
   // 读取 action 状态和轨迹信息（线程安全）
   trajectory_msgs::msg::JointTrajectory current_traj_copy;
   rclcpp::Time traj_start_copy;
@@ -1112,7 +1122,7 @@ void TorqueControllerActionServer::controlLoop() {
     for (int i = 0; i < kArmJoints; i++) {
       hold_torque.data[i] = tau_gravity(i) + tau_pd(i);
 
-      // ========== SAFETY: NaN/Inf check and saturation ==========
+      // --- SAFETY: NaN/Inf check and saturation ---
       if (!std::isfinite(hold_torque.data[i])) {
         RCLCPP_ERROR(this->get_logger(),
                      "[SAFETY] Non-finite torque at trajectory completion on joint %d", i);
@@ -1188,7 +1198,7 @@ void TorqueControllerActionServer::controlLoop() {
   std_msgs::msg::Float64MultiArray torque_msg;
   torque_msg.data.resize(kAllJoints);
   for (int i = 0; i < kArmJoints; i++) {
-    // ========== SAFETY: NaN/Inf check before publishing ==========
+    // --- SAFETY: NaN/Inf check before publishing ---
     if (!std::isfinite(tau_total(i))) {
       RCLCPP_ERROR(
           this->get_logger(),
@@ -1198,7 +1208,7 @@ void TorqueControllerActionServer::controlLoop() {
       return;
     }
 
-    // ========== SAFETY: Final torque saturation ==========
+    // --- SAFETY: Final torque saturation ---
     double joint_limit =
         (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
     torque_msg.data[i] = std::max(-joint_limit, std::min(joint_limit, tau_total(i)));
@@ -1243,7 +1253,7 @@ void TorqueControllerActionServer::controlLoop() {
   current_goal_handle_->publish_feedback(feedback);
 }
 
-// ========== 参数变化回调函数实现 ==========
+// --- 参数变化回调函数实现 ---
 rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parametersCallback(
     const std::vector<rclcpp::Parameter> &parameters) {
   rcl_interfaces::msg::SetParametersResult result;
@@ -1253,7 +1263,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
   for (const auto &param : parameters) {
     const std::string &name = param.get_name();
 
-    // ========== 卡尔曼滤波器参数动态更新 ==========
+    // --- 卡尔曼滤波器参数动态更新 ---
     if (name == "kalman.enabled") {
       // 更新卡尔曼滤波开关
       kalman_filter_enabled_ = param.as_bool();
@@ -1265,7 +1275,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
         double Q_pos = this->get_parameter("kalman.Q_pos").as_double();
         double Q_vel = this->get_parameter("kalman.Q_vel").as_double();
 
-        // ========== 修复数据竞争 #2: 修改 joint_filters_ 前获取 filter_mutex_ ==========
+        // --- 修复数据竞争 #2: 修改 joint_filters_ 前获取 filter_mutex_ ---
         {
           std::lock_guard<std::mutex> filter_lock(filter_mutex_);
           for (auto &filter : joint_filters_) {
@@ -1282,7 +1292,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
         double R_pos = this->get_parameter("kalman.R_pos").as_double();
         double R_vel = this->get_parameter("kalman.R_vel").as_double();
 
-        // ========== 修复数据竞争 #2: 修改 joint_filters_ 前获取 filter_mutex_ ==========
+        // --- 修复数据竞争 #2: 修改 joint_filters_ 前获取 filter_mutex_ ---
         {
           std::lock_guard<std::mutex> filter_lock(filter_mutex_);
           for (auto &filter : joint_filters_) {
@@ -1294,7 +1304,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
                     "[CONFIG] Measurement noise updated: R_pos=%.1e, R_vel=%.1e", R_pos, R_vel);
       }
     }
-    // ========== 级联 P+PI 参数动态更新 ==========
+    // --- 级联 P+PI 参数动态更新 ---
     else if (name.find("cascade_pid.joint_") == 0) {
       // 解析参数名: cascade_pid.joint_1.pos_Kp
       size_t first_dot = name.find('.', 13);  // 找到 "joint_X" 后的点

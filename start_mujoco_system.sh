@@ -182,7 +182,8 @@ start_sim_mode() {
     sleep 3
     start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node" 0
     start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
-    start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node" 0
+    local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
+    start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 2
 }
 
@@ -204,7 +205,8 @@ start_serial_mode() {
     start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 0
     start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true" 0
     start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
-    start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node" 0
+    local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
+    start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 2
 }
 

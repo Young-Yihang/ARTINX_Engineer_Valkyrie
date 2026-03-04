@@ -1,3 +1,7 @@
+/**
+ * @file Crc.hpp
+ * @brief CRC8/CRC16 lookup tables for Seasky protocol
+ */
 #ifndef CRC_HPP
 #define CRC_HPP
 

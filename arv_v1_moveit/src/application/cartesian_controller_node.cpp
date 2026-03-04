@@ -1,3 +1,8 @@
+/**
+ * @file cartesian_controller_node.cpp
+ * @brief Cartesian IK controller using Pilz LIN/PTP planner
+ */
+
 #include <tf2/LinearMath/Quaternion.h>
 
 #include <atomic>
@@ -22,10 +27,10 @@ public:
   ~CartesianControllerNode();
 
 private:
-  // ========== 状态枚举 ==========
+  // --- 状态枚举 ---
   enum class State { IDLE, PLANNING, EXECUTING, ERROR };
 
-  // ========== 成员变量 ==========
+  // --- 成员变量 ---
   // MoveIt 接口 (延迟初始化)
   std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
 
@@ -35,6 +40,7 @@ private:
 
   // 规划工作线程 (话题路径专用，避免阻塞 ROS2 回调线程)
   std::thread planning_thread_;
+  std::thread monitor_thread_;
   std::condition_variable plan_cv_;
   std::mutex plan_request_mutex_;
   std::optional<geometry_msgs::msg::Pose> pending_pose_;
@@ -55,7 +61,7 @@ private:
   // 时间记录 (用于限速)
   rclcpp::Time last_pose_command_time_;
 
-  // ========== ROS2 接口 ==========
+  // --- ROS2 接口 ---
   // 话题
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_pub_;
@@ -69,7 +75,7 @@ private:
   rclcpp::TimerBase::SharedPtr init_timer_;
   rclcpp::TimerBase::SharedPtr pose_publish_timer_;
 
-  // ========== 方法声明 ==========
+  // --- 方法声明 ---
   void declareParameters();
   void loadParameters();
   void initializeMoveGroup();
@@ -126,8 +132,9 @@ CartesianControllerNode::CartesianControllerNode() : Node("cartesian_controller_
       "/stop_cartesian_motion", std::bind(&CartesianControllerNode::stopMotionCallback, this,
                                           std::placeholders::_1, std::placeholders::_2));
 
+  // 使用 SensorDataQoS 兼容 BEST_EFFORT 发布者（如视觉节点），避免 QoS 不兼容时静默丢弃
   pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-      "/cartesian_target_pose", 10,
+      "/cartesian_target_pose", rclcpp::SensorDataQoS(),
       std::bind(&CartesianControllerNode::poseTargetCallback, this, std::placeholders::_1));
 
   init_timer_ =
@@ -152,6 +159,9 @@ CartesianControllerNode::~CartesianControllerNode() {
   if (planning_thread_.joinable()) {
     planning_thread_.join();
   }
+  if (monitor_thread_.joinable()) {
+    monitor_thread_.join();
+  }
 }
 
 void CartesianControllerNode::declareParameters() {
@@ -162,8 +172,8 @@ void CartesianControllerNode::declareParameters() {
   this->declare_parameter("default_acceleration_scaling", 1.0);
   this->declare_parameter("pose_topic_min_interval_ms", 50.0);
 
-  this->declare_parameter("ws_min_radius_", 0.01);
-  this->declare_parameter("ws_max_radius_", 0.7);  // 单位m
+  this->declare_parameter("ws_min_radius", 0.01);
+  this->declare_parameter("ws_max_radius", 0.7);  // 单位m
 }
 
 void CartesianControllerNode::loadParameters() {
@@ -174,8 +184,8 @@ void CartesianControllerNode::loadParameters() {
   default_acceleration_scaling_ = this->get_parameter("default_acceleration_scaling").as_double();
   pose_topic_min_interval_ms_ = this->get_parameter("pose_topic_min_interval_ms").as_double();
 
-  ws_min_radius_ = this->get_parameter("ws_min_radius_").as_double();
-  ws_max_radius_ = this->get_parameter("ws_max_radius_").as_double();
+  ws_min_radius_ = this->get_parameter("ws_min_radius").as_double();
+  ws_max_radius_ = this->get_parameter("ws_max_radius").as_double();
 }
 
 void CartesianControllerNode::planningWorker() {
@@ -223,10 +233,16 @@ bool CartesianControllerNode::validateTargetPose(double x, double y, double z,
     return false;
   }
   double r2 = x * x + y * y + z * z;
+  if (r2 < ws_min_radius_ * ws_min_radius_) {
+    RCLCPP_ERROR(this->get_logger(), "Target too close to base: r=%.4f < %.4f", std::sqrt(r2),
+                 ws_min_radius_);
+    error_msg = "Too close to base: r=" + std::to_string(std::sqrt(r2));
+    return false;
+  }
   if (r2 > ws_max_radius_ * ws_max_radius_) {
-    RCLCPP_ERROR(this->get_logger(), "Input axis is out of bounds, invalid!");
-    error_msg = "Out of bounds: x: " + std::to_string(x) + " y: " + std::to_string(y) +
-                " z: " + std::to_string(z);
+    RCLCPP_ERROR(this->get_logger(), "Target out of workspace: r=%.4f > %.4f", std::sqrt(r2),
+                 ws_max_radius_);
+    error_msg = "Out of workspace: r=" + std::to_string(std::sqrt(r2));
     return false;
   }
   return true;
@@ -306,6 +322,10 @@ bool CartesianControllerNode::planAndExecuteUnlocked(const geometry_msgs::msg::P
     RCLCPP_WARN(this->get_logger(), "LIN planning failed, trying PTP fallback");
     move_group_->setPlannerId("PTP");
     result = move_group_->plan(plan);
+    if (result == moveit::core::MoveItErrorCode::SUCCESS) {
+      RCLCPP_INFO(this->get_logger(), "PTP fallback planning succeeded");
+    }
+    move_group_->setPlannerId("LIN");  // 恢复默认 planner
   }
 
   if (result != moveit::core::MoveItErrorCode::SUCCESS) {
@@ -328,7 +348,8 @@ bool CartesianControllerNode::planAndExecuteUnlocked(const geometry_msgs::msg::P
   if (async) {
     move_group_->asyncExecute(plan);
     // 不立即设 IDLE — 启动监控线程等待执行完成
-    std::thread(&CartesianControllerNode::monitorAsyncExecution, this).detach();
+    if (monitor_thread_.joinable()) monitor_thread_.join();
+    monitor_thread_ = std::thread(&CartesianControllerNode::monitorAsyncExecution, this);
     return true;
   } else {
     auto exec_result = move_group_->execute(plan);
@@ -369,12 +390,16 @@ void CartesianControllerNode::monitorAsyncExecution() {
 
 void CartesianControllerNode::poseTargetCallback(
     const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-  // ========== 此函数在 ROS2 spin 线程执行，必须快速返回 ==========
-  auto elapsed_ms = (this->now() - last_pose_command_time_).nanoseconds() / 1e6;
+  // --- 此函数在 ROS2 spin 线程执行，必须快速返回 ---
+  auto current_time = this->now();
+  auto elapsed_ms = (current_time - last_pose_command_time_).nanoseconds() / 1e6;
   if (elapsed_ms < pose_topic_min_interval_ms_) {
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                          "Pose command throttled (%.1f ms < %.1f ms)", elapsed_ms,
+                          pose_topic_min_interval_ms_);
     return;
   }
-  last_pose_command_time_ = this->now();
+  last_pose_command_time_ = current_time;
 
   std::string err;
   if (!validateTargetPose(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z, err)) {

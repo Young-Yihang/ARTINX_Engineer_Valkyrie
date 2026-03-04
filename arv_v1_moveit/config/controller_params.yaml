@@ -71,7 +71,8 @@
 
     # ========== Safety Parameters ==========
     safety:
-      # 单关节力矩限制(Nm), 设-1使用URDF值
+      # 单关节力矩/力限制, 设-1使用URDF值
+      # 臂关节(revolute): Nm, 夹爪(prismatic): N
       # 策略：使用URDF标称值的80-90%作为工作限制，平衡性能和安全
       max_torque_per_joint:
         joint_1: 20.0   
@@ -80,7 +81,7 @@
         joint_4: 1.2   
         joint_5: 7.0   
         joint_6: 1.0
-        joint_gripper1: 3.0   # 夹爪力矩限幅
+        joint_gripper1: 70.0  # 夹爪力限幅 (N, prismatic joint: 电机7Nm/0.05m臂/2爪=70N peak)
 
       # Global fallback if neither config nor URDF specified
       max_torque_default: 20.0              # Nm - conservative default

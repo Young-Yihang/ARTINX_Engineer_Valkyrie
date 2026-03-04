@@ -1,3 +1,7 @@
+/**
+ * @file kalman_filter.cpp
+ * @brief Implementation of the 1D Kalman filter (predict / update cycle).
+ */
 #include <kalman_filter.hpp>
 
 KalmanFilter1D::KalmanFilter1D(double dt) : dt_(dt) {

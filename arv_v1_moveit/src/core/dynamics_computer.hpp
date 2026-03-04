@@ -1,3 +1,7 @@
+/**
+ * @file dynamics_computer.hpp
+ * @brief KDL-based rigid-body dynamics: M(q), C(q,qd), G(q) and feedforward torque.
+ */
 #ifndef DYNAMICS_COMPUTER_HPP
 #define DYNAMICS_COMPUTER_HPP
 
@@ -14,7 +18,7 @@ public:
   // 日志回调函数类型定义
   using LogCallback = std::function<void(const std::string &)>;
 
-  DynamicsComputer(const KDL::Chain &chain,  // 构造函数，传入重力向量和KDL运动链
+  DynamicsComputer(const KDL::Chain &chain,
                    const KDL::Vector &gravity = KDL::Vector(0.0, 0.0, -9.81));
 
   // 设置错误日志回调函数
@@ -49,9 +53,9 @@ public:
   void getGravityForces(const KDL::JntArray &q, KDL::JntArray &G);
 
 private:
-  std::unique_ptr<KDL::ChainDynParam> dyn_param_;  // KDL智能指针，指向动力学求解
+  std::unique_ptr<KDL::ChainDynParam> dyn_param_;
   KDL::Vector gravity_;
-  LogCallback error_logger_;  // 错误日志回调函数
+  LogCallback error_logger_;
 };
 
 #endif

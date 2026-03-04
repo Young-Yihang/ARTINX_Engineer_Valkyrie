@@ -1,4 +1,7 @@
-
+/**
+ * @file dynamics_computer.cpp
+ * @brief Implementation of KDL-based rigid-body dynamics solver with NaN/Inf safety checks.
+ */
 #include "dynamics_computer.hpp"
 
 #include <cmath>    // For std::isfinite
@@ -6,7 +9,7 @@
 
 DynamicsComputer::DynamicsComputer(const KDL::Chain &chain,
                                    const KDL::Vector &gravity)
-    : gravity_(gravity) {  // 创建KDL求解器
+    : gravity_(gravity) {
   dyn_param_ = std::make_unique<KDL::ChainDynParam>(chain, gravity_);
 }
 
@@ -39,7 +42,7 @@ void DynamicsComputer::computeFeedforwardTorque(const KDL::JntArray &q, const KD
     // 加上 C 和 G
     tau_ff(i) += C(i) + G(i);
 
-    // ========== SAFETY: Check for NaN/Inf in dynamics computation ==========
+    // --- SAFETY: Check for NaN/Inf in dynamics computation ---
     if (!std::isfinite(tau_ff(i))) {
       if (error_logger_) {
         std::ostringstream oss;
@@ -58,7 +61,7 @@ void DynamicsComputer::computeGravityTorque(const KDL::JntArray &q, KDL::JntArra
   // 直接计算重力项 G(q)
   dyn_param_->JntToGravity(q, tau_ff);
 
-  // ========== SAFETY: Check for NaN/Inf in gravity computation ==========
+  // --- SAFETY: Check for NaN/Inf in gravity computation ---
   for (size_t i = 0; i < q.rows(); i++) {
     if (!std::isfinite(tau_ff(i))) {
       if (error_logger_) {

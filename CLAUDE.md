@@ -22,7 +22,6 @@ The following files contain validated control algorithms. Never edit without exp
 - **Never create documentation files** (*.md) unless explicitly requested
 - **Never create shell scripts** unless explicitly requested
 - **Limit single edits to 150 lines** for maintainability
-- **Maximum file size**: 500 lines per file (hard limit)
 
 ## Code Organization Architecture
 
@@ -45,15 +44,18 @@ arv_v1_moveit/src/
 ├── control/           # Control nodes
 │   └── torque_controller_node.cpp
 ├── interfaces/        # Hardware & simulation interfaces
-│   ├── mujoco_interface_node.cpp
-│   ├── hardware_interface_node.cpp
-│   ├── Crc.cpp/hpp
-│   └── serial_protocol.hpp
+│   ├── mujoco_interface_node.cpp     # MuJoCo sim + ImGui/ImPlot visualization
+│   ├── hardware_interface_node.cpp   # USB-UART serial (Seasky protocol)
+│   ├── Crc.cpp/hpp                   # CRC8/CRC16 lookup tables
+│   └── serial_protocol.hpp           # Seasky frame builder/parser (header-only)
 ├── application/       # Application layer nodes
-│   ├── trajectory_manager_node.cpp
-│   └── mission_executor_node.cpp
-└── utils/             # Helper functions
-    └── urdf_parser.cpp
+│   ├── trajectory_manager_node.cpp   # Trajectory CRUD + action client
+│   ├── mission_executor_node.cpp     # ncurses TUI for mission control
+│   ├── cartesian_controller_node.cpp # Cartesian IK control (Pilz LIN/PTP)
+│   └── scene_manager_node.cpp        # MoveIt2 collision scene (unused in start script)
+└── third_party/       # Vendored libraries
+    ├── imgui_backends/ # ImGui GLFW+OpenGL3 backend
+    └── implot/         # Real-time plotting
 ```
 
 ### Dependency Rules
@@ -67,7 +69,7 @@ arv_v1_moveit/src/
 ```
 /home/huan/ros2_ws/src/
 ├── arv_v1_model/           # URDF models and meshes
-│   ├── urdf/               # Robot description files (arv_v1_model.urdf)
+│   ├── urdf/               # Robot description files (arv_v1.urdf + obstacles/)
 │   ├── meshes/             # STL/DAE visual models
 │   ├── config/             # Model configuration (joint_names_ARV_V1_MODEL.yaml)
 │   └── launch/             # Model launch files
@@ -76,10 +78,14 @@ arv_v1_moveit/src/
 │   │   ├── core/           # Protected algorithms (.cpp + .hpp in same dir)
 │   │   ├── control/        # Control nodes
 │   │   ├── interfaces/     # Hardware/simulation interfaces (.cpp + .hpp)
-│   │   ├── application/    # Application layer nodes
-│   │   └── utils/          # Helper functions
+│   │   └── application/    # Application layer nodes
 │   ├── config/             # YAML configuration files
-│   │   └── trajectories/   # Saved trajectory files
+│   │   ├── controller_params.yaml    # Kalman, cascade PID, safety params
+│   │   ├── scene_obstacles.yaml      # MuJoCo + MoveIt2 collision objects
+│   │   ├── mission_sequence.yaml     # Task state machine definition
+│   │   ├── cartesian_controller_param.yaml
+│   │   └── trajectories/             # Runtime-saved trajectory YAMLs
+│   ├── third_party/        # ImGui backends, ImPlot
 │   ├── launch/             # ROS2 launch files
 │   ├── docs/               # Package-specific documentation
 │   └── CMakeLists.txt
@@ -116,12 +122,14 @@ ros2 launch arv_v1_moveit mujoco_demo.launch.py
 ros2 run arv_v1_moveit torque_controller_node
 ros2 run arv_v1_moveit mujoco_interface_node
 ros2 run arv_v1_moveit trajectory_manager_node
+ros2 run arv_v1_moveit cartesian_controller_node
 ros2 run arv_v1_moveit mission_executor_node  # TUI interface
 
 # Mode 2: Hardware + Digital twin
 ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=/dev/ttyACM0
 ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true
 ros2 run arv_v1_moveit trajectory_manager_node
+ros2 run arv_v1_moveit cartesian_controller_node
 ros2 run arv_v1_moveit mission_executor_node
 ```
 
@@ -143,43 +151,59 @@ ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
 
 ### Node Topology (200Hz Control Loop)
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Application Layer                                                  │
-│  ┌─────────────────────┐    ┌───────────────────────┐              │
-│  │ mission_executor    │───→│ trajectory_manager    │              │
-│  │ (TUI interface)     │    │ (save/load/execute)   │              │
-│  └─────────────────────┘    └───────────┬───────────┘              │
-└──────────────────────────────────────────│──────────────────────────┘
-                                           ↓
-┌─────────────────────────────────────────────────────────────────────┐
-│  Control Layer                                                      │
+┌──────────────────────────────────────────────────────────────────────┐
+│  Application Layer                                                   │
+│  ┌──────────────────┐  ┌───────────────────┐  ┌──────────────────┐  │
+│  │ mission_executor │─→│ trajectory_manager│  │cartesian_control │  │
+│  │ (ncurses TUI)    │  │ (save/load/exec)  │  │(Pilz LIN/PTP)   │  │
+│  └──┬───────────┬───┘  └────────┬──────────┘  └────────┬─────────┘  │
+│     │/gripper   │/load_traj     │/follow_joint_traj    │/move_group │
+└─────│───────────│───────────────│───────────────────────│────────────┘
+      ↓           ↓               ↓                       ↓
+┌──────────────────────────────────────────────────────────────────────┐
+│  Control Layer                                                       │
 │  MoveIt2 → torque_controller → [mujoco_interface | hardware_interface]
-│            ↑__________________________________________________|     │
-│                                joint_states                         │
-└─────────────────────────────────────────────────────────────────────┘
+│            ↑____________________________________________________|    │
+│                              /joint_states                           │
+│  torque_controller also hosts: /gripper_control service              │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### ROS2 Nodes
 | Node | Directory | Description |
 |------|-----------|-------------|
-| `torque_controller_node` | `control/` | Core torque control with PID/Kalman |
-| `mujoco_interface_node` | `interfaces/` | MuJoCo simulation interface |
-| `hardware_interface_node` | `interfaces/` | Hardware serial communication |
-| `trajectory_manager_node` | `application/` | Trajectory save/load/execute |
-| `mission_executor_node` | `application/` | TUI for task execution |
+| `torque_controller_node` | `control/` | Core torque control with cascade PID/Kalman + gripper service |
+| `mujoco_interface_node` | `interfaces/` | MuJoCo sim + ImGui/ImPlot visualization |
+| `hardware_interface_node` | `interfaces/` | USB-UART serial (Seasky protocol, 921600 baud) |
+| `trajectory_manager_node` | `application/` | Trajectory save/load/execute via YAML |
+| `cartesian_controller_node` | `application/` | Cartesian IK (Pilz planner, LIN/PTP fallback) |
+| `mission_executor_node` | `application/` | ncurses TUI for mission orchestration |
 
 ### Key Topics
-- `/joint_states` - Current robot state (position, velocity, effort)
-- `/effort_controller/commands` - Computed torque commands
+- `/joint_states` - Current robot state (position, velocity, effort), 7 joints
+- `/effort_controller/commands` - Torque/force commands (Float64MultiArray, 7 elements: 6 arm torques + 1 gripper force)
 - `/ARM_controller/follow_joint_trajectory` - Trajectory action interface
+- `/ARM_controller/joint_trajectory` - Forward trajectory for recording (used by trajectory_manager)
+- `/cartesian_target_pose` - Cartesian goal input (PoseStamped, async)
+- `/cartesian_controller/current_pose` - Current end-effector pose @ 30Hz
+- `/robot_state_cmd` - Hardware MCU state notifications (UInt8: 0x01=RESET, 0x02=START, 0x03=NEXT)
 
 ### Service Interfaces (arv_v1_interfaces)
-- `/list_trajectories` - List saved trajectories
-- `/load_trajectory` - Load and execute a saved trajectory
-- `/save_trajectory` - Save current trajectory to file
-- `/save_last_trajectory` - Save the last executed trajectory
-- `/execute_action` - Execute task commands
-- `/get_task_state` - Query task execution state
+**Trajectory Manager:**
+- `/list_trajectories` - List saved trajectories (names + descriptions)
+- `/load_trajectory` - Load and optionally execute a saved trajectory
+- `/save_trajectory` - Save trajectory from ROS message to YAML
+- `/save_last_trajectory` - Save the last captured trajectory
+
+**Torque Controller:**
+- `/gripper_control` - Set gripper force in N (note: srv field named `torque` but gripper is prismatic, unit is N not Nm)
+
+**Cartesian Controller:**
+- `/move_to_cartesian_rpy` - Move to absolute Cartesian pose (x,y,z,r,p,y)
+- `/stop_cartesian_motion` - Emergency stop of Cartesian motion
+
+**Unused/Placeholder:**
+- `/execute_action`, `/get_task_state` - Defined in srv/ but not bound to any node
 
 ### Control Modes
 1. **Hold Mode**: Maintains current position with gravity compensation
@@ -255,28 +279,37 @@ printf("Position: %f\n", pos);
 - ✅ Dual-mode architecture (simulation/hardware)
 - ✅ Kalman filtering
 - ✅ Cascade PID control
-- ✅ USB serial communication
-- ✅ Digital twin visualization
-- ✅ Parameter hot reload
-- ✅ Trajectory management system (save/load/execute)
-- ✅ Mission executor TUI
+- ✅ USB serial communication (Seasky protocol)
+- ✅ Digital twin visualization (MuJoCo visualization_only mode)
+- ✅ Parameter hot reload (`reload_params.sh`)
+- ✅ Trajectory management system (save/load/execute via YAML)
+- ✅ Mission executor TUI (ncurses, state machine + trajectory CRUD)
+- ✅ Cartesian controller (Pilz LIN/PTP, service + topic dual path)
+- ✅ MuJoCo ImGui/ImPlot real-time telemetry overlay
 
 **In Progress**:
-- 🔧 Visual servoing integration (20%)
-- 🔧 Pick & place automation
+- 🔧 Visual servoing integration
+- 🔧 Pick & place automation (mission_sequence states defined, trajectories pending)
+- 🔧 TUI Cartesian jogging (UI present, backend placeholder)
 
 ## Hardware Configuration
 
 ### Motors
-- J1-3: J8009 high-torque motors
-- J4: GM6020 gimbal motor
-- J5: J4310 motor
-- J6: M2006 motor
+- J1-3: J8009 high-torque motors (revolute, effort limit 40 Nm)
+- J4: GM6020 gimbal motor (revolute, effort limit 1.2 Nm)
+- J5: J4310 motor (revolute, effort limit 7 Nm)
+- J6: M2006 motor (revolute, effort limit 1 Nm)
+- Gripper: Motor-driven prismatic pair (0~40mm stroke, mimic joint)
+  - Motor peak torque 7 Nm / 0.05m lever arm / 2 jaws = 70 N per jaw
+  - URDF effort limit: 7 (unit: N, prismatic joint)
+  - Hardware uses discrete 3-state control: GRIP / RELEASE / STOP (via Seasky CmdID 0x0004 @ 50Hz)
+  - Simulation uses continuous force: ctrl[-5, 5] N (MuJoCo actuator)
 
 ### Communication
 - Protocol: USB-UART (921600 baud)
-- Frequency: 200Hz bidirectional
-- Format: Seasky protocol with CRC16
+- Frequency: 200Hz arm torques (TX), 50Hz gripper commands (TX), 200Hz joint feedback (RX)
+- Format: Seasky protocol - CRC8 header + CRC16 whole frame
+- Packet types: 0x0001 (joint feedback RX), 0x0002 (arm torque TX), 0x0004 (gripper TX), 0x0005 (state cmd RX)
 
 ## Common Issues and Solutions
 
@@ -311,7 +344,6 @@ Before submitting code, verify:
 
 - [ ] Code is placed in the correct layer/directory
 - [ ] No modifications to protected core control files
-- [ ] File size < 500 lines
 - [ ] Follows naming conventions (see table above)
 - [ ] Proper error handling with fallback strategies
 - [ ] Uses ROS2 logging macros (no `std::cout`/`printf`)
@@ -320,6 +352,20 @@ Before submitting code, verify:
 - [ ] Tested with digital twin before hardware
 - [ ] Compiles without warnings (`colcon build`)
 - [ ] No runtime memory allocation in control loops
+
+## Key Dependencies (beyond ROS2 standard)
+
+| Library | Purpose | Used By |
+|---------|---------|---------|
+| MuJoCo (`$MUJOCO_PATH`) | Physics simulation engine | mujoco_interface_node |
+| KDL / orocos_kdl | Kinematics & dynamics (M, C, G matrices) | dynamics_computer |
+| Eigen3 | Matrix math | core libraries |
+| ImGui + ImPlot | Real-time telemetry overlay in MuJoCo window | mujoco_interface_node |
+| GLFW + OpenGL | MuJoCo rendering window | mujoco_interface_node |
+| yaml-cpp | YAML config/trajectory parsing | trajectory_manager, mission_executor, mujoco_interface |
+| serial_driver | USB-UART communication | hardware_interface_node |
+| ncurses | Terminal UI | mission_executor_node |
+| Pilz Industrial Motion Planner | Cartesian LIN/PTP planning | cartesian_controller_node |
 
 ## Code Templates
 
@@ -365,6 +411,6 @@ my_node:
 
 ---
 
-**Last Updated**: 2026-02-02
+**Last Updated**: 2026-02-25
 **Maintainer**: Young-Yihang
-**Version**: 2.2
+**Version**: 2.3

@@ -5,12 +5,12 @@ cartesian_controller_node:
     end_effector_link: "link6_2006roll"
     reference_frame: "base_link"
     # 速度与加速度比例
-    velocity_scaling_factor: 1.0
-    acceleration_scaling_factor: 1.0
+    default_velocity_scaling: 1.0
+    default_acceleration_scaling: 1.0
 
     # 视觉伺服参数
     pose_topic_min_interval_ms: 50.0
 
     # 球形工作空间参数
-    ws_min_radius_: 0.01
-    ws_max_radius_: 0.8
+    ws_min_radius: 0.01
+    ws_max_radius: 0.8

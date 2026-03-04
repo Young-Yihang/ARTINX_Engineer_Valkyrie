@@ -1,3 +1,7 @@
+/**
+ * @file cascade_pid.cpp
+ * @brief Implementation of single-joint and multi-joint cascade PID controllers.
+ */
 #include "cascade_pid.hpp"
 
 // CascadePid: 外环P(位置)→内环PI(速度)→力矩
@@ -17,7 +21,7 @@ CascadePid::CascadePid(const PidGains &pos_gains, const PidGains &vel_gains, dou
       ref_vel_(0.0) {}
 
 double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, double dt) {
-  // ========== 外环: 位置PID -> 期望速度 ==========
+  // --- 外环: 位置PID -> 期望速度 ---
 
   // 1. 计算位置误差
   pos_error_ = pos_ref - pos_fdb;
@@ -55,7 +59,7 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
   // 8. 更新历史误差
   pos_error_prev_ = pos_error_;
 
-  // ========== 内环: 速度PID -> 控制力矩 ==========
+  // --- 内环: 速度PID -> 控制力矩 ---
 
   // 1. 计算速度误差
   vel_error_ = ref_vel_ - vel_fdb;

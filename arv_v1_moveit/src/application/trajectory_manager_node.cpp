@@ -1,12 +1,6 @@
 /**
  * @file trajectory_manager_node.cpp
- * @brief 轨迹管理节点 - 提供轨迹保存、加载、执行功能
- *
- * Phase 1: 轨迹保存与加载
- * - /save_trajectory: 保存指定轨迹到YAML文件
- * - /save_last_trajectory: 保存最近执行的轨迹
- * - /load_trajectory: 加载并执行轨迹
- * - /list_trajectories: 列出已保存的轨迹
+ * @brief Trajectory CRUD manager: save, load, list, and execute via action client
  */
 
 #include <yaml-cpp/yaml.h>
@@ -108,7 +102,7 @@ public:
   }
 
 private:
-  // ========== 成员变量 ==========
+  // --- 成员变量 ---
   std::string trajectory_dir_;
   std::vector<std::string> joint_names_;
   std::array<double, 6> current_position_{};
@@ -130,7 +124,7 @@ private:
   rclcpp::Service<arv_v1_interfaces::srv::LoadTrajectory>::SharedPtr load_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::ListTrajectories>::SharedPtr list_srv_;
 
-  // ========== 回调函数 ==========
+  // --- 回调函数 ---
 
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -165,7 +159,7 @@ private:
                 msg->points.size(), duration);
   }
 
-  // ========== 轨迹保存核心函数 ==========
+  // --- 轨迹保存核心函数 ---
 
   bool saveTrajectoryToFile(const std::string& name, const std::string& description,
                             const trajectory_msgs::msg::JointTrajectory& trajectory,
@@ -284,7 +278,7 @@ private:
     }
   }
 
-  // ========== 服务实现 ==========
+  // --- 服务实现 ---
 
   void saveTrajectoryCallback(
       const std::shared_ptr<arv_v1_interfaces::srv::SaveTrajectory::Request> request,
@@ -491,6 +485,7 @@ private:
               description = config["meta"]["description"].as<std::string>();
             }
           } catch (...) {
+            RCLCPP_DEBUG(this->get_logger(), "Cannot read trajectory description");
             description = "(unable to read description)";
           }
 

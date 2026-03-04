@@ -325,6 +325,7 @@ target_link_libraries(mission_executor_node
 ament_target_dependencies(mission_executor_node
   rclcpp
   std_msgs
+  geometry_msgs
   arv_v1_interfaces
 )
 

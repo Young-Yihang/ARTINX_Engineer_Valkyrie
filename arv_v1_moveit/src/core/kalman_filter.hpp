@@ -1,3 +1,7 @@
+/**
+ * @file kalman_filter.hpp
+ * @brief 1D Kalman filter for joint position/velocity state estimation.
+ */
 #ifndef KALMAN_FILTER_HPP
 #define KALMAN_FILTER_HPP
 
@@ -19,23 +23,16 @@ private:
 
 public:
   KalmanFilter1D(double dt);
-  // 初始化状态
   void initialize(double q_init, double qd_init);
-
-  // 预测步骤
   void predict();
-
-  // 更新步骤
   void update(double q_measured, double qd_measured);
 
-  // 获取估计值
   double getPosition() const;
   double getVelocity() const;
-  // 获取协方差（用于调试）
   Eigen::Matrix2d getCovariance() const;
   Eigen::Matrix2d getKalmanGain() const;
 
-  // 设置噪声参数（用于在线调参）
+  // 在线调参
   void setProcessNoise(double q_pos, double q_vel);
 
   void setMeasurementNoise(double r_pos, double r_vel);

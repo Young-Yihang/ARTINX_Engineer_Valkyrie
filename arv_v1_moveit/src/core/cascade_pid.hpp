@@ -82,24 +82,24 @@ public:
   double getVelocityError() const { return vel_error_; }
 
 private:
-  // ========== 位置环(外环)参数 ==========
+  // --- 位置环(外环)参数 ---
   PidGains pos_gains_;       // 位置环PID增益
   double pos_error_;         // 位置误差 e_p = ref - fdb
   double pos_error_prev_;    // 上一次位置误差 (用于微分)
   double pos_integral_;      // 位置误差积分
   double max_integral_pos_;  // 位置积分限幅
 
-  // ========== 速度环(内环)参数 ==========
+  // --- 速度环(内环)参数 ---
   PidGains vel_gains_;       // 速度环PID增益
   double vel_error_;         // 速度误差 e_v = ref - fdb
   double vel_error_prev_;    // 上一次速度误差 (用于微分)
   double vel_integral_;      // 速度误差积分
   double max_integral_vel_;  // 速度积分限幅
 
-  // ========== 饱和限制 ==========
+  // --- 饱和限制 ---
   double max_vel_;  // 速度饱和限制 (rad/s)
 
-  // ========== 内部状态 ==========
+  // --- 内部状态 ---
   double ref_vel_;  // 外环输出的参考速度 (rad/s)
 
   /**

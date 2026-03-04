@@ -1,15 +1,6 @@
 /**
  * @file scene_manager_node.cpp
- * @brief 赛场障碍物场景管理节点 (Application Layer)
- *
- * 功能：
- *   - 启动后从 YAML 参数加载障碍物到 MoveIt2 PlanningScene
- *   - 支持 box / cylinder / sphere / urdf 四种类型
- *   - urdf 类型复用 SW-URDF 导出的模型 (与 MuJoCo 侧共用)
- *   - 提供 service 接口：reload / clear 场景
- *   - graspable 物体支持 attach/detach 到末端执行器
- *
- * 依赖：moveit_ros_planning_interface, geometric_shapes, shape_msgs, tf2, urdf
+ * @brief MoveIt2 collision scene manager: load obstacles from YAML into PlanningScene
  */
 
 #include <geometric_shapes/shape_operations.h>
@@ -81,6 +72,7 @@ private:
         return;
       }
     } catch (...) {
+      RCLCPP_WARN(get_logger(), "Failed to load scene YAML from install path");
     }
     // 尝试源码目录
     try {
@@ -91,6 +83,7 @@ private:
         RCLCPP_INFO(get_logger(), "Loaded scene YAML (src): %s", src_path.c_str());
       }
     } catch (...) {
+      RCLCPP_WARN(get_logger(), "Failed to load scene YAML from source path");
     }
   }
 
@@ -100,7 +93,7 @@ private:
     this->declare_parameter("obstacle_ids", std::vector<std::string>{});
   }
 
-  // ========== 加载全部障碍物 (从 yaml-cpp 读取, 不依赖 ROS2 params) ==========
+  // --- 加载全部障碍物 (从 yaml-cpp 读取, 不依赖 ROS2 params) ---
   void loadAllObstacles() {
     if (scene_yaml_.IsNull()) {
       RCLCPP_WARN(get_logger(), "No scene YAML loaded, skipping obstacle injection");
@@ -140,7 +133,7 @@ private:
     }
   }
 
-  // ========== 从 YAML 加载单个障碍物 ==========
+  // --- 从 YAML 加载单个障碍物 ---
   moveit_msgs::msg::CollisionObject loadSingleObstacleFromYAML(const std::string& id,
                                                                const YAML::Node& obs,
                                                                const std::string& ref_frame) {
@@ -186,7 +179,7 @@ private:
     return obj;
   }
 
-  // ========== URDF 障碍物 (SW-URDF导出, 与MuJoCo共用) ==========
+  // --- URDF 障碍物 (SW-URDF导出, 与MuJoCo共用) ---
   void loadURDFObstacleFromPath(moveit_msgs::msg::CollisionObject& obj,
                                 const geometry_msgs::msg::Pose& world_pose, const std::string& id,
                                 const std::string& urdf_uri) {
@@ -259,7 +252,7 @@ private:
     }
   }
 
-  // ========== 从 YAML collision_shapes 添加虚拟碰撞体 ==========
+  // --- 从 YAML collision_shapes 添加虚拟碰撞体 ---
   void addCollisionShapes(moveit_msgs::msg::CollisionObject& obj,
                           const geometry_msgs::msg::Pose& world_pose, const std::string& id) {
     if (scene_yaml_.IsNull()) return;
@@ -341,11 +334,12 @@ private:
       std::string pkg_dir = ament_index_cpp::get_package_share_directory(pkg);
       return pkg_dir + uri.substr(slash);
     } catch (...) {
+      RCLCPP_WARN(get_logger(), "Failed to resolve package URI: %s", uri.c_str());
       return uri;
     }
   }
 
-  // ========== 基本几何体 (从 YAML Node 读取) ==========
+  // --- 基本几何体 (从 YAML Node 读取) ---
   void loadPrimitiveFromYAML(moveit_msgs::msg::CollisionObject& obj,
                              const geometry_msgs::msg::Pose& pose, const std::string& type,
                              const std::string& id, const YAML::Node& obs) {
@@ -372,7 +366,7 @@ private:
     obj.primitive_poses.push_back(pose);
   }
 
-  // ========== Service: 重新加载 ==========
+  // --- Service: 重新加载 ---
   void reloadCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
                       std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
     try {
@@ -386,7 +380,7 @@ private:
     }
   }
 
-  // ========== Service: 清空 ==========
+  // --- Service: 清空 ---
   void clearCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
                      std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
     clearAllObjects();

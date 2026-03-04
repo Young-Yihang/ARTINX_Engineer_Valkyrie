@@ -7,7 +7,7 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <serial_driver/serial_driver.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
-#include <std_msgs/msg/u_int8.hpp>
+#include <std_msgs/msg/int32.hpp>
 #include <thread>
 
 #include "serial_protocol.hpp"
@@ -98,7 +98,7 @@ public:
   }
 
 private:
-  // ========== 成员变量 ==========
+  // --- 成员变量 ---
   std::atomic<bool> running_;
   bool simulation_mode_;  // 新增：是否为仿真模式（不从串口读取）
 
@@ -113,8 +113,8 @@ private:
   // ROS2 通信
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr torque_sub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
-  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr
-      robot_state_cmd_pub_;                  // 转发下位机状态切换通知
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr
+      task_command_pub_;                     // 任务指令 (cmd<<16|param<<8|seq)
   rclcpp::TimerBase::SharedPtr send_timer_;  // 200Hz发送定时器
 
   // 数据缓存
@@ -138,7 +138,7 @@ private:
   std::atomic<uint64_t> rx_crc_errors_{0};
   rclcpp::TimerBase::SharedPtr health_timer_;
 
-  // ========== 初始化函数 ==========
+  // --- 初始化函数 ---
 
   bool initSerial(const std::string &port, int baud) {
     try {
@@ -232,6 +232,7 @@ private:
         try {
           serial_port_->close();
         } catch (...) {
+          RCLCPP_DEBUG(this->get_logger(), "Serial port close failed during cleanup");
         }
         return false;
       }
@@ -263,13 +264,13 @@ private:
     // 发布关节状态到标准话题 (MoveIt/RViz/数字孪生都订阅此话题)
     joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
 
-    // 发布下位机状态切换通知到 /robot_state_cmd (mission_executor 订阅)
-    robot_state_cmd_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/robot_state_cmd", 10);
+    // 发布下位机任务指令到 /task_command (Int32: cmd<<16|param<<8|seq)
+    task_command_pub_ = this->create_publisher<std_msgs::msg::Int32>("/task_command", 10);
 
-    RCLCPP_INFO(this->get_logger(), "[INIT] Publishing to /joint_states and /robot_state_cmd");
+    RCLCPP_INFO(this->get_logger(), "[INIT] Publishing to /joint_states and /task_command");
   }
 
-  // ========== 回调函数 ==========
+  // --- 回调函数 ---
 
   void torqueCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
     // index 0-5: 6轴臂关节力矩; index 6(可选): 夹爪力矩
@@ -292,7 +293,7 @@ private:
     torque_data_valid_ = true;
   }
 
-  // ========== 串口收发函数 ==========
+  // --- 串口收发函数 ---
 
   // 新增：200Hz定时发送循环（解耦架构核心）
   void sendLoop() {
@@ -352,6 +353,7 @@ private:
         try {
           serial_port_->close();
         } catch (...) {
+          RCLCPP_DEBUG(this->get_logger(), "Serial port close failed during cleanup");
         }
       }
     };
@@ -359,7 +361,8 @@ private:
     sendRaw(SerialProtocol::buildTorquePacket(cmd));
 
     // ── 3. 分频发送夹爪包 (50Hz = 每4个周期一次) ──
-    // 从力矩缓存的 index 6 推导 GripperAction（边界转换，ROS2侧仍用语义力矩）
+    // effort_controller/commands[6] 单位为 N (prismatic joint), 硬件只用符号判断开关:
+    //   > +0.1 → GRIP,  < -0.1 → RELEASE,  else → STOP
     gripper_counter_ = (gripper_counter_ + 1) % 4;
     if (gripper_counter_ == 0) {
       SerialProtocol::GripperAction action;
@@ -490,6 +493,7 @@ private:
             serial_port_->close();
           }
         } catch (...) {
+          RCLCPP_DEBUG(this->get_logger(), "Serial port close failed during cleanup");
         }
         state = WAIT_SOF;
       }
@@ -517,14 +521,22 @@ private:
       }
       updateAndPublishJointStates(positions, velocities);
 
-    } else if (cmd_id == SerialProtocol::CMD_ROBOT_STATE_REQ) {
-      // 下位机 → 上位机：任务状态切换通知，转发到 /robot_state_cmd
-      if (packet.size() > offset) {
-        const uint8_t raw_cmd = packet[offset];
-        auto msg = std_msgs::msg::UInt8();
-        msg.data = raw_cmd;
-        robot_state_cmd_pub_->publish(msg);
-        RCLCPP_INFO(this->get_logger(), "[RX] RobotStateCmd 0x%02X -> /robot_state_cmd", raw_cmd);
+    } else if (cmd_id == SerialProtocol::CMD_TASK_COMMAND) {
+      // 下位机 → 上位机：任务指令 3B [task_cmd, param, seq]
+      // 打包为 Int32: (cmd << 16) | (param << 8) | seq
+      if (offset + 3 <= packet.size()) {
+        const uint8_t task_cmd = packet[offset];
+        const uint8_t param = packet[offset + 1];
+        const uint8_t seq = packet[offset + 2];
+
+        auto msg = std_msgs::msg::Int32();
+        msg.data = (static_cast<int32_t>(task_cmd) << 16) |
+                   (static_cast<int32_t>(param) << 8) |
+                   static_cast<int32_t>(seq);
+        task_command_pub_->publish(msg);
+
+        RCLCPP_INFO(this->get_logger(),
+                     "[RX] TaskCmd 0x%02X param=%u seq=%u", task_cmd, param, seq);
       }
     }
   }
