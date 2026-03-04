@@ -134,6 +134,10 @@ public:
     // 控制模式发布者
     control_mode_pub_ = create_publisher<std_msgs::msg::UInt8>("/control_mode", 10);
 
+    // [FIX] 立即发布 HOLD，防止 torque_controller 默认 RELAX 导致上电掉落。
+    // torque_controller 在 sleep 2 前已启动，此时订阅已建立。
+    publishControlMode(ControlMode::HOLD);
+
     // 非阻塞服务检测 (避免 TUI 启动黑屏)
     log("Checking services (non-blocking)...", COLOR_PAIR_DEFAULT);
     if (!load_client_->wait_for_service(2s)) {
@@ -146,7 +150,7 @@ public:
     loadMissionSequence();
     fetchTrajectories();
 
-    // 启动时发布默认模式 HOLD
+    // 再次发布，保证 wait_for_service 期间重启的节点也能接收到
     publishControlMode(ControlMode::HOLD);
     log("Mission Executor v4.0 ready", COLOR_PAIR_SUCCESS);
   }
@@ -158,6 +162,7 @@ public:
 
   void run() {
     int ch;
+    int mode_broadcast_counter_ = 0;
     while (rclcpp::ok() && running_) {
       drawUI();
       ch = getch();  // 非阻塞, timeout=100ms
@@ -165,6 +170,13 @@ public:
         handleInput(ch);
       }
       rclcpp::spin_some(get_node_base_interface());
+      // 每 10 次循环 (~1s) 重发一次当前控制模式，防止节点重启后模式丢失
+      if (++mode_broadcast_counter_ >= 10) {
+        mode_broadcast_counter_ = 0;
+        auto msg = std_msgs::msg::UInt8();
+        msg.data = control_mode_;
+        control_mode_pub_->publish(msg);
+      }
     }
   }
 
@@ -244,8 +256,8 @@ private:
   size_t traj_page_ = 0;
 
   // --- 夹爪状态 ---
-  double gripper_torque_cmd_ = 0.0;  // 本地预设想发的力矩
-  double gripper_last_sent_ = 0.0;   // 实际最后发送的力矩
+  double gripper_torque_cmd_ = 0.0;  // 本地预设想发的力 (N, prismatic joint)
+  double gripper_last_sent_ = 0.0;   // 实际最后发送的力 (N)
 
   // --- 笛卡尔状态 ---
   double cartesian_step_ = 0.05;  // 5cm
@@ -377,6 +389,12 @@ private:
       return;
     }
 
+    // [Z] 全局夹爪切换：任何视图/接管模式下均有效
+    if (ch == 'z' || ch == 'Z') {
+      toggleGripper();
+      return;
+    }
+
     if (takeover_mode_) {
       handleTakeoverInput(ch);
       return;
@@ -423,12 +441,15 @@ private:
       handleSMCommand(ch);
     else if (view_ == View::TRAJECTORY)
       handleTrajCommand(ch);
-    else if (view_ == View::CARTESIAN || view_ == View::GRIPPER) {
-      // 在这俩视图下，按 Enter 触发接管模式
+    else if (view_ == View::CARTESIAN) {
+      // Cartesian 视图：Enter 触发接管模式
       if (ch == '\n' || ch == '\r') {
         takeover_mode_ = true;
         logWarn("Entered Takeover mode. Press 'Esc' to release.");
       }
+    } else if (view_ == View::GRIPPER) {
+      // 夹爪视图：Z 已全局生效，此处仅处理 Space 停止
+      handleGripperInput(ch);
     }
   }
 
@@ -445,10 +466,7 @@ private:
       return;
     }
 
-    if (view_ == View::GRIPPER)
-      handleGripperTakeover(ch);
-    else if (view_ == View::CARTESIAN)
-      handleCartesianTakeover(ch);
+    if (view_ == View::CARTESIAN) handleCartesianTakeover(ch);
   }
 
   void handleStringInput(int ch) {
@@ -859,18 +877,20 @@ private:
     input_mode_ = InputMode::NONE;
   }
 
-  // --- 接管操作：夹爪 ---
+  // --- 夹爪全局切换 ---
 
-  void handleGripperTakeover(int ch) {
+  void toggleGripper() {
+    // 当前为正（夹紧）→ 松开（-70 N）；否则 → 夹紧（70 N）
+    gripper_torque_cmd_ = (gripper_torque_cmd_ > 0.0) ? -70.0 : 70.0;
+    sendGripper(gripper_torque_cmd_);
+  }
+
+  // --- 夹爪直接控制：GRIPPER 视图内 Space 停止 ---
+
+  void handleGripperInput(int ch) {
     if (ch == ' ') {
       gripper_torque_cmd_ = 0.0;
-    }  // 瞬间归零
-    else if (ch == '[') {
-      gripper_torque_cmd_ -= 0.5;
-    } else if (ch == ']') {
-      gripper_torque_cmd_ += 0.5;
-    } else if (ch == 's' || ch == 'S' || ch == '\n' || ch == '\r') {
-      sendGripper(gripper_torque_cmd_);
+      sendGripper(0.0);
     }
   }
 
@@ -1007,6 +1027,40 @@ private:
         });
   }
 
+  // --- UTF-8 工具 ---
+
+  /**
+   * @brief 将 UTF-8 字符串截断至不超过 max_cols 个终端列宽，并以空格补齐。
+   * ASCII = 1字节/1列；CJK (U+1100..U+FFFF 3字节) = 2列；其余多字节 = 1列。
+   */
+  static std::string utf8Pad(const std::string& s, int field_cols) {
+    int cols = 0;
+    size_t pos = 0;
+    while (pos < s.size()) {
+      unsigned char c = s[pos];
+      int char_bytes, char_cols;
+      if (c < 0x80) {
+        char_bytes = 1;
+        char_cols = 1;
+      } else if (c < 0xE0) {
+        char_bytes = 2;
+        char_cols = 1;
+      } else if (c < 0xF0) {
+        char_bytes = 3;
+        char_cols = 2;  // CJK 全角
+      } else {
+        char_bytes = 4;
+        char_cols = 2;
+      }
+      if (cols + char_cols > field_cols) break;
+      cols += char_cols;
+      pos += char_bytes;
+    }
+    std::string result = s.substr(0, pos);
+    result.append(field_cols - cols, ' ');
+    return result;
+  }
+
   // --- NCURSES UI 重绘 (全屏 10Hz) ---
 
   void drawUI() {
@@ -1035,9 +1089,9 @@ private:
     // 控制模式指示器
     {
       static const char* mode_labels[] = {"RELAX", "FREEDRIVE", "HOLD", "EXECUTE"};
-      int mode_color = (control_mode_ == ControlMode::RELAX) ? COLOR_PAIR_ERROR :
-                        (control_mode_ == ControlMode::FREEDRIVE) ? COLOR_PAIR_WARNING :
-                        COLOR_PAIR_SUCCESS;
+      int mode_color = (control_mode_ == ControlMode::RELAX)     ? COLOR_PAIR_ERROR
+                     : (control_mode_ == ControlMode::FREEDRIVE) ? COLOR_PAIR_WARNING
+                                                                 : COLOR_PAIR_SUCCESS;
       attron(A_BOLD | COLOR_PAIR(mode_color));
       printw(" [%s] ", control_mode_ <= 3 ? mode_labels[control_mode_] : "?");
       attroff(A_BOLD | COLOR_PAIR(mode_color));
@@ -1054,7 +1108,7 @@ private:
       mvprintw(3, 2, ">>> TAKEOVER MODE ACTIVE <<< [Esc] to exit. Global hotkeys M/T/C/G blocked.");
       attroff(COLOR_PAIR(COLOR_PAIR_ERROR) | A_BOLD);
     } else {
-      if (view_ == View::CARTESIAN || view_ == View::GRIPPER) {
+      if (view_ == View::CARTESIAN) {
         attron(COLOR_PAIR(COLOR_PAIR_WARNING));
         mvprintw(3, 2, "Press [Enter] to takeover and control.");
         attroff(COLOR_PAIR(COLOR_PAIR_WARNING));
@@ -1068,8 +1122,10 @@ private:
     std::lock_guard<std::mutex> lk(status_mu_);  // 防止访问后台数据时越界
 
     if (view_ == View::STATE_MACHINE) {
-      mvprintw(cur_line++, 2, "Mission: %s - %s", mission_name_.c_str(), mission_desc_.c_str());
+      mvprintw(cur_line++, 2, "Mission: %s - %s", mission_name_.c_str(),
+               utf8Pad(mission_desc_, max_x - 12 - (int)mission_name_.size()).c_str());
       cur_line++;
+      // 列布局: col4=[x] col8=ID(16) col25=Traj(16) col42=Desc(剩余) col(max_x-8)<-NOW
       for (size_t i = 0; i < states_.size(); i++) {
         if (i == current_idx_)
           attron(A_BOLD | COLOR_PAIR(COLOR_PAIR_WARNING));
@@ -1078,17 +1134,27 @@ private:
         else
           attron(A_DIM);
 
-        mvprintw(cur_line++, 4, "[%s] %-16s %-16s %s %s",
-                 (i < current_idx_ ? "*" : (i == current_idx_ ? ">" : " ")), states_[i].id.c_str(),
-                 states_[i].trajectory.empty() ? "(No Traj)" : states_[i].trajectory.c_str(),
-                 states_[i].description.c_str(), (i == current_idx_ ? " <- NOW" : ""));
+        const char* marker = (i < current_idx_ ? "*" : (i == current_idx_ ? ">" : " "));
+        const std::string& traj_str =
+            states_[i].trajectory.empty() ? "(No Traj)" : states_[i].trajectory;
+        // 描述最多用至 (max_x - 42 - 8) 列，至少留 8 列给 " <- NOW"
+        int desc_cols = std::max(1, max_x - 42 - 8);
+        std::string desc_field = utf8Pad(states_[i].description, desc_cols);
+
+        mvprintw(cur_line, 4, "[%s] ", marker);
+        mvprintw(cur_line, 8, "%s", utf8Pad(states_[i].id, 16).c_str());
+        mvprintw(cur_line, 25, "%s", utf8Pad(traj_str, 16).c_str());
+        mvprintw(cur_line, 42, "%s", desc_field.c_str());
+        if (i == current_idx_) mvprintw(cur_line, max_x - 8, "<- NOW");
+        cur_line++;
 
         attroff(A_BOLD | COLOR_PAIR(COLOR_PAIR_WARNING));
         attroff(COLOR_PAIR(COLOR_PAIR_SUCCESS));
         attroff(A_DIM);
       }
       cur_line++;
-      mvprintw(cur_line++, 2, "Hotkeys: [E] Execute   [X] Reset   [R] Reload   [0]Relax [1]Free [2]Hold");
+      mvprintw(cur_line++, 2,
+               "Hotkeys: [E] Execute   [X] Reset   [R] Reload   [0]Relax [1]Free [2]Hold");
     } else if (view_ == View::TRAJECTORY) {
       size_t pages = (trajectories_.size() + PER_PAGE - 1) / PER_PAGE;
       mvprintw(cur_line++, 2, "Database: %zu found (Page %zu/%zu)", trajectories_.size(),
@@ -1132,23 +1198,25 @@ private:
       mvprintw(cur_line++, 4, "Orientation: [Up/Down] Pitch  [Left/Right] Yaw  [Q/E] Roll");
       mvprintw(cur_line++, 4, "Config     : [+/-] Change Step Size");
     } else if (view_ == View::GRIPPER) {
-      mvprintw(cur_line++, 2, "Gripper Direct Control");
+      mvprintw(cur_line++, 2, "Gripper Status");
       cur_line++;
-      mvprintw(cur_line++, 4, "Last sent : ");
-      attron(COLOR_PAIR(COLOR_PAIR_SUCCESS));
-      printw("%.2f Nm", gripper_last_sent_);
-      attroff(COLOR_PAIR(COLOR_PAIR_SUCCESS));
 
-      mvprintw(cur_line++, 4, "Target (set) : ");
-      attron(COLOR_PAIR(COLOR_PAIR_WARNING) | A_BOLD);
-      printw("%.2f Nm", gripper_torque_cmd_);
-      attroff(COLOR_PAIR(COLOR_PAIR_WARNING) | A_BOLD);
+      // 当前状态
+      const char* state_str = (gripper_last_sent_ > 0.0) ? "GRIP"
+                            : (gripper_last_sent_ < 0.0) ? "RELEASE"
+                                                         : "STOP";
+      int state_color = (gripper_last_sent_ > 0.0) ? COLOR_PAIR_SUCCESS
+                      : (gripper_last_sent_ < 0.0) ? COLOR_PAIR_WARNING
+                                                   : COLOR_PAIR_DEFAULT;
+      mvprintw(cur_line++, 4, "State : ");
+      attron(COLOR_PAIR(state_color) | A_BOLD);
+      printw("%s  (%.0f N)", state_str, gripper_last_sent_);
+      attroff(COLOR_PAIR(state_color) | A_BOLD);
 
       cur_line++;
-      mvprintw(cur_line++, 4, "Hotkeys (Takeover):");
-      mvprintw(cur_line++, 6, "[ [ ] / [ ] ]  Adjust Target (-/+ 0.5)");
-      mvprintw(cur_line++, 6, "[ SPACE ]      Zero Target (0.0)");
-      mvprintw(cur_line++, 6, "[ s ]          Send Target Now");
+      mvprintw(cur_line++, 4, "Global hotkey (works everywhere):");
+      mvprintw(cur_line++, 6, "[ Z ]     Toggle grip/release  (+70 N / -70 N)");
+      mvprintw(cur_line++, 6, "[ SPACE ] Stop (0 N)  -- only in this view");
     }
 
     // 4. 输入区

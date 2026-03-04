@@ -171,7 +171,7 @@ check_errors_silently() {
 
     # 检查 Joint States NaN
     local joint_data=$(timeout 1 ros2 topic echo /joint_states --once 2>/dev/null)
-    if echo "$joint_data" | grep -q "nan\|inf"; then
+    if echo "$joint_data" | grep -iE "^- nan$|^- inf$|^- -inf$" | grep -q .; then
         log_fail "关节数据包含 NaN/Inf"
         ((ERRORS_FOUND++))
     else

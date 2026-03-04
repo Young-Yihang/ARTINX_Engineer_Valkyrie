@@ -180,11 +180,13 @@ start_sim_mode() {
     start_node "MoveIt+RViz" "ros2 launch arv_v1_moveit mujoco_demo.launch.py" 0
     start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
-    start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node" 0
+    # [FIX] MissionExecutor 必须先于 MuJoCo 启动，以便在物理仿真开始前发布 HOLD 模式。
+    # MuJoCo delay=2 给 mission_executor 足够时间建立订阅并发布控制模式。
+    start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
+    start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node" 2
     start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
     local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
-    start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 2
 }
 
 # ========== 模式2: 串口 + 数字孪生 ==========
@@ -202,12 +204,13 @@ start_serial_mode() {
     start_node "MoveIt+RViz" "ros2 launch arv_v1_moveit mujoco_demo.launch.py" 0
     start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
-    start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 0
-    start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true" 0
+    # [FIX] MissionExecutor 先启动，确保 HOLD 模式在物理接口启动前到达 torque_controller。
+    start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
+    start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 2
+    start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true" 2
     start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
     local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
-    start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 2
 }
 
 

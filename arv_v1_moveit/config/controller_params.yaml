@@ -5,7 +5,7 @@
   ros__parameters:
     # ========== 卡尔曼滤波器（速度滤波，降低噪声）==========
     kalman:
-      enabled: false
+      enabled: true
       Q_pos: 1.0e-5    # 过程噪声：位置
       Q_vel: 1.0e-4    # 过程噪声：速度
       R_pos: 1.0e-3    # 测量噪声：位置

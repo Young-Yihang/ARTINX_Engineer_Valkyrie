@@ -374,10 +374,16 @@ private:
       }
     }
 
-    // 发送重力补偿保持位置
+    // [FIX] 恢复后将 q_target_ 更新为当前实际位置，防止 HOLD 模式用失败轨迹
+    // 终点作为参考，避免大位置误差导致 PD 力矩饱和振荡
+    // 发送重力补偿保持位置，并同步更新 q_target_
     {
       std::lock_guard<std::mutex> state_lock(state_mutex_);
       if (state_received_) {
+        // 更新保持目标为当前实际位置
+        q_target_ = q_actual_;
+        has_target_ = true;
+
         KDL::JntArray tau_gravity(6);
         dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
 
@@ -639,7 +645,7 @@ void TorqueControllerActionServer::jointStateCallback(
     if (!std::isfinite(msg->position[i]) || !std::isfinite(msg->velocity[i])) {
       RCLCPP_ERROR_THROTTLE(
           this->get_logger(), *this->get_clock(), 1000,
-          "[SAFETY] Non-finite sensor data on joint %zu (pos=%.2f, vel=%.2f), rejecting!", i,
+          "[SAFETY] Non-finite sensor data on joint %zu (pos=%.2f, vel=%.2f), rejecting!", i + 1,
           msg->position[i], msg->velocity[i]);
       return;  // Reject entire message - 完全拒绝，不更新时间戳
     }
@@ -647,7 +653,7 @@ void TorqueControllerActionServer::jointStateCallback(
     // Sanity check: position within expanded limits (warn but accept)
     if (std::abs(msg->position[i]) > 2 * M_PI) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                           "[SAFETY] Joint %zu position out of range: %.2f rad", i,
+                           "[SAFETY] Joint %zu position out of range: %.2f rad", i + 1,
                            msg->position[i]);
     }
 
@@ -655,7 +661,7 @@ void TorqueControllerActionServer::jointStateCallback(
     if (std::abs(msg->velocity[i]) > max_velocity_sanity_) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                            "[SAFETY] Joint %zu velocity spike: %.2f rad/s (limit: %.1f), clamping!",
-                           i, msg->velocity[i], max_velocity_sanity_);
+                           i + 1, msg->velocity[i], max_velocity_sanity_);
       has_velocity_spike = true;
       // 不再return，而是继续处理，但会限幅速度
     }
@@ -980,12 +986,12 @@ void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_
         (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
     if (tau_fb(i) > joint_limit) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                           "[SAFETY] Joint %zu feedback torque saturated: %.2f -> %.2f Nm", i,
+                           "[SAFETY] Joint %zu feedback torque saturated: %.2f -> %.2f Nm", i + 1,
                            tau_fb(i), joint_limit);
       tau_fb(i) = joint_limit;
     } else if (tau_fb(i) < -joint_limit) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                           "[SAFETY] Joint %zu feedback torque saturated: %.2f -> -%.2f Nm", i,
+                           "[SAFETY] Joint %zu feedback torque saturated: %.2f -> -%.2f Nm", i + 1,
                            tau_fb(i), joint_limit);
       tau_fb(i) = -joint_limit;
     }
@@ -1130,8 +1136,9 @@ void TorqueControllerActionServer::controlLoop() {
       }
       torque_pub_->publish(safe_msg);
 
-      // [FIX] state_mutex_ 已释放，emergencyStop 可安全调用（无死锁）
-      emergencyStop("Joint state timeout");
+      // [FIX] 不再调用 emergencyStop（它会再发一帧零力矩），避免双帧交替干扰
+      // timeout 时仅重置 PID 积分器，q_target_ 保持不变（已有 gravity comp 维持）
+      if (cascade_pid_) cascade_pid_->resetAll();
       return;
     }
 
@@ -1167,7 +1174,7 @@ void TorqueControllerActionServer::controlLoop() {
         RCLCPP_ERROR(
             this->get_logger(),
             "[SAFETY] Non-finite torque detected on joint %d in idle mode (gravity=%.2f, pd=%.2f)",
-            i, tau_gravity(i), tau_pd(i));
+            i + 1, tau_gravity(i), tau_pd(i));
         emergencyStop("Non-finite torque in idle mode");
         return;
       }
@@ -1260,7 +1267,7 @@ void TorqueControllerActionServer::controlLoop() {
       // --- SAFETY: NaN/Inf check and saturation ---
       if (!std::isfinite(hold_torque.data[i])) {
         RCLCPP_ERROR(this->get_logger(),
-                     "[SAFETY] Non-finite torque at trajectory completion on joint %d", i);
+                     "[SAFETY] Non-finite torque at trajectory completion on joint %d", i + 1);
         emergencyStop("Non-finite torque at trajectory completion");
         return;
       }
@@ -1342,8 +1349,8 @@ void TorqueControllerActionServer::controlLoop() {
     if (!std::isfinite(tau_total(i))) {
       RCLCPP_ERROR(
           this->get_logger(),
-          "[SAFETY] Non-finite torque detected on joint %d during trajectory (ff=%.2f, fb=%.2f)", i,
-          tau_ff(i), tau_fb(i));
+          "[SAFETY] Non-finite torque detected on joint %d during trajectory (ff=%.2f, fb=%.2f)",
+          i + 1, tau_ff(i), tau_fb(i));
       emergencyStop("Non-finite torque during trajectory execution");
       return;
     }
@@ -1355,7 +1362,7 @@ void TorqueControllerActionServer::controlLoop() {
 
     if (std::abs(tau_total(i)) > joint_limit) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                           "[SAFETY] Joint %d total torque saturated: %.2f -> %.2f Nm", i,
+                           "[SAFETY] Joint %d total torque saturated: %.2f -> %.2f Nm", i + 1,
                            tau_total(i), torque_msg.data[i]);
     }
   }
