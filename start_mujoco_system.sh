@@ -3,9 +3,22 @@
 
 set -e
 
+# 捕捉 Ctrl+C 恢复光标
+trap 'tput cnorm; exit' INT TERM
+
+# ========== 颜色定义 ==========
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
 # ========== 可爱的启动画面 ==========
 show_mascot() {
-    echo -e "\033[0;36m"
+    clear
+    echo -e "${CYAN}"
     cat << 'MASCOT'
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡴⢋⣷⡄⠈⠉⠓⠶⣤⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
@@ -31,24 +44,34 @@ show_mascot() {
 ⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⣿⣿⠦⣤⣀⣀⣸⡿⠿⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⢿⣏⣿⣿⡿⣯⢾⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠉⠉⠑⠀⠀⠉⠀⠀⠀⠈⠉⠉⠉⠉⠙⠋⠙⠉⠋⠘⠛⠉⠉⠈⠃⠈⠉⠉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀
 MASCOT
-    echo -e "\033[0m"
+    echo -e "${NC}"
+    echo -e "  ${CYAN}:: ARV_V1 SYSTEM LAUNCHER ::${NC}"
+    echo "  ──────────────────────────────────────────"
+    echo ""
+    echo ""
 }
 
-# ========== 颜色定义 ==========
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# 进度更新（固定位置刷新，猫猫不动）
+update_status() {
+    local text="$1"
+    local percent="$2"
+    local bar_len=40
+    local filled=$((percent * bar_len / 100))
+    local empty=$((bar_len - filled))
+    local bar_str=$(printf "%${filled}s" | tr ' ' '█')
+    local empty_str=$(printf "%${empty}s" | tr ' ' '░')
+    echo -e "\033[2A\033[K  ${BOLD}STATUS:${NC} $text"
+    echo -e "\033[K  ${GREEN}[${bar_str}${empty_str}]${NC} ${percent}%"
+}
 
 # ========== 工作空间路径 ==========
 WORKSPACE_DIR="$HOME/ros2_ws"
 
 # ========== 日志函数 ==========
-log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+log_info()    { echo -e "  ${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "  ${GREEN}[OK]${NC} $1"; }
+log_warning() { echo -e "  ${YELLOW}[WARN]${NC} $1"; }
+log_error()   { echo -e "  ${RED}[ERROR]${NC} $1"; }
 
 # ========== 显示菜单 ==========
 show_menu() {
@@ -175,41 +198,63 @@ start_node() {
 
 # ========== 模式1: 纯仿真 ==========
 start_sim_mode() {
-    log_info "启动纯仿真模式..."
     local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
+    local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
+
+    update_status "MoveIt + RViz..." 10
     start_node "MoveIt+RViz" "ros2 launch arv_v1_moveit mujoco_demo.launch.py" 0
+
+    update_status "TorqueController..." 25
     start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
+
+    update_status "MissionExecutor..." 40
     # [FIX] MissionExecutor 必须先于 MuJoCo 启动，以便在物理仿真开始前发布 HOLD 模式。
-    # MuJoCo delay=2 给 mission_executor 足够时间建立订阅并发布控制模式。
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
+
+    update_status "MuJoCo (仿真)..." 55
     start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node" 2
+
+    update_status "TrajectoryManager..." 70
     start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
-    local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
+
+    update_status "CartesianController (IK)..." 85
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
 }
 
 # ========== 模式2: 串口 + 数字孪生 ==========
 start_serial_mode() {
-    # 尝试检测串口，但失败也不退出
+    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
+    local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
+
+    update_status "探测串口设备..." 8
     if detect_serial_device; then
-        log_success "使用检测到的串口: $DETECTED_SERIAL_DEVICE"
+        :
     else
-        log_warning "串口检测失败，使用默认设备 /dev/ttyACM0（节点会自动重连）"
         export DETECTED_SERIAL_DEVICE="/dev/ttyACM0"
     fi
 
-    log_info "启动串口真机模式 (设备: $DETECTED_SERIAL_DEVICE)..."
-    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
+    update_status "MoveIt + RViz..." 15
     start_node "MoveIt+RViz" "ros2 launch arv_v1_moveit mujoco_demo.launch.py" 0
+
+    update_status "TorqueController..." 25
     start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
+
+    update_status "MissionExecutor..." 38
     # [FIX] MissionExecutor 先启动，确保 HOLD 模式在物理接口启动前到达 torque_controller。
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
+
+    update_status "SerialInterface ($DETECTED_SERIAL_DEVICE)..." 50
     start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 2
+
+    update_status "MuJoCo (数字孪生)..." 65
     start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true" 2
+
+    update_status "TrajectoryManager..." 78
     start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
-    local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
+
+    update_status "CartesianController (IK)..." 90
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
 }
 
@@ -217,45 +262,53 @@ start_serial_mode() {
 
 # ========== 主函数 ==========
 main() {
-    clear
+    # 阶段1: 环境设置（猫猫出现前完成，避免输出打乱画面）
     setup_environment
     build_workspace
+
+    # 阶段2: 猫猫 + 菜单
+    tput civis  # 隐藏光标
     show_mascot
+
+    # 菜单选择（覆盖进度条预留行）
     while true; do
-        show_menu
+        echo -e "\033[2A\033[K  ${GREEN}[1]${NC} 仿真  ${GREEN}[2]${NC} 串口真机+孪生  ${GREEN}[0]${NC} 退出"
+        echo -ne "\033[K  请选择 [0-2]: "
+        tput cnorm
         read choice
+        tput civis
+
         case $choice in
-            1) start_sim_mode; break ;;
-            2) start_serial_mode; break ;;
-            0) log_info "退出"; exit 0 ;;
-            *) log_warning "无效选择，请重试" ;;
+            1) selected_mode=sim; break ;;
+            2) selected_mode=serial; break ;;
+            0) tput cnorm; exit 0 ;;
+            *) ;;
         esac
     done
 
-    echo ""
-    log_success "所有节点已启动！"
-    echo ""
-    echo -e "${YELLOW}常用命令:${NC}"
-    echo "  - 停止所有节点: ./stop_all_nodes.sh"
-    echo "  - 查看话题: ros2 topic list"
-    echo "  - 查看关节状态: ros2 topic echo /joint_states"
-    echo ""
-    echo -e "${YELLOW}轨迹管理服务:${NC}"
-    echo "  列出轨迹: ros2 service call /list_trajectories arv_v1_interfaces/srv/ListTrajectories"
-    echo ""
-    echo "  保存最近执行的轨迹 (先在RViz中Plan&Execute):"
-    echo "    ros2 service call /save_last_trajectory arv_v1_interfaces/srv/SaveLastTrajectory \\"
-    echo "        \"{name: 'my_traj', description: '我的轨迹'}\""
-    echo ""
-    echo "  加载并执行轨迹:"
-    echo "    ros2 service call /load_trajectory arv_v1_interfaces/srv/LoadTrajectory \\"
-    echo "        \"{name: 'my_traj', execute: true}\""
-    echo ""
-    echo -e "${YELLOW}任务执行器 (TUI界面):${NC}"
-    echo "  已在独立终端窗口启动，提供交互式任务选择和执行"
-    echo "  按数字键执行任务，按 R 刷新任务列表，按 Q 退出"
-    echo ""
+    # 阶段3: 猫猫 + 进度条
+    show_mascot
 
+    if [ "$selected_mode" = "sim" ]; then
+        update_status "启动纯仿真模式..." 5
+        start_sim_mode
+    else
+        update_status "启动串口真机模式..." 5
+        start_serial_mode
+    fi
+
+    update_status "所有节点已启动！" 100
+    sleep 0.5
+
+    # 最终提示
+    echo ""
+    echo ""
+    echo -e "  ${GREEN}${BOLD}[完成]${NC} 系统已就绪"
+    echo ""
+    echo -e "  ${YELLOW}停止:${NC} ./stop_all_nodes.sh"
+    echo -e "  ${YELLOW}诊断:${NC} ./scripts/check_system.sh"
+    echo ""
+    tput cnorm
     log_info "按 Ctrl+C 退出此脚本（节点继续运行）"
     tail -f /dev/null
 }

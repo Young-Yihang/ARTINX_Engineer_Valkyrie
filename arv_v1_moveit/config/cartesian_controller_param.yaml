@@ -4,4 +4,4 @@ cartesian_controller_node:
     reference_frame: "base_link"
     # 球形工作空间参数
     ws_min_radius: 0.01
-    ws_max_radius: 0.8
+    ws_max_radius: 1.6
