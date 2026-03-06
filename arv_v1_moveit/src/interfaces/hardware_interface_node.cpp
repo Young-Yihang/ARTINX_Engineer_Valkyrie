@@ -20,9 +20,11 @@ public:
     // 1. 声明参数
     this->declare_parameter("serial_port", "/dev/ttyACM0");
     this->declare_parameter("baud_rate", 921600);
-    this->declare_parameter("simulation_mode", false);  // 新增：仿真模式参数
+    this->declare_parameter("send_rate_hz", 200);       // 力矩发送频率 (Hz)
+    this->declare_parameter("gripper_rate_hz", 50);     // 夹爪发送频率 (Hz)
+    this->declare_parameter("simulation_mode", false);  // 仿真模式参数
     this->declare_parameter("force_zero_torque",
-                            false);  // 新增：强制零力矩开关（默认false允许正常控制）
+                            false);  // 强制零力矩开关（默认false允许正常控制）
 
     // 2. 获取参数
     std::string port = this->get_parameter("serial_port").as_string();
@@ -61,13 +63,17 @@ public:
                   "[OK] Hardware mode - Serial RX/TX enabled (auto-reconnect every 200ms)");
     }
 
-    // 6. 启动200Hz发送定时器（解耦架构：独立于解算层）
-    auto send_period = std::chrono::microseconds(5000);  // 5ms = 200Hz
+    // 6. 启动发送定时器（解耦架构：独立于解算层）
+    const int send_hz = this->get_parameter("send_rate_hz").as_int();
+    const int grip_hz = this->get_parameter("gripper_rate_hz").as_int();
+    gripper_divider_ = (grip_hz > 0 && send_hz >= grip_hz) ? (send_hz / grip_hz) : 4;
+    auto send_period = std::chrono::microseconds(1000000 / send_hz);
     send_timer_ =
         this->create_wall_timer(send_period, std::bind(&HardwareInterfaceNode::sendLoop, this));
 
     last_torque_update_ = this->now();  // 初始化时间戳
-    RCLCPP_INFO(this->get_logger(), "[OK] Send timer started at 200Hz (decoupled from controller)");
+    RCLCPP_INFO(this->get_logger(), "[OK] Send timer started at %dHz, gripper at %dHz (1:%d)",
+                send_hz, grip_hz, gripper_divider_);
 
     // 7. 启动健康监控定时器 (5Hz)
     last_rx_activity_.store(std::chrono::steady_clock::now());
@@ -134,8 +140,9 @@ private:
   rclcpp::Time last_torque_update_;
   bool torque_data_valid_ = false;
 
-  // 夹爪分频计数（50Hz = 每4个200Hz周期发一次，% 4）
-  uint8_t gripper_counter_ = 0;
+  // 夹爪分频 (send_rate_hz / gripper_rate_hz, 由参数动态计算)
+  int gripper_divider_ = 4;
+  int gripper_counter_ = 0;
 
   // Health monitoring
   std::atomic<std::chrono::steady_clock::time_point> last_rx_activity_;
@@ -389,10 +396,10 @@ private:
 
     sendRaw(SerialProtocol::buildTorquePacket(cmd));
 
-    // ── 3. 分频发送夹爪包 (50Hz = 200Hz / 4) ──
+    // ── 3. 分频发送夹爪包 (send_rate / gripper_rate) ──
     // effort_controller/commands[6] 单位为 N (prismatic joint), 硬件只用符号判断开关:
     //   > +0.1 → GRIP,  < -0.1 → RELEASE,  else → STOP
-    gripper_counter_ = (gripper_counter_ + 1) % 4;
+    gripper_counter_ = (gripper_counter_ + 1) % gripper_divider_;
     if (gripper_counter_ == 0) {
       SerialProtocol::GripperAction action;
       if (force_zero) {
