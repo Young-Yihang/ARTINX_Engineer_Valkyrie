@@ -18,6 +18,13 @@ NC='\033[0m' # No Color
 
 # 变量初始化
 SAMPLE_TIME=3
+
+# --- 可配置参数 (改频率只改这里) ---
+CONTROL_RATE_HZ=200       # /joint_states 期望频率 (Hz)
+EFFORT_RATE_HZ=200        # /effort_controller/commands 期望频率 (Hz)
+JITTER_WARN_MS=1.0        # 抖动警告阈值 (ms), 200Hz周期=5ms
+RT_CORE=3                 # RT-PREEMPT 隔离核心编号
+
 NODE_OK=0; NODE_FAIL=0
 TOPIC_OK=0; TOPIC_WARN=0; TOPIC_FAIL=0
 ERRORS_FOUND=0
@@ -89,53 +96,71 @@ log_section() { REPORT_BUFFER+=(""); REPORT_BUFFER+=("${CYAN}>> $1${NC}"); }
 
 # ==================== 2. 检测逻辑 (静默版) ====================
 
-# 配置
-declare -A EXPECTED_NODES=(
+# 配置: 通用节点 (两种模式都需要)
+declare -A COMMON_NODES=(
     ["torque_controller"]="力矩控制器"
     ["move_group"]="MoveIt规划器"
     ["robot_state_publisher"]="TF发布器"
     ["trajectory_manager"]="轨迹管理器"
     ["mission_executor"]="任务执行器"
+    ["cartesian_controller"]="笛卡尔控制器"
 )
 
-# 阶段1: 节点检查
+# 阶段1: 节点检查 (模式感知)
 check_nodes_silently() {
     log_section "1. 节点状态检查"
     local nodes_list=$(ros2 node list 2>/dev/null)
-    
-    for node in "${!EXPECTED_NODES[@]}"; do
+
+    # 先检测运行模式
+    local has_mujoco=false has_hardware=false
+    echo "$nodes_list" | grep -q "mujoco_interface" && has_mujoco=true
+    echo "$nodes_list" | grep -q "hardware_interface" && has_hardware=true
+
+    if $has_hardware; then
+        EXEC_MODE="hardware"
+        log_ok "执行层: 硬件接口"
+    elif $has_mujoco; then
+        EXEC_MODE="simulation"
+        log_ok "执行层: MuJoCo仿真"
+    else
+        EXEC_MODE="none"
+        log_fail "执行层: 未检测到接口"
+    fi
+
+    # 通用节点
+    for node in "${!COMMON_NODES[@]}"; do
         if echo "$nodes_list" | grep -q "$node"; then
-            log_ok "${EXPECTED_NODES[$node]}"
+            log_ok "${COMMON_NODES[$node]}"
             ((NODE_OK++))
         else
-            log_fail "${EXPECTED_NODES[$node]} (未运行)"
+            log_fail "${COMMON_NODES[$node]} (未运行)"
             ((NODE_FAIL++))
         fi
     done
 
-    # 检查运行模式
-    if echo "$nodes_list" | grep -q "mujoco_interface"; then
-        log_ok "执行层: MuJoCo仿真"
-        EXEC_MODE="simulation"
-    elif echo "$nodes_list" | grep -q "hardware_interface"; then
-        log_ok "执行层: 硬件接口"
-        EXEC_MODE="hardware"
-    else
-        log_fail "执行层: 未检测到接口"
-        EXEC_MODE="none"
+    # 模式专属节点
+    if [ "$EXEC_MODE" = "hardware" ]; then
+        # 硬件模式: 数字孪生可选
+        if $has_mujoco; then
+            log_ok "数字孪生: MuJoCo (visualization_only)"
+            ((NODE_OK++))
+        else
+            log_warn "数字孪生: MuJoCo 未启动 (可选)"
+        fi
     fi
 }
 
-# 阶段2: 话题频率 (这个最耗时)
+# 阶段2: 话题频率 + 抖动 (log_section 由主流程调用, 不在函数内)
 check_hz_silently() {
-    log_section "2. 话题与通信质量"
     local topic=$1
     local expected=$2
     local name=$3
 
-    # 实际执行 ros2 topic hz
-    local hz_output=$(timeout $((SAMPLE_TIME + 1)) ros2 topic hz "$topic" --window 50 2>/dev/null | grep "average rate:" | tail -1)
-    local hz=$(echo "$hz_output" | awk '{print $3}')
+    # 采样: 同时捕获 average rate 和 std dev
+    local raw_output=$(timeout $((SAMPLE_TIME + 1)) ros2 topic hz "$topic" --window 50 2>/dev/null | tail -2)
+    local hz=$(echo "$raw_output" | grep "average rate:" | awk '{print $3}')
+    # std dev 行格式: "    min: 0.004s max: 0.006s std dev: 0.00035s window: 50"
+    local std_dev_s=$(echo "$raw_output" | grep "std dev:" | sed 's/.*std dev: \([0-9.]*\)s.*/\1/')
 
     if [ -z "$hz" ]; then
         log_fail "$name: 无数据 (期望 ${expected}Hz)"
@@ -143,19 +168,31 @@ check_hz_silently() {
         return
     fi
 
-    # 计算偏差
+    # 频率偏差
     local hz_int=${hz%.*}
     local deviation=$(( (hz_int - expected) * 100 / expected ))
     local abs_dev=${deviation#-}
 
+    # 抖动评估 (std_dev 秒 → 毫秒)
+    local jitter_info=""
+    if [ -n "$std_dev_s" ]; then
+        local std_dev_ms=$(awk "BEGIN{printf \"%.2f\", $std_dev_s * 1000}")
+        local jitter_bad=$(awk "BEGIN{print ($std_dev_ms > $JITTER_WARN_MS) ? 1 : 0}")
+        if [ "$jitter_bad" -eq 1 ]; then
+            jitter_info=", 抖动 ${std_dev_ms}ms ${YELLOW}[高]${NC}"
+        else
+            jitter_info=", 抖动 ${std_dev_ms}ms"
+        fi
+    fi
+
     if [ "$abs_dev" -le 10 ]; then
-        log_ok "$name: ${hz} Hz (偏差 ${deviation}%)"
+        log_ok "$name: ${hz} Hz (偏差 ${deviation}%${jitter_info})"
         ((TOPIC_OK++))
     elif [ "$abs_dev" -le 30 ]; then
-        log_warn "$name: ${hz} Hz (偏差 ${deviation}%)"
+        log_warn "$name: ${hz} Hz (偏差 ${deviation}%${jitter_info})"
         ((TOPIC_WARN++))
     else
-        log_fail "$name: ${hz} Hz (严重偏差 ${deviation}%)"
+        log_fail "$name: ${hz} Hz (严重偏差 ${deviation}%${jitter_info})"
         ((TOPIC_FAIL++))
     fi
 }
@@ -179,14 +216,60 @@ check_errors_silently() {
     fi
 }
 
-# 阶段4: 系统资源
+# 阶段4: 各节点 CPU% / 内存
+check_node_perf_silently() {
+    log_section "4. 节点性能"
+    local ps_output=$(ps -eo pid,comm,%cpu,rss --no-headers 2>/dev/null)
+    local node_patterns="torque_control|mujoco_interfa|hardware_inter|move_group|trajectory_man|cartesian_cont|mission_execut"
+    local matched=$(echo "$ps_output" | grep -E "$node_patterns")
+
+    if [ -z "$matched" ]; then
+        log_warn "未检测到 ROS2 节点进程"
+        return
+    fi
+
+    local total_cpu=0 total_rss=0
+    while IFS= read -r line; do
+        local pname=$(echo "$line" | awk '{print $2}')
+        local pcpu=$(echo "$line" | awk '{print $3}')
+        local prss_kb=$(echo "$line" | awk '{print $4}')
+        local prss_mb=$(awk "BEGIN{printf \"%.1f\", $prss_kb / 1024}")
+        log_info "${pname}: CPU ${pcpu}%  RSS ${prss_mb} MB"
+        total_cpu=$(awk "BEGIN{printf \"%.1f\", $total_cpu + $pcpu}")
+        total_rss=$(awk "BEGIN{printf \"%.1f\", $total_rss + $prss_kb / 1024}")
+    done <<< "$matched"
+
+    # 汇总 (对比 <65% 约束)
+    local cpu_bad=$(awk "BEGIN{print ($total_cpu > 65) ? 1 : 0}")
+    if [ "$cpu_bad" -eq 1 ]; then
+        log_warn "节点合计: CPU ${total_cpu}% (超过65%阈值)  RSS ${total_rss} MB"
+    else
+        log_ok "节点合计: CPU ${total_cpu}%  RSS ${total_rss} MB"
+    fi
+}
+
+# 阶段5: 系统资源 + RT核心
 check_resources_silently() {
-    log_section "4. 资源占用"
+    log_section "5. 系统资源"
     local cpu=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
     local mem=$(free | awk 'NR==2{printf "%.1f", $3*100/$2}')
-    
-    log_info "CPU负载: ${cpu}%"
+
+    log_info "全局 CPU: ${cpu}%"
     log_info "内存占用: ${mem}%"
+
+    # RT 隔离核心检测
+    if command -v mpstat &>/dev/null; then
+        local idle=$(mpstat -P "$RT_CORE" 1 1 2>/dev/null | tail -1 | awk '{print $NF}')
+        if [ -n "$idle" ]; then
+            local rt_use=$(awk "BEGIN{printf \"%.1f\", 100 - $idle}")
+            local rt_bad=$(awk "BEGIN{print ($rt_use > 80) ? 1 : 0}")
+            if [ "$rt_bad" -eq 1 ]; then
+                log_warn "RT核心(#${RT_CORE}): ${rt_use}% (超过80%)"
+            else
+                log_ok "RT核心(#${RT_CORE}): ${rt_use}%"
+            fi
+        fi
+    fi
 }
 
 # ==================== 主程序流 ====================
@@ -198,31 +281,34 @@ show_mascot
 # 此时光标在进度条下方，我们需要保持它在这里
 
 # --- 步骤 1: 节点检查 ---
-update_loading "正在连接 ROS2 上下文..." 10
+update_loading "正在连接 ROS2 上下文..." 8
 sleep 0.5
-update_loading "正在扫描活动节点..." 20
+update_loading "正在扫描活动节点..." 16
 check_nodes_silently
-sleep 0.5
 
-# --- 步骤 2: 话题频率 (耗时) ---
-update_loading "采样关节数据 (/joint_states)..." 40
-check_hz_silently "/joint_states" 200 "关节状态"
+# --- 步骤 2: 话题频率 + 抖动 (耗时) ---
+log_section "2. 话题与通信质量"
+update_loading "采样关节数据 (/joint_states)..." 30
+check_hz_silently "/joint_states" $CONTROL_RATE_HZ "关节状态"
 
-update_loading "采样控制指令 (/effort_controller/commands)..." 60
-check_hz_silently "/effort_controller/commands" 200 "力矩指令"
+update_loading "采样控制指令 (/effort_controller/commands)..." 44
+check_hz_silently "/effort_controller/commands" $EFFORT_RATE_HZ "力矩指令"
 
-# --- 步骤 3: 错误与资源 ---
-update_loading "分析系统日志与错误..." 80
+# --- 步骤 3: 错误扫描 ---
+update_loading "分析系统日志与错误..." 58
 check_errors_silently
-sleep 0.5
 
-update_loading "读取硬件资源统计..." 90
+# --- 步骤 4: 节点性能 ---
+update_loading "采集节点 CPU/内存..." 72
+check_node_perf_silently
+
+# --- 步骤 5: 系统资源 + RT核心 ---
+update_loading "检测系统资源与RT核心..." 88
 check_resources_silently
-sleep 0.5
 
 # --- 完成 ---
 update_loading "诊断完成！生成报告中..." 100
-sleep 0.8
+sleep 0.5
 
 # ==================== 最终报告渲染 ====================
 clear
