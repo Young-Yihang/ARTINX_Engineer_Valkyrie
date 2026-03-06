@@ -260,6 +260,14 @@ public:                                 // 构造函数log
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Control mode subscriber created: /control_mode (default: RELAX)");
 
+    // --- 订阅关节位置目标 (由 cartesian_controller IK 伺服输出) ---
+    joint_target_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/joint_position_target", rclcpp::SensorDataQoS(),
+        std::bind(&TorqueControllerActionServer::jointTargetCallback, this,
+                  std::placeholders::_1));
+    RCLCPP_INFO(this->get_logger(),
+                "[OK] Joint target subscriber created: /joint_position_target");
+
     RCLCPP_INFO(this->get_logger(), "[INFO] Control frequency: %.1f Hz", control_frequency_);
 
     auto period = std::chrono::duration<double, std::milli>(1000.0 / control_frequency_);
@@ -322,6 +330,9 @@ private:
   // 控制模式 (由 mission_executor 通过 /control_mode topic 管理)
   std::atomic<uint8_t> control_mode_{ControlMode::RELAX};  // 默认 RELAX: 上电安全
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr control_mode_sub_;
+
+  // 关节位置目标 (由 cartesian_controller IK 伺服输出, OVERDRIVE HOLD 时更新 q_target_)
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr joint_target_sub_;
 
   // 夹爪控制 (prismatic joint, 单位: N)
   std::mutex gripper_mutex_;
@@ -498,6 +509,27 @@ private:
 
     static const char *mode_names[] = {"RELAX", "FREEDRIVE", "OVERDRIVE", "EXECUTE"};
     RCLCPP_WARN(get_logger(), "[MODE] %s -> %s", mode_names[old_mode], mode_names[new_mode]);
+  }
+
+  // --- 关节位置目标回调 (cartesian_controller IK 伺服输出) ---
+  // 仅在 OVERDRIVE 非执行状态下更新 q_target_，与 HOLD PD 跟踪配合
+  void jointTargetCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+    if (static_cast<int>(msg->data.size()) < kArmJoints) return;
+
+    // 只在 OVERDRIVE 模式 + 非轨迹执行时接受
+    if (control_mode_.load(std::memory_order_acquire) != ControlMode::OVERDRIVE) return;
+    if (is_executing_.load(std::memory_order_acquire)) return;
+
+    // NaN/Inf 全量校验
+    for (int i = 0; i < kArmJoints; i++) {
+      if (!std::isfinite(msg->data[i])) return;
+    }
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    for (int i = 0; i < kArmJoints; i++) {
+      q_target_(i) = msg->data[i];
+    }
+    has_target_ = true;
   }
 };
 

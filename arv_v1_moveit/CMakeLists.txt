@@ -291,23 +291,29 @@ add_executable(cartesian_controller_node
 
 target_link_libraries(cartesian_controller_node
   ${rclcpp_LIBRARIES}
+  ${orocos_kdl_LIBRARIES}
+  ${kdl_parser_LIBRARIES}
 )
 
 target_include_directories(cartesian_controller_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${rclcpp_INCLUDE_DIRS}
+  ${orocos_kdl_INCLUDE_DIRS}
+  ${kdl_parser_INCLUDE_DIRS}
 )
 
 ament_target_dependencies(cartesian_controller_node
   rclcpp
   std_msgs
+  sensor_msgs
   geometry_msgs
   tf2
   tf2_ros
   tf2_geometry_msgs
-  moveit_ros_planning_interface
-  arv_v1_interfaces
+  kdl_parser
+  orocos_kdl
+  ament_index_cpp
 )
 
 # -------------------------------------------
@@ -326,6 +332,7 @@ ament_target_dependencies(mission_executor_node
   rclcpp
   std_msgs
   geometry_msgs
+  tf2
   arv_v1_interfaces
 )
 

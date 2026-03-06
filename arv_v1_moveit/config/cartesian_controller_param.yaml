@@ -1,13 +1,7 @@
 cartesian_controller_node:
   ros__parameters:
-    # 运动学
-    planning_group: "ARM"
     end_effector_link: "tcp"
     reference_frame: "base_link"
-    # 速度与加速度比例
-    default_velocity_scaling: 1.0
-    default_acceleration_scaling: 1.0
-
     # 球形工作空间参数
     ws_min_radius: 0.01
     ws_max_radius: 0.8

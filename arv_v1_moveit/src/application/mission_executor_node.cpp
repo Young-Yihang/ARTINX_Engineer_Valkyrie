@@ -28,12 +28,12 @@
 #include <thread>
 #include <vector>
 
+#include <tf2/LinearMath/Quaternion.h>
+
 #include "arv_v1_interfaces/srv/gripper_control.hpp"
 #include "arv_v1_interfaces/srv/list_trajectories.hpp"
 #include "arv_v1_interfaces/srv/load_trajectory.hpp"
-#include "arv_v1_interfaces/srv/move_to_cartesian_rpy.hpp"
 #include "arv_v1_interfaces/srv/save_last_trajectory.hpp"
-#include "arv_v1_interfaces/srv/stop_cartesian_motion.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "std_msgs/msg/int32.hpp"   // /task_command from hardware_interface
 #include "std_msgs/msg/u_int8.hpp"  // /control_mode
@@ -49,8 +49,6 @@ constexpr uint8_t EXECUTE = 3;    // 轨迹执行
 using LoadTrajectory = arv_v1_interfaces::srv::LoadTrajectory;
 using ListTrajectories = arv_v1_interfaces::srv::ListTrajectories;
 using SaveLastTrajectory = arv_v1_interfaces::srv::SaveLastTrajectory;
-using MoveToCartesianRPY = arv_v1_interfaces::srv::MoveToCartesianRPY;
-using StopCartesianMotion = arv_v1_interfaces::srv::StopCartesianMotion;
 using GripperControl = arv_v1_interfaces::srv::GripperControl;
 using namespace std::chrono_literals;
 
@@ -113,8 +111,8 @@ public:
 
     load_client_ = create_client<LoadTrajectory>("/load_trajectory");
     save_client_ = create_client<SaveLastTrajectory>("/save_last_trajectory");
-    cartesian_client_ = create_client<MoveToCartesianRPY>("/move_to_cartesian_rpy");
-    stop_cartesian_client_ = create_client<StopCartesianMotion>("/stop_cartesian_motion");
+    cartesian_target_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+        "/cartesian_target_pose", 10);
     gripper_client_ = create_client<GripperControl>("/gripper_control");
 
     // 订阅末端位姿 (30Hz from cartesian_controller_node)
@@ -145,7 +143,6 @@ public:
     }
     // 其他服务不阻塞等待，首次调用时自然检测
     save_client_->wait_for_service(500ms);
-    cartesian_client_->wait_for_service(500ms);
 
     loadMissionSequence();
     fetchTrajectories();
@@ -260,7 +257,11 @@ private:
   double gripper_last_sent_ = 0.0;   // 实际最后发送的力 (N)
 
   // --- 笛卡尔状态 ---
-  double cartesian_step_ = 0.05;  // 5cm
+  double cartesian_step_ = 0.005;  // 5mm (10Hz × 5mm = 50mm/s 长按速度)
+  // Jog 目标位姿：增量叠加在目标上而非 TF 反馈上，避免 PD 跟踪延迟导致漂移
+  geometry_msgs::msg::Pose jog_target_pose_;
+  double jog_target_roll_ = 0.0, jog_target_pitch_ = 0.0, jog_target_yaw_ = 0.0;
+  bool jog_target_initialized_ = false;
   geometry_msgs::msg::PoseStamped current_ee_pose_;
   std::mutex pose_mu_;
   bool has_ee_pose_ = false;
@@ -282,8 +283,7 @@ private:
   // --- ROS2 客户端 ---
   rclcpp::Client<LoadTrajectory>::SharedPtr load_client_;
   rclcpp::Client<SaveLastTrajectory>::SharedPtr save_client_;
-  rclcpp::Client<MoveToCartesianRPY>::SharedPtr cartesian_client_;
-  rclcpp::Client<StopCartesianMotion>::SharedPtr stop_cartesian_client_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr cartesian_target_pub_;
   rclcpp::Client<GripperControl>::SharedPtr gripper_client_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr ee_pose_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr task_command_sub_;
@@ -445,6 +445,16 @@ private:
       // Cartesian 视图：Enter 触发接管模式
       if (ch == '\n' || ch == '\r') {
         takeover_mode_ = true;
+        // 初始化 jog 目标为当前 TF 位姿
+        {
+          std::lock_guard<std::mutex> lk(pose_mu_);
+          if (has_ee_pose_) {
+            jog_target_pose_ = current_ee_pose_.pose;
+            quaternionToRPY(jog_target_pose_.orientation,
+                            jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
+            jog_target_initialized_ = true;
+          }
+        }
         logWarn("Entered Takeover mode. Press 'Esc' to release.");
       }
     } else if (view_ == View::GRIPPER) {
@@ -456,13 +466,7 @@ private:
   void handleTakeoverInput(int ch) {
     if (ch == 27) {  // Esc 退出接管
       takeover_mode_ = false;
-      if (view_ == View::CARTESIAN && stop_cartesian_client_->service_is_ready()) {
-        auto req = std::make_shared<StopCartesianMotion::Request>();
-        stop_cartesian_client_->async_send_request(req);
-        log("Cartesian motion stopped.", COLOR_PAIR_DEFAULT);
-      } else {
-        log("Exited Takeover mode.", COLOR_PAIR_DEFAULT);
-      }
+      log("Exited Takeover mode.", COLOR_PAIR_DEFAULT);
       return;
     }
 
@@ -926,11 +930,11 @@ private:
   void handleCartesianTakeover(int ch) {
     // 改变步长
     if (ch == '+' || ch == '=') {
-      cartesian_step_ = std::min(1.0, cartesian_step_ + 0.01);
+      cartesian_step_ = std::min(0.1, cartesian_step_ + 0.001);
       return;
     }
     if (ch == '-') {
-      cartesian_step_ = std::max(0.01, cartesian_step_ - 0.01);
+      cartesian_step_ = std::max(0.001, cartesian_step_ - 0.001);
       return;
     }
 
@@ -984,47 +988,39 @@ private:
 
   void sendCartesianRelative(double dx, double dy, double dz, double droll, double dpitch,
                              double dyaw) {
-    geometry_msgs::msg::Pose cur_pose;
-    {
-      std::lock_guard<std::mutex> lk(pose_mu_);
-      if (!has_ee_pose_) {
-        logErr("No EE pose yet. Is cartesian_controller running?");
-        return;
-      }
-      cur_pose = current_ee_pose_.pose;
+    if (!jog_target_initialized_) {
+      logErr("No EE pose yet. Is cartesian_controller running?");
+      return;
     }
 
-    double cur_roll, cur_pitch, cur_yaw;
-    quaternionToRPY(cur_pose.orientation, cur_roll, cur_pitch, cur_yaw);
+    // 增量叠加在目标上（而非 TF 反馈），避免 PD 跟踪延迟导致漂移
+    jog_target_pose_.position.x += dx;
+    jog_target_pose_.position.y += dy;
+    jog_target_pose_.position.z += dz;
+    jog_target_roll_ += droll;
+    jog_target_pitch_ += dpitch;
+    jog_target_yaw_ += dyaw;
 
-    auto req = std::make_shared<MoveToCartesianRPY::Request>();
-    req->x = cur_pose.position.x + dx;
-    req->y = cur_pose.position.y + dy;
-    req->z = cur_pose.position.z + dz;
-    req->roll = cur_roll + droll;
-    req->pitch = cur_pitch + dpitch;
-    req->yaw = cur_yaw + dyaw;
-    req->velocity_scaling = 0.0;
-    req->acceleration_scaling = 0.0;
-    req->async_execution = true;
+    tf2::Quaternion q;
+    q.setRPY(jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
+    q.normalize();
+
+    geometry_msgs::msg::PoseStamped target;
+    target.header.stamp = this->now();
+    target.header.frame_id = "base_link";
+    target.pose.position = jog_target_pose_.position;
+    target.pose.orientation.x = q.x();
+    target.pose.orientation.y = q.y();
+    target.pose.orientation.z = q.z();
+    target.pose.orientation.w = q.w();
+
+    cartesian_target_pub_->publish(target);
 
     char buf[128];
-    snprintf(buf, sizeof(buf), "Jog -> (%.3f, %.3f, %.3f) RPY(%.2f, %.2f, %.2f)", req->x, req->y,
-             req->z, req->roll, req->pitch, req->yaw);
+    snprintf(buf, sizeof(buf), "Jog -> (%.3f, %.3f, %.3f) RPY(%.2f, %.2f, %.2f)",
+             target.pose.position.x, target.pose.position.y, target.pose.position.z,
+             jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
     log(buf, COLOR_PAIR_DEFAULT);
-
-    cartesian_client_->async_send_request(
-        req, [this](rclcpp::Client<MoveToCartesianRPY>::SharedFuture fut) {
-          try {
-            auto res = fut.get();
-            if (res->success)
-              logOk("Jog OK (plan: " + std::to_string(res->planning_time).substr(0, 5) + "s)");
-            else
-              logErr("Jog fail: " + res->message);
-          } catch (const std::exception& e) {
-            logErr("Jog exception: " + std::string(e.what()));
-          }
-        });
   }
 
   // --- UTF-8 工具 ---

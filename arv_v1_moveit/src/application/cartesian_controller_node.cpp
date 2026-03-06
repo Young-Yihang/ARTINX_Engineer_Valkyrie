@@ -1,31 +1,34 @@
 /**
  * @file cartesian_controller_node.cpp
- * @brief Cartesian IK controller using Pilz LIN/PTP planner
+ * @brief Cartesian IK servo: 笛卡尔位姿 → KDL IK → 关节位置目标
  *
- * 通过 MoveGroupInterface 调用 move_group 节点的 Pilz 规划器，
- * 将笛卡尔空间目标位姿转换为关节轨迹并执行。
+ * 统一接口：视觉伺服、TUI jogging 等所有笛卡尔输入通过
+ * /cartesian_target_pose 话题 → KDL IK 解算 → /joint_position_target 发给
+ * torque_controller 的 HOLD 模式 PD 跟踪。
  *
- * [NOTE] MoveGroupInterface 构造时自动启动 CurrentStateMonitor（订阅 /joint_states）。
- * 该监控器在后台运行无害，但禁止在 executor 回调内调用 getCurrentState/getCurrentPose —
- * 这些方法内部 waitForCompleteState() 阻塞等待 /joint_states 回调被调度，
- * 而该回调需要同一个 executor 来处理 → 回调线程自锁。
- * 位姿查询统一使用 TF lookupTransform（读缓存，不依赖 executor 调度）。
+ * 全程无雅可比速度映射，无奇异爆炸风险。IK 无解时保持上一帧位置。
  */
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <cmath>
+#include <fstream>
 #include <functional>
 #include <geometry_msgs/msg/pose_stamped.hpp>
-#include <moveit/move_group_interface/move_group_interface.hpp>
+#include <kdl/chainfksolverpos_recursive.hpp>
+#include <kdl/chainiksolverpos_lma.hpp>
+#include <kdl_parser/kdl_parser.hpp>
+#include <mutex>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
-#include "arv_v1_interfaces/srv/move_to_cartesian_rpy.hpp"
-#include "arv_v1_interfaces/srv/stop_cartesian_motion.hpp"
+static constexpr int kArmJoints = 6;
 
 class CartesianControllerNode : public rclcpp::Node {
 public:
@@ -33,52 +36,39 @@ public:
   ~CartesianControllerNode() = default;
 
 private:
-  // --- 成员变量 ---
-  // MoveIt 接口 (延迟初始化，仅用于 plan/execute/stop)
-  std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
+  // --- KDL IK ---
+  KDL::Chain kdl_chain_;
+  std::unique_ptr<KDL::ChainFkSolverPos_recursive> fk_solver_;
+  std::unique_ptr<KDL::ChainIkSolverPos_LMA> ik_solver_;
 
-  // TF 位姿查询（替代 MoveGroupInterface::getCurrentState()，避免回调自锁）
+  // 关节状态缓存（IK 种子）
+  KDL::JntArray q_current_{kArmJoints};
+  std::mutex js_mutex_;
+  bool has_joint_state_ = false;
+
+  // TF 位姿查询
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   // 配置参数
-  std::string planning_group_;
   std::string end_effector_link_;
   std::string reference_frame_;
-  double default_velocity_scaling_;
-  double default_acceleration_scaling_;
-
-  // 工作空间边界
   double ws_min_radius_;
   double ws_max_radius_;
 
   // --- ROS2 接口 ---
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr js_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_target_sub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr joint_target_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
-  rclcpp::Service<arv_v1_interfaces::srv::MoveToCartesianRPY>::SharedPtr move_rpy_srv_;
-  rclcpp::Service<arv_v1_interfaces::srv::StopCartesianMotion>::SharedPtr stop_srv_;
-  rclcpp::TimerBase::SharedPtr init_timer_;
   rclcpp::TimerBase::SharedPtr pose_publish_timer_;
 
-  // --- 方法声明 ---
-  void declareParameters();
-  void loadParameters();
-  void initializeMoveGroup();
-
-  geometry_msgs::msg::Quaternion rpyToQuaternion(double roll, double pitch, double yaw);
+  // --- 方法 ---
+  bool initializeIK();
   bool validateTargetPose(double x, double y, double z, std::string& error_msg);
-
-  bool planAndExecute(const geometry_msgs::msg::Pose& target_pose, double velocity_scaling,
-                      double acceleration_scaling, double& planning_time,
-                      double& trajectory_duration, std::string& error_message);
-
-  void moveToCartesianRPYCallback(
-      const std::shared_ptr<arv_v1_interfaces::srv::MoveToCartesianRPY::Request> request,
-      std::shared_ptr<arv_v1_interfaces::srv::MoveToCartesianRPY::Response> response);
-  void stopMotionCallback(
-      const std::shared_ptr<arv_v1_interfaces::srv::StopCartesianMotion::Request> request,
-      std::shared_ptr<arv_v1_interfaces::srv::StopCartesianMotion::Response> response);
-
+  void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
+  void poseTargetCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void publishCurrentPose();
   void publishStatus(const std::string& status);
 };
@@ -86,221 +76,167 @@ private:
 // --- 实现 ---
 
 CartesianControllerNode::CartesianControllerNode() : Node("cartesian_controller_node") {
-  declareParameters();
-  loadParameters();
+  // 参数
+  this->declare_parameter("end_effector_link", "tcp");
+  this->declare_parameter("reference_frame", "base_link");
+  this->declare_parameter("ws_min_radius", 0.01);
+  this->declare_parameter("ws_max_radius", 0.8);
+
+  end_effector_link_ = this->get_parameter("end_effector_link").as_string();
+  reference_frame_ = this->get_parameter("reference_frame").as_string();
+  ws_min_radius_ = this->get_parameter("ws_min_radius").as_double();
+  ws_max_radius_ = this->get_parameter("ws_max_radius").as_double();
 
   // TF
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
   // 发布者
+  joint_target_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
+      "/joint_position_target", 10);
   current_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
       "/cartesian_controller/current_pose", 10);
-  status_pub_ = this->create_publisher<std_msgs::msg::String>("/cartesian_controller/status", 10);
+  status_pub_ = this->create_publisher<std_msgs::msg::String>(
+      "/cartesian_controller/status", 10);
 
-  // 服务
-  move_rpy_srv_ = this->create_service<arv_v1_interfaces::srv::MoveToCartesianRPY>(
-      "/move_to_cartesian_rpy", std::bind(&CartesianControllerNode::moveToCartesianRPYCallback,
-                                          this, std::placeholders::_1, std::placeholders::_2));
-  stop_srv_ = this->create_service<arv_v1_interfaces::srv::StopCartesianMotion>(
-      "/stop_cartesian_motion", std::bind(&CartesianControllerNode::stopMotionCallback, this,
-                                          std::placeholders::_1, std::placeholders::_2));
+  // 订阅者
+  js_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+      "/joint_states", 10,
+      std::bind(&CartesianControllerNode::jointStateCallback, this, std::placeholders::_1));
+
+  pose_target_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+      "/cartesian_target_pose", rclcpp::SensorDataQoS(),
+      std::bind(&CartesianControllerNode::poseTargetCallback, this, std::placeholders::_1));
 
   // 定时器
-  init_timer_ =
-      this->create_wall_timer(std::chrono::milliseconds(500),
-                              std::bind(&CartesianControllerNode::initializeMoveGroup, this));
   pose_publish_timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(33), std::bind(&CartesianControllerNode::publishCurrentPose, this));
+      std::chrono::milliseconds(33),
+      std::bind(&CartesianControllerNode::publishCurrentPose, this));
 
-  RCLCPP_INFO(this->get_logger(), "Cartesian Controller Node starting...");
-  publishStatus("STARTING");
-}
-
-void CartesianControllerNode::declareParameters() {
-  this->declare_parameter("planning_group", "ARM");
-  this->declare_parameter("end_effector_link", "tcp");
-  this->declare_parameter("reference_frame", "base_link");
-  this->declare_parameter("default_velocity_scaling", 1.0);
-  this->declare_parameter("default_acceleration_scaling", 1.0);
-  this->declare_parameter("ws_min_radius", 0.01);
-  this->declare_parameter("ws_max_radius", 0.7);
-}
-
-void CartesianControllerNode::loadParameters() {
-  planning_group_ = this->get_parameter("planning_group").as_string();
-  end_effector_link_ = this->get_parameter("end_effector_link").as_string();
-  reference_frame_ = this->get_parameter("reference_frame").as_string();
-  default_velocity_scaling_ = this->get_parameter("default_velocity_scaling").as_double();
-  default_acceleration_scaling_ = this->get_parameter("default_acceleration_scaling").as_double();
-  ws_min_radius_ = this->get_parameter("ws_min_radius").as_double();
-  ws_max_radius_ = this->get_parameter("ws_max_radius").as_double();
-}
-
-void CartesianControllerNode::initializeMoveGroup() {
-  if (move_group_) {
-    return;
-  }
-  try {
-    // [NOTE] 构造 MoveGroupInterface 会自动启动 CurrentStateMonitor（后台订阅 /joint_states）。
-    // 该监控器无害，但禁止在 executor 回调内调用 getCurrentState/getCurrentPose（回调自锁）。
-    move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
-        shared_from_this(), planning_group_);
-    move_group_->setPlanningPipelineId("pilz_industrial_motion_planner");
-    move_group_->setPlannerId("LIN");
-    move_group_->setPoseReferenceFrame(reference_frame_);
-    move_group_->setEndEffectorLink(end_effector_link_);
-    move_group_->setPlanningTime(2.0);
-    move_group_->setMaxVelocityScalingFactor(default_velocity_scaling_);
-    move_group_->setMaxAccelerationScalingFactor(default_acceleration_scaling_);
-    init_timer_->cancel();
-    RCLCPP_INFO(this->get_logger(), "MoveGroupInterface initialized for group '%s'",
-                planning_group_.c_str());
+  // IK 初始化
+  if (initializeIK()) {
+    RCLCPP_INFO(this->get_logger(), "Cartesian IK servo node initialized (chain: %s → %s, %d joints)",
+                reference_frame_.c_str(), end_effector_link_.c_str(),
+                static_cast<int>(kdl_chain_.getNrOfJoints()));
     publishStatus("IDLE");
-  } catch (const std::exception& e) {
-    RCLCPP_WARN(this->get_logger(), "MoveGroup init failed (will retry): %s", e.what());
+  } else {
+    RCLCPP_ERROR(this->get_logger(), "Failed to initialize IK solver");
+    publishStatus("ERROR");
   }
+}
+
+bool CartesianControllerNode::initializeIK() {
+  // 从 URDF 文件构建 KDL chain（与 torque_controller 相同方式）
+  std::string urdf_path;
+  try {
+    std::string pkg_path = ament_index_cpp::get_package_share_directory("arv_v1_model");
+    urdf_path = pkg_path + "/urdf/arv_v1.urdf";
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(this->get_logger(), "Failed to find arv_v1_model package: %s", e.what());
+    return false;
+  }
+
+  std::ifstream urdf_file(urdf_path);
+  if (!urdf_file.is_open()) {
+    RCLCPP_ERROR(this->get_logger(), "Cannot open URDF: %s", urdf_path.c_str());
+    return false;
+  }
+  std::string urdf_string((std::istreambuf_iterator<char>(urdf_file)),
+                           std::istreambuf_iterator<char>());
+
+  KDL::Tree kdl_tree;
+  if (!kdl_parser::treeFromString(urdf_string, kdl_tree)) {
+    RCLCPP_ERROR(this->get_logger(), "Failed to build KDL tree from URDF");
+    return false;
+  }
+
+  if (!kdl_tree.getChain(reference_frame_, end_effector_link_, kdl_chain_)) {
+    RCLCPP_ERROR(this->get_logger(), "Failed to extract chain: %s → %s",
+                 reference_frame_.c_str(), end_effector_link_.c_str());
+    return false;
+  }
+
+  fk_solver_ = std::make_unique<KDL::ChainFkSolverPos_recursive>(kdl_chain_);
+  ik_solver_ = std::make_unique<KDL::ChainIkSolverPos_LMA>(kdl_chain_);
+
+  RCLCPP_INFO(this->get_logger(), "KDL chain: %d segments, %d joints",
+              static_cast<int>(kdl_chain_.getNrOfSegments()),
+              static_cast<int>(kdl_chain_.getNrOfJoints()));
+  return true;
 }
 
 bool CartesianControllerNode::validateTargetPose(double x, double y, double z,
                                                  std::string& error_msg) {
   if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
-    RCLCPP_ERROR(this->get_logger(), "Input axis is not finite, invalid!");
-    error_msg = "Non-finite values: x: " + std::to_string(x) + " y: " + std::to_string(y) +
-                " z: " + std::to_string(z);
+    error_msg = "Non-finite position values";
     return false;
   }
   double r2 = x * x + y * y + z * z;
   if (r2 < ws_min_radius_ * ws_min_radius_) {
-    RCLCPP_ERROR(this->get_logger(), "Target too close to base: r=%.4f < %.4f", std::sqrt(r2),
-                 ws_min_radius_);
     error_msg = "Too close to base: r=" + std::to_string(std::sqrt(r2));
     return false;
   }
   if (r2 > ws_max_radius_ * ws_max_radius_) {
-    RCLCPP_ERROR(this->get_logger(), "Target out of workspace: r=%.4f > %.4f", std::sqrt(r2),
-                 ws_max_radius_);
     error_msg = "Out of workspace: r=" + std::to_string(std::sqrt(r2));
     return false;
   }
   return true;
 }
 
-geometry_msgs::msg::Quaternion CartesianControllerNode::rpyToQuaternion(double roll, double pitch,
-                                                                        double yaw) {
-  tf2::Quaternion q;
-  q.setRPY(roll, pitch, yaw);
-  q.normalize();
-  geometry_msgs::msg::Quaternion quat_msg;
-  quat_msg.x = q.x();
-  quat_msg.y = q.y();
-  quat_msg.z = q.z();
-  quat_msg.w = q.w();
-  return quat_msg;
+void CartesianControllerNode::jointStateCallback(
+    const sensor_msgs::msg::JointState::SharedPtr msg) {
+  if (static_cast<int>(msg->position.size()) < kArmJoints) return;
+  std::lock_guard<std::mutex> lock(js_mutex_);
+  for (int i = 0; i < kArmJoints; i++) {
+    q_current_(i) = msg->position[i];
+  }
+  has_joint_state_ = true;
 }
 
-bool CartesianControllerNode::planAndExecute(const geometry_msgs::msg::Pose& target_pose,
-                                             double velocity_scaling, double acceleration_scaling,
-                                             double& planning_time, double& trajectory_duration,
-                                             std::string& error_message) {
-  if (!move_group_) {
-    error_message = "MoveGroupInterface not initialized yet";
-    return false;
-  }
+void CartesianControllerNode::poseTargetCallback(
+    const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+  if (!ik_solver_ || !has_joint_state_) return;
 
-  publishStatus("PLANNING");
-
-  move_group_->setMaxVelocityScalingFactor(velocity_scaling);
-  move_group_->setMaxAccelerationScalingFactor(acceleration_scaling);
-  move_group_->setPoseTarget(target_pose);
-
-  moveit::planning_interface::MoveGroupInterface::Plan plan;
-
-  // 首选 LIN (笛卡尔直线)，失败后回退 PTP (关节空间)
-  move_group_->setPlannerId("LIN");
-  auto result = move_group_->plan(plan);
-  if (result != moveit::core::MoveItErrorCode::SUCCESS) {
-    RCLCPP_WARN(this->get_logger(), "LIN planning failed, trying PTP fallback");
-    move_group_->setPlannerId("PTP");
-    result = move_group_->plan(plan);
-    if (result == moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_INFO(this->get_logger(), "PTP fallback planning succeeded");
-    }
-    move_group_->setPlannerId("LIN");  // 恢复默认
-  }
-
-  if (result != moveit::core::MoveItErrorCode::SUCCESS) {
-    error_message = "Planning failed (both LIN and PTP)";
-    publishStatus("ERROR");
-    return false;
-  }
-
-  planning_time = plan.planning_time;
-  trajectory_duration =
-      plan.trajectory.joint_trajectory.points.empty()
-          ? 0.0
-          : plan.trajectory.joint_trajectory.points.back().time_from_start.sec +
-                plan.trajectory.joint_trajectory.points.back().time_from_start.nanosec * 1e-9;
-
-  publishStatus("EXECUTING");
-
-  auto exec_result = move_group_->execute(plan);
-  if (exec_result != moveit::core::MoveItErrorCode::SUCCESS) {
-    error_message = "Execution failed";
-    publishStatus("ERROR");
-    return false;
-  }
-
-  publishStatus("IDLE");
-  return true;
-}
-
-void CartesianControllerNode::moveToCartesianRPYCallback(
-    const std::shared_ptr<arv_v1_interfaces::srv::MoveToCartesianRPY::Request> request,
-    std::shared_ptr<arv_v1_interfaces::srv::MoveToCartesianRPY::Response> response) {
+  // 验证目标位置
   std::string err;
-  if (!validateTargetPose(request->x, request->y, request->z, err)) {
-    response->success = false;
-    response->message = err;
+  if (!validateTargetPose(msg->pose.position.x, msg->pose.position.y,
+                          msg->pose.position.z, err)) {
+    RCLCPP_WARN(this->get_logger(), "Target rejected: %s", err.c_str());
     return;
   }
 
-  geometry_msgs::msg::Pose target;
-  target.position.x = request->x;
-  target.position.y = request->y;
-  target.position.z = request->z;
-  target.orientation = rpyToQuaternion(request->roll, request->pitch, request->yaw);
+  // PoseStamped → KDL::Frame
+  KDL::Frame target_frame(
+      KDL::Rotation::Quaternion(
+          msg->pose.orientation.x, msg->pose.orientation.y,
+          msg->pose.orientation.z, msg->pose.orientation.w),
+      KDL::Vector(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z));
 
-  double vel =
-      request->velocity_scaling > 0.0 ? request->velocity_scaling : default_velocity_scaling_;
-  double acc = request->acceleration_scaling > 0.0 ? request->acceleration_scaling
-                                                   : default_acceleration_scaling_;
-
-  response->success =
-      planAndExecute(target, vel, acc, response->planning_time,
-                     response->trajectory_duration, response->message);
-}
-
-void CartesianControllerNode::stopMotionCallback(
-    const std::shared_ptr<arv_v1_interfaces::srv::StopCartesianMotion::Request> /*request*/,
-    std::shared_ptr<arv_v1_interfaces::srv::StopCartesianMotion::Response> response) {
-  if (move_group_) {
-    move_group_->stop();
-    response->success = true;
-    response->message = "Motion stopped";
-    publishStatus("IDLE");
-    RCLCPP_INFO(this->get_logger(), "Motion stopped by service call");
-  } else {
-    response->success = false;
-    response->message = "MoveGroup not initialized";
+  // IK 求解（当前关节位置作种子，保证解的连续性）
+  KDL::JntArray q_seed(kArmJoints), q_result(kArmJoints);
+  {
+    std::lock_guard<std::mutex> lock(js_mutex_);
+    q_seed = q_current_;
   }
+
+  int ret = ik_solver_->CartToJnt(q_seed, target_frame, q_result);
+  if (ret < 0) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                         "IK failed (ret=%d), holding position", ret);
+    return;  // IK 无解，不发布，torque_controller 保持上一帧
+  }
+
+  // 发布关节目标
+  std_msgs::msg::Float64MultiArray target_msg;
+  target_msg.data.resize(kArmJoints);
+  for (int i = 0; i < kArmJoints; i++) {
+    target_msg.data[i] = q_result(i);
+  }
+  joint_target_pub_->publish(target_msg);
 }
 
 void CartesianControllerNode::publishCurrentPose() {
-  // [FIX] 使用 TF 替代 MoveGroupInterface::getCurrentState()
-  // getCurrentState() 在 executor 回调内调用会自锁（等待 /joint_states
-  // 回调被调度，但 executor 被当前回调占用），导致 CPU 67% + 节点卡死。
-  // lookupTransform 读 TF 缓存，无需 executor 调度新回调。
+  // TF lookup: 无阻塞，读缓存
   try {
     auto tf = tf_buffer_->lookupTransform(
         reference_frame_, end_effector_link_, tf2::TimePointZero);
@@ -327,8 +263,6 @@ void CartesianControllerNode::publishStatus(const std::string& status) {
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<CartesianControllerNode>();
-  // [NOTE] SingleThreadedExecutor 即可：所有阻塞 API（getCurrentState）已移除。
-  // plan()/execute() 在服务回调中同步执行，期间定时器暂停但不影响功能。
   rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(node);
   executor.spin();
