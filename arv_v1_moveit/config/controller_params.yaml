@@ -96,3 +96,10 @@
       max_control_period_ms: 10       # Detect slow control loop (200Hz = 5ms nominal)
       max_velocity_sanity: 20.0       # rad/s - reject sensor glitches (20 rad/s = ~1910 RPM)
       max_position_error: 0.8         # rad - emergency stop threshold for position tracking error
+
+    # ========== 载荷重力补偿: τ_payload = J(q)^T × [0,0,-mg,0,0,0] ==========
+    payload:
+      enabled: false                    # 总开关 (运行时可 ros2 param set 切换)
+      mass: 0.447                       # 载荷质量 (kg), energy_core = 0.447
+      gripper_force_threshold: 0.5      # N, 夹力>此值才判定抓取
+      gripper_pos_threshold: 0.01       # m, 夹爪位置>10mm才判定有物体 (空夹≈0)
