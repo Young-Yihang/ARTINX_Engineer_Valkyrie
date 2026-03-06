@@ -418,7 +418,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     //   solref="0.005 2": 5ms时间常数(1步) + 阻尼比2(重度过阻尼, 零回弹)
     //   solimp="0.99 0.99 0.0001 0.5 2": dmin=dmax=0.99 → 99%能量吸收
     inject_contype(robot_part,
-                   " contype=\"1\" conaffinity=\"4\" friction=\"1.8 0.05 0.001\""
+                   " contype=\"1\" conaffinity=\"4\" friction=\"5.0 0.1 0.01\""
                    " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"");
     inject_contype(obs_part,
                    " contype=\"4\" conaffinity=\"1\" friction=\"0.001 0.001 0.0001\""
@@ -749,9 +749,21 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
       std::string child_asset = extract(child_mjcf, "asset");
       std::string child_body = extract(child_mjcf, "worldbody");
 
-      // collision_shapes: 虚拟碰撞体替代 STL 凸包
-      bool use_vcol = obs["collision_shapes"] && obs["collision_shapes"].IsSequence() &&
-                      obs["collision_shapes"].size() > 0;
+      // collision_shapes: 虚拟碰撞体替代 STL 凸包 (直接定义或模板引用)
+      YAML::Node vcol_shapes;
+      if (obs["collision_shapes"] && obs["collision_shapes"].IsSequence()) {
+        vcol_shapes = obs["collision_shapes"];
+      } else if (obs["collision_shape_template"]) {
+        std::string tpl_name = obs["collision_shape_template"].as<std::string>("");
+        auto templates = params["collision_shape_templates"];
+        if (templates && templates[tpl_name] && templates[tpl_name].IsSequence()) {
+          vcol_shapes = templates[tpl_name];
+        } else {
+          RCLCPP_WARN(get_logger(), "[WARN] collision_shape_template '%s' not found for '%s'",
+                      tpl_name.c_str(), id.c_str());
+        }
+      }
+      bool use_vcol = vcol_shapes && vcol_shapes.IsSequence() && vcol_shapes.size() > 0;
       if (use_vcol) {
         // 禁用 URDF mesh geom 碰撞 (仅保留视觉)
         size_t gp = 0;
@@ -783,7 +795,7 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
       // 生成虚拟碰撞几何体
       if (use_vcol) {
         int si = 0;
-        for (const auto &shape : obs["collision_shapes"]) {
+        for (const auto &shape : vcol_shapes) {
           std::string st = shape["type"].as<std::string>("box");
           double sx = shape["position"][0].as<double>(0);
           double sy = shape["position"][1].as<double>(0);
