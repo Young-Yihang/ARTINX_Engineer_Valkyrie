@@ -1,4 +1,7 @@
-// MuJoCo节点: 仿真模式(力矩→状态) / 孪生模式(状态→视觉化)
+/**
+ * @file mujoco_interface_node.cpp
+ * @brief MuJoCo interface — simulation mode (torque→state) / digital-twin mode (state→visual)
+ */
 
 #include <GLFW/glfw3.h>
 #include <mujoco/mujoco.h>

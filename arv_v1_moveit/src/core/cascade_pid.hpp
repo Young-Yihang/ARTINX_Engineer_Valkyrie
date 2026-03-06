@@ -1,3 +1,7 @@
+/**
+ * @file cascade_pid.hpp
+ * @brief Cascade PID controller — outer position loop + inner velocity loop
+ */
 #ifndef CASCADE_PID_HPP
 #define CASCADE_PID_HPP
 

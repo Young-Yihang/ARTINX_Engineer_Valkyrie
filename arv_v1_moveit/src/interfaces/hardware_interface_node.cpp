@@ -1,4 +1,7 @@
-// 硬件接口节点: 串口发送力矩指令, 接收关节状态发布至/joint_states
+/**
+ * @file hardware_interface_node.cpp
+ * @brief Hardware serial interface — TX torques/gripper, RX joint states via Seasky protocol
+ */
 #include <atomic>
 #include <chrono>
 #include <filesystem>

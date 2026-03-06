@@ -1,3 +1,10 @@
+/**
+ * @file serial_protocol.hpp
+ * @brief Seasky serial protocol — frame builder/parser, CmdID definitions, enums
+ *
+ * Frame: [SOF(1)][Len(2)][CRC8(1)][CmdID(2)][Flags(2)][Payload(N)][CRC16(2)]
+ * DataLen = sizeof(CmdID) + sizeof(Flags) + sizeof(Payload)
+ */
 #ifndef SERIAL_PROTOCOL_HPP
 #define SERIAL_PROTOCOL_HPP
 
@@ -7,9 +14,6 @@
 #include <vector>
 
 #include "Crc.hpp"
-
-// SEASKY协议: [SOF(1)][Len(2)][CRC8(1)][CmdID(2)][Flags(2)][Payload(N)][CRC16(2)]
-// DataLen = sizeof(CmdID) + sizeof(Flags) + sizeof(Payload)
 //
 // 包汇总 (TX: 上位机 → 下位机):
 //   0x0002  CMD_TORQUE_CONTROL   200Hz  6×float = 24 B   6轴力矩
