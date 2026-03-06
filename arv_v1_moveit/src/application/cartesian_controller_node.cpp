@@ -1,22 +1,28 @@
 /**
  * @file cartesian_controller_node.cpp
  * @brief Cartesian IK controller using Pilz LIN/PTP planner
+ *
+ * 通过 MoveGroupInterface 调用 move_group 节点的 Pilz 规划器，
+ * 将笛卡尔空间目标位姿转换为关节轨迹并执行。
+ *
+ * [NOTE] MoveGroupInterface 构造时自动启动 CurrentStateMonitor（订阅 /joint_states）。
+ * 该监控器在后台运行无害，但禁止在 executor 回调内调用 getCurrentState/getCurrentPose —
+ * 这些方法内部 waitForCompleteState() 阻塞等待 /joint_states 回调被调度，
+ * 而该回调需要同一个 executor 来处理 → 回调线程自锁。
+ * 位姿查询统一使用 TF lookupTransform（读缓存，不依赖 executor 调度）。
  */
 
 #include <tf2/LinearMath/Quaternion.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
-#include <atomic>
 #include <cmath>
-#include <condition_variable>
 #include <functional>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <moveit/move_group_interface/move_group_interface.hpp>
-#include <mutex>
-#include <optional>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#include <thread>
 
 #include "arv_v1_interfaces/srv/move_to_cartesian_rpy.hpp"
 #include "arv_v1_interfaces/srv/stop_cartesian_motion.hpp"
@@ -24,27 +30,16 @@
 class CartesianControllerNode : public rclcpp::Node {
 public:
   CartesianControllerNode();
-  ~CartesianControllerNode();
+  ~CartesianControllerNode() = default;
 
 private:
-  // --- 状态枚举 ---
-  enum class State { IDLE, PLANNING, EXECUTING, ERROR };
-
   // --- 成员变量 ---
-  // MoveIt 接口 (延迟初始化)
+  // MoveIt 接口 (延迟初始化，仅用于 plan/execute/stop)
   std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
 
-  // 状态管理
-  std::atomic<State> state_{State::IDLE};
-  std::mutex execution_mutex_;
-
-  // 规划工作线程 (话题路径专用，避免阻塞 ROS2 回调线程)
-  std::thread planning_thread_;
-  std::thread monitor_thread_;
-  std::condition_variable plan_cv_;
-  std::mutex plan_request_mutex_;
-  std::optional<geometry_msgs::msg::Pose> pending_pose_;
-  std::atomic<bool> shutdown_{false};
+  // TF 位姿查询（替代 MoveGroupInterface::getCurrentState()，避免回调自锁）
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   // 配置参数
   std::string planning_group_;
@@ -52,26 +47,16 @@ private:
   std::string reference_frame_;
   double default_velocity_scaling_;
   double default_acceleration_scaling_;
-  double pose_topic_min_interval_ms_;
 
   // 工作空间边界
   double ws_min_radius_;
   double ws_max_radius_;
 
-  // 时间记录 (用于限速)
-  rclcpp::Time last_pose_command_time_;
-
   // --- ROS2 接口 ---
-  // 话题
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
-
-  // 服务
   rclcpp::Service<arv_v1_interfaces::srv::MoveToCartesianRPY>::SharedPtr move_rpy_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::StopCartesianMotion>::SharedPtr stop_srv_;
-
-  // 定时器
   rclcpp::TimerBase::SharedPtr init_timer_;
   rclcpp::TimerBase::SharedPtr pose_publish_timer_;
 
@@ -80,30 +65,13 @@ private:
   void loadParameters();
   void initializeMoveGroup();
 
-  // 坐标转换
   geometry_msgs::msg::Quaternion rpyToQuaternion(double roll, double pitch, double yaw);
-
-  // 验证
   bool validateTargetPose(double x, double y, double z, std::string& error_msg);
 
-  // 话题路径工作线程
-  void planningWorker();
-
-  // 规划与执行 (带锁 — 服务路径调用)
   bool planAndExecute(const geometry_msgs::msg::Pose& target_pose, double velocity_scaling,
-                      double acceleration_scaling, bool async, double& planning_time,
+                      double acceleration_scaling, double& planning_time,
                       double& trajectory_duration, std::string& error_message);
 
-  // 规划与执行 (无锁 — 话题路径已在外部持锁)
-  bool planAndExecuteUnlocked(const geometry_msgs::msg::Pose& target_pose, double velocity_scaling,
-                              double acceleration_scaling, bool async, double& planning_time,
-                              double& trajectory_duration, std::string& error_message);
-
-  // 异步执行完成监控
-  void monitorAsyncExecution();
-
-  // 回调函数
-  void poseTargetCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void moveToCartesianRPYCallback(
       const std::shared_ptr<arv_v1_interfaces::srv::MoveToCartesianRPY::Request> request,
       std::shared_ptr<arv_v1_interfaces::srv::MoveToCartesianRPY::Response> response);
@@ -111,69 +79,52 @@ private:
       const std::shared_ptr<arv_v1_interfaces::srv::StopCartesianMotion::Request> request,
       std::shared_ptr<arv_v1_interfaces::srv::StopCartesianMotion::Response> response);
 
-  // 状态发布
   void publishCurrentPose();
   void publishStatus(const std::string& status);
 };
+
+// --- 实现 ---
 
 CartesianControllerNode::CartesianControllerNode() : Node("cartesian_controller_node") {
   declareParameters();
   loadParameters();
 
+  // TF
+  tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+  // 发布者
   current_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
       "/cartesian_controller/current_pose", 10);
   status_pub_ = this->create_publisher<std_msgs::msg::String>("/cartesian_controller/status", 10);
 
+  // 服务
   move_rpy_srv_ = this->create_service<arv_v1_interfaces::srv::MoveToCartesianRPY>(
       "/move_to_cartesian_rpy", std::bind(&CartesianControllerNode::moveToCartesianRPYCallback,
                                           this, std::placeholders::_1, std::placeholders::_2));
-
   stop_srv_ = this->create_service<arv_v1_interfaces::srv::StopCartesianMotion>(
       "/stop_cartesian_motion", std::bind(&CartesianControllerNode::stopMotionCallback, this,
                                           std::placeholders::_1, std::placeholders::_2));
 
-  // 使用 SensorDataQoS 兼容 BEST_EFFORT 发布者（如视觉节点），避免 QoS 不兼容时静默丢弃
-  pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-      "/cartesian_target_pose", rclcpp::SensorDataQoS(),
-      std::bind(&CartesianControllerNode::poseTargetCallback, this, std::placeholders::_1));
-
+  // 定时器
   init_timer_ =
       this->create_wall_timer(std::chrono::milliseconds(500),
                               std::bind(&CartesianControllerNode::initializeMoveGroup, this));
-
   pose_publish_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(33), std::bind(&CartesianControllerNode::publishCurrentPose, this));
-
-  last_pose_command_time_ = this->now();
-
-  // 启动规划工作线程（仅服务话题路径，与服务路径互不干扰）
-  planning_thread_ = std::thread(&CartesianControllerNode::planningWorker, this);
 
   RCLCPP_INFO(this->get_logger(), "Cartesian Controller Node starting...");
   publishStatus("STARTING");
 }
 
-CartesianControllerNode::~CartesianControllerNode() {
-  shutdown_ = true;
-  plan_cv_.notify_all();
-  if (planning_thread_.joinable()) {
-    planning_thread_.join();
-  }
-  if (monitor_thread_.joinable()) {
-    monitor_thread_.join();
-  }
-}
-
 void CartesianControllerNode::declareParameters() {
   this->declare_parameter("planning_group", "ARM");
-  this->declare_parameter("end_effector_link", "link6_2006roll");
+  this->declare_parameter("end_effector_link", "tcp");
   this->declare_parameter("reference_frame", "base_link");
   this->declare_parameter("default_velocity_scaling", 1.0);
   this->declare_parameter("default_acceleration_scaling", 1.0);
-  this->declare_parameter("pose_topic_min_interval_ms", 50.0);
-
   this->declare_parameter("ws_min_radius", 0.01);
-  this->declare_parameter("ws_max_radius", 0.7);  // 单位m
+  this->declare_parameter("ws_max_radius", 0.7);
 }
 
 void CartesianControllerNode::loadParameters() {
@@ -182,46 +133,33 @@ void CartesianControllerNode::loadParameters() {
   reference_frame_ = this->get_parameter("reference_frame").as_string();
   default_velocity_scaling_ = this->get_parameter("default_velocity_scaling").as_double();
   default_acceleration_scaling_ = this->get_parameter("default_acceleration_scaling").as_double();
-  pose_topic_min_interval_ms_ = this->get_parameter("pose_topic_min_interval_ms").as_double();
-
   ws_min_radius_ = this->get_parameter("ws_min_radius").as_double();
   ws_max_radius_ = this->get_parameter("ws_max_radius").as_double();
 }
 
-void CartesianControllerNode::planningWorker() {
-  while (!shutdown_) {
-    geometry_msgs::msg::Pose target;
-    {
-      std::unique_lock<std::mutex> lock(plan_request_mutex_);
-      // 阻塞等待新目标或关闭信号
-      plan_cv_.wait(lock, [this] { return pending_pose_.has_value() || shutdown_.load(); });
-      if (shutdown_) break;
-      target = pending_pose_.value();
-      pending_pose_.reset();  // 取走目标，丢弃等待期间累积的旧值
-    }
-
-    // 尝试获取执行锁 — 如果服务路径正在执行，跳过本次话题目标
-    std::unique_lock<std::mutex> exec_lock(execution_mutex_, std::try_to_lock);
-    if (!exec_lock.owns_lock()) {
-      RCLCPP_DEBUG(this->get_logger(), "[topic path] skipped: service path is executing");
-      continue;
-    }
-
-    // 停止当前运动：无运动时为空操作；有运动时实现话题抢占
-    if (move_group_) {
-      move_group_->stop();
-    }
-
-    double pt = 0.0, td = 0.0;
-    std::string err;
-    // 话题路径已持有 execution_mutex_，planAndExecute 内不再重复加锁
-    planAndExecuteUnlocked(target, default_velocity_scaling_, default_acceleration_scaling_,
-                           /*async=*/true, pt, td, err);
-    if (!err.empty()) {
-      RCLCPP_WARN(this->get_logger(), "[topic path] planning failed: %s", err.c_str());
-    }
+void CartesianControllerNode::initializeMoveGroup() {
+  if (move_group_) {
+    return;
   }
-  RCLCPP_INFO(this->get_logger(), "Planning worker thread exiting");
+  try {
+    // [NOTE] 构造 MoveGroupInterface 会自动启动 CurrentStateMonitor（后台订阅 /joint_states）。
+    // 该监控器无害，但禁止在 executor 回调内调用 getCurrentState/getCurrentPose（回调自锁）。
+    move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
+        shared_from_this(), planning_group_);
+    move_group_->setPlanningPipelineId("pilz_industrial_motion_planner");
+    move_group_->setPlannerId("LIN");
+    move_group_->setPoseReferenceFrame(reference_frame_);
+    move_group_->setEndEffectorLink(end_effector_link_);
+    move_group_->setPlanningTime(2.0);
+    move_group_->setMaxVelocityScalingFactor(default_velocity_scaling_);
+    move_group_->setMaxAccelerationScalingFactor(default_acceleration_scaling_);
+    init_timer_->cancel();
+    RCLCPP_INFO(this->get_logger(), "MoveGroupInterface initialized for group '%s'",
+                planning_group_.c_str());
+    publishStatus("IDLE");
+  } catch (const std::exception& e) {
+    RCLCPP_WARN(this->get_logger(), "MoveGroup init failed (will retry): %s", e.what());
+  }
 }
 
 bool CartesianControllerNode::validateTargetPose(double x, double y, double z,
@@ -261,52 +199,15 @@ geometry_msgs::msg::Quaternion CartesianControllerNode::rpyToQuaternion(double r
   return quat_msg;
 }
 
-void CartesianControllerNode::initializeMoveGroup() {
-  if (move_group_) {
-    return;  // 已初始化，取消定时器
-  }
-  try {
-    move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
-        shared_from_this(), planning_group_);
-    move_group_->setPlanningPipelineId("pilz_industrial_motion_planner");
-    move_group_->setPlannerId("LIN");
-    move_group_->setPoseReferenceFrame(reference_frame_);
-    move_group_->setEndEffectorLink(end_effector_link_);
-    move_group_->setPlanningTime(1.0);
-    move_group_->setMaxVelocityScalingFactor(default_velocity_scaling_);
-    move_group_->setMaxAccelerationScalingFactor(default_acceleration_scaling_);
-    init_timer_->cancel();
-    RCLCPP_INFO(this->get_logger(), "MoveGroupInterface initialized for group '%s'",
-                planning_group_.c_str());
-    publishStatus("IDLE");
-  } catch (const std::exception& e) {
-    RCLCPP_WARN(this->get_logger(), "MoveGroup init failed (will retry): %s", e.what());
-  }
-}
-
 bool CartesianControllerNode::planAndExecute(const geometry_msgs::msg::Pose& target_pose,
                                              double velocity_scaling, double acceleration_scaling,
-                                             bool async, double& planning_time,
-                                             double& trajectory_duration,
+                                             double& planning_time, double& trajectory_duration,
                                              std::string& error_message) {
-  // 服务路径: 加锁后委托给无锁版本
-  std::lock_guard<std::mutex> lock(execution_mutex_);
-  return planAndExecuteUnlocked(target_pose, velocity_scaling, acceleration_scaling, async,
-                                planning_time, trajectory_duration, error_message);
-}
-
-bool CartesianControllerNode::planAndExecuteUnlocked(const geometry_msgs::msg::Pose& target_pose,
-                                                     double velocity_scaling,
-                                                     double acceleration_scaling, bool async,
-                                                     double& planning_time,
-                                                     double& trajectory_duration,
-                                                     std::string& error_message) {
   if (!move_group_) {
     error_message = "MoveGroupInterface not initialized yet";
     return false;
   }
 
-  state_ = State::PLANNING;
   publishStatus("PLANNING");
 
   move_group_->setMaxVelocityScalingFactor(velocity_scaling);
@@ -315,7 +216,7 @@ bool CartesianControllerNode::planAndExecuteUnlocked(const geometry_msgs::msg::P
 
   moveit::planning_interface::MoveGroupInterface::Plan plan;
 
-  // 首选 LIN，失败后回退 PTP
+  // 首选 LIN (笛卡尔直线)，失败后回退 PTP (关节空间)
   move_group_->setPlannerId("LIN");
   auto result = move_group_->plan(plan);
   if (result != moveit::core::MoveItErrorCode::SUCCESS) {
@@ -325,11 +226,10 @@ bool CartesianControllerNode::planAndExecuteUnlocked(const geometry_msgs::msg::P
     if (result == moveit::core::MoveItErrorCode::SUCCESS) {
       RCLCPP_INFO(this->get_logger(), "PTP fallback planning succeeded");
     }
-    move_group_->setPlannerId("LIN");  // 恢复默认 planner
+    move_group_->setPlannerId("LIN");  // 恢复默认
   }
 
   if (result != moveit::core::MoveItErrorCode::SUCCESS) {
-    state_ = State::ERROR;
     error_message = "Planning failed (both LIN and PTP)";
     publishStatus("ERROR");
     return false;
@@ -342,77 +242,17 @@ bool CartesianControllerNode::planAndExecuteUnlocked(const geometry_msgs::msg::P
           : plan.trajectory.joint_trajectory.points.back().time_from_start.sec +
                 plan.trajectory.joint_trajectory.points.back().time_from_start.nanosec * 1e-9;
 
-  state_ = State::EXECUTING;
   publishStatus("EXECUTING");
 
-  if (async) {
-    move_group_->asyncExecute(plan);
-    // 不立即设 IDLE — 启动监控线程等待执行完成
-    if (monitor_thread_.joinable()) monitor_thread_.join();
-    monitor_thread_ = std::thread(&CartesianControllerNode::monitorAsyncExecution, this);
-    return true;
-  } else {
-    auto exec_result = move_group_->execute(plan);
-    if (exec_result != moveit::core::MoveItErrorCode::SUCCESS) {
-      state_ = State::ERROR;
-      error_message = "Execution failed";
-      publishStatus("ERROR");
-      return false;
-    }
-    state_ = State::IDLE;
-    publishStatus("IDLE");
-    return true;
-  }
-}
-
-void CartesianControllerNode::monitorAsyncExecution() {
-  // 轮询 MoveGroupInterface 的运动状态，直到不再 EXECUTING
-  const auto timeout = std::chrono::seconds(30);
-  const auto poll_interval = std::chrono::milliseconds(50);
-  auto start = std::chrono::steady_clock::now();
-
-  while (state_ == State::EXECUTING && !shutdown_) {
-    if (std::chrono::steady_clock::now() - start > timeout) {
-      RCLCPP_WARN(this->get_logger(), "Async execution monitor timed out (30s)");
-      state_ = State::IDLE;
-      publishStatus("IDLE");
-      return;
-    }
-    std::this_thread::sleep_for(poll_interval);
+  auto exec_result = move_group_->execute(plan);
+  if (exec_result != moveit::core::MoveItErrorCode::SUCCESS) {
+    error_message = "Execution failed";
+    publishStatus("ERROR");
+    return false;
   }
 
-  // 如果状态仍是 EXECUTING (被 stop 中断等)，恢复 IDLE
-  State expected = State::EXECUTING;
-  if (state_.compare_exchange_strong(expected, State::IDLE)) {
-    publishStatus("IDLE");
-  }
-}
-
-void CartesianControllerNode::poseTargetCallback(
-    const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-  // --- 此函数在 ROS2 spin 线程执行，必须快速返回 ---
-  auto current_time = this->now();
-  auto elapsed_ms = (current_time - last_pose_command_time_).nanoseconds() / 1e6;
-  if (elapsed_ms < pose_topic_min_interval_ms_) {
-    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                          "Pose command throttled (%.1f ms < %.1f ms)", elapsed_ms,
-                          pose_topic_min_interval_ms_);
-    return;
-  }
-  last_pose_command_time_ = current_time;
-
-  std::string err;
-  if (!validateTargetPose(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z, err)) {
-    RCLCPP_WARN(this->get_logger(), "Pose validation failed: %s", err.c_str());
-    return;
-  }
-
-  // 存入最新目标并通知工作线程（覆盖未被处理的旧目标，始终保留最新值）
-  {
-    std::lock_guard<std::mutex> lock(plan_request_mutex_);
-    pending_pose_ = msg->pose;
-  }
-  plan_cv_.notify_one();  // 非阻塞，立即返回
+  publishStatus("IDLE");
+  return true;
 }
 
 void CartesianControllerNode::moveToCartesianRPYCallback(
@@ -437,7 +277,7 @@ void CartesianControllerNode::moveToCartesianRPYCallback(
                                                    : default_acceleration_scaling_;
 
   response->success =
-      planAndExecute(target, vel, acc, request->async_execution, response->planning_time,
+      planAndExecute(target, vel, acc, response->planning_time,
                      response->trajectory_duration, response->message);
 }
 
@@ -446,10 +286,9 @@ void CartesianControllerNode::stopMotionCallback(
     std::shared_ptr<arv_v1_interfaces::srv::StopCartesianMotion::Response> response) {
   if (move_group_) {
     move_group_->stop();
-    state_ = State::IDLE;
-    publishStatus("IDLE");
     response->success = true;
     response->message = "Motion stopped";
+    publishStatus("IDLE");
     RCLCPP_INFO(this->get_logger(), "Motion stopped by service call");
   } else {
     response->success = false;
@@ -458,18 +297,24 @@ void CartesianControllerNode::stopMotionCallback(
 }
 
 void CartesianControllerNode::publishCurrentPose() {
-  if (!move_group_) {
-    return;
-  }
+  // [FIX] 使用 TF 替代 MoveGroupInterface::getCurrentState()
+  // getCurrentState() 在 executor 回调内调用会自锁（等待 /joint_states
+  // 回调被调度，但 executor 被当前回调占用），导致 CPU 67% + 节点卡死。
+  // lookupTransform 读 TF 缓存，无需 executor 调度新回调。
   try {
+    auto tf = tf_buffer_->lookupTransform(
+        reference_frame_, end_effector_link_, tf2::TimePointZero);
     geometry_msgs::msg::PoseStamped pose_msg;
     pose_msg.header.stamp = this->now();
     pose_msg.header.frame_id = reference_frame_;
-    pose_msg.pose = move_group_->getCurrentPose(end_effector_link_).pose;
+    pose_msg.pose.position.x = tf.transform.translation.x;
+    pose_msg.pose.position.y = tf.transform.translation.y;
+    pose_msg.pose.position.z = tf.transform.translation.z;
+    pose_msg.pose.orientation = tf.transform.rotation;
     current_pose_pub_->publish(pose_msg);
-  } catch (const std::exception& e) {
+  } catch (const tf2::TransformException& e) {
     RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                          "Failed to get current pose: %s", e.what());
+                          "TF lookup failed: %s", e.what());
   }
 }
 
@@ -482,9 +327,9 @@ void CartesianControllerNode::publishStatus(const std::string& status) {
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<CartesianControllerNode>();
-  // MultiThreadedExecutor: 避免 MoveIt 内部 joint_states 回调
-  // 与 publishCurrentPose/planAndExecute 阻塞调用死锁
-  rclcpp::executors::MultiThreadedExecutor executor;
+  // [NOTE] SingleThreadedExecutor 即可：所有阻塞 API（getCurrentState）已移除。
+  // plan()/execute() 在服务回调中同步执行，期间定时器暂停但不影响功能。
+  rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(node);
   executor.spin();
   rclcpp::shutdown();

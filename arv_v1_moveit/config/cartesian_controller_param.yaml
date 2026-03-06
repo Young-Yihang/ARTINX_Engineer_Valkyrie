@@ -2,14 +2,11 @@ cartesian_controller_node:
   ros__parameters:
     # 运动学
     planning_group: "ARM"
-    end_effector_link: "link6_2006roll"
+    end_effector_link: "tcp"
     reference_frame: "base_link"
     # 速度与加速度比例
     default_velocity_scaling: 1.0
     default_acceleration_scaling: 1.0
-
-    # 视觉伺服参数
-    pose_topic_min_interval_ms: 50.0
 
     # 球形工作空间参数
     ws_min_radius: 0.01

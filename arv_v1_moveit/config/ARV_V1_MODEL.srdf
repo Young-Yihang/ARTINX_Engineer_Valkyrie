@@ -26,7 +26,7 @@
         <joint name="joint_5"/>
         <joint name="joint_6"/>
         <joint name="joint_tcp"/>
-        <chain base_link="base_link" tip_link="tcp"/>
+        <chain base_link="base_link" tip_link="link6"/>
     </group>
     <group name="Gripper_Actuator">
         <joint name="joint_gripper1"/>
@@ -49,7 +49,7 @@
         <joint name="joint_6" value="0"/>
     </group_state>
     <!--END EFFECTOR: Purpose: Represent information about an end effector.-->
-    <end_effector name="Gripper" parent_link="link6" group="Gripper_Actuator" parent_group="ARM"/>
+    <end_effector name="Gripper" parent_link="tcp" group="Gripper_Actuator" parent_group="ARM"/>
     <!--VIRTUAL JOINT: Purpose: this element defines a virtual joint between a robot link and an external frame of reference (considered fixed with respect to the robot)-->
     <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="base_link"/>
     <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
