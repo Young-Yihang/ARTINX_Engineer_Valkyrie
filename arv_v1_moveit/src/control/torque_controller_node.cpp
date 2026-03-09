@@ -149,8 +149,8 @@ public:                                 // 构造函数log
     payload_force_threshold_ = this->get_parameter("payload.gripper_force_threshold").as_double();
     payload_pos_threshold_ = this->get_parameter("payload.gripper_pos_threshold").as_double();
     RCLCPP_INFO(this->get_logger(), "[PAYLOAD] %s (mass=%.3f kg, force_thr=%.1f N, pos_thr=%.3f m)",
-                payload_compensation_enabled_ ? "ENABLED" : "DISABLED",
-                payload_mass_, payload_force_threshold_, payload_pos_threshold_);
+                payload_compensation_enabled_ ? "ENABLED" : "DISABLED", payload_mass_,
+                payload_force_threshold_, payload_pos_threshold_);
 
     // --- 初始化动力学求解器 ---
     RCLCPP_INFO(this->get_logger(), "[INFO] Starting dynamics solver initialization...");
@@ -204,6 +204,21 @@ public:                                 // 构造函数log
     RCLCPP_INFO(
         this->get_logger(),
         "[OK] Cascade PI+PI initialized (Outer: Position-PI w/ anti-windup, Inner: Velocity-PI)");
+
+    // --- 摩擦前馈参数 ---
+    this->declare_parameter("friction.coulomb", std::vector<double>(kArmJoints, 0.0));
+    this->declare_parameter("friction.viscous", std::vector<double>(kArmJoints, 0.0));
+    this->declare_parameter("friction.fal_alpha", 0.5);
+    this->declare_parameter("friction.fal_delta", 0.05);
+    friction_coulomb_ = this->get_parameter("friction.coulomb").as_double_array();
+    friction_viscous_ = this->get_parameter("friction.viscous").as_double_array();
+    fal_alpha_ = this->get_parameter("friction.fal_alpha").as_double();
+    fal_delta_ = this->get_parameter("friction.fal_delta").as_double();
+    RCLCPP_INFO(this->get_logger(),
+                "[OK] Friction feedforward: fc=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f] fal(α=%.2f,δ=%.3f)",
+                friction_coulomb_[0], friction_coulomb_[1], friction_coulomb_[2],
+                friction_coulomb_[3], friction_coulomb_[4], friction_coulomb_[5], fal_alpha_,
+                fal_delta_);
 
     // --- 注册参数变化回调（必须在所有参数声明之后）---
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -263,10 +278,8 @@ public:                                 // 构造函数log
     // --- 订阅关节位置目标 (由 cartesian_controller IK 伺服输出) ---
     joint_target_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/joint_position_target", rclcpp::SensorDataQoS(),
-        std::bind(&TorqueControllerActionServer::jointTargetCallback, this,
-                  std::placeholders::_1));
-    RCLCPP_INFO(this->get_logger(),
-                "[OK] Joint target subscriber created: /joint_position_target");
+        std::bind(&TorqueControllerActionServer::jointTargetCallback, this, std::placeholders::_1));
+    RCLCPP_INFO(this->get_logger(), "[OK] Joint target subscriber created: /joint_position_target");
 
     RCLCPP_INFO(this->get_logger(), "[INFO] Control frequency: %.1f Hz", control_frequency_);
 
@@ -341,18 +354,39 @@ private:
   rclcpp::Service<arv_v1_interfaces::srv::GripperControl>::SharedPtr gripper_service_;
 
   // --- 载荷重力补偿: τ_payload = J(q)^T × [0,0,-mg,0,0,0] ---
-  KDL::Chain kdl_chain_tcp_;                              // base_link→tcp (含 joint_tcp 偏移 0.179m)
+  KDL::Chain kdl_chain_tcp_;  // base_link→tcp (含 joint_tcp 偏移 0.179m)
   std::unique_ptr<KDL::ChainJntToJacSolver> jac_solver_;  // 雅可比求解器 (预分配)
   KDL::Jacobian jacobian_{kArmJoints};                    // 预分配 6×6 雅可比
   Eigen::Matrix<double, 6, 1> payload_wrench_;            // 预分配力螺旋
   KDL::JntArray tau_payload_{kArmJoints};                 // 预分配载荷力矩输出
   double payload_mass_ = 0.0;
-  double payload_force_threshold_ = 0.5;   // N, 夹力阈值
-  double payload_pos_threshold_ = 0.01;    // m, 夹爪位置阈值 (10mm)
+  double payload_force_threshold_ = 0.5;  // N, 夹力阈值
+  double payload_pos_threshold_ = 0.01;   // m, 夹爪位置阈值 (10mm)
   bool payload_compensation_enabled_ = false;
-  double gripper_position_ = 0.0;  // 夹爪位置 (state_mutex_ 保护, jointStateCallback写/controlLoop读)
+  double gripper_position_ =
+      0.0;  // 夹爪位置 (state_mutex_ 保护, jointStateCallback写/controlLoop读)
 
   bool computePayloadCompensation(const KDL::JntArray &q, double gripper_pos, double gripper_force);
+
+  // --- 摩擦前馈: τ_friction = fc·fal(q̇,α,δ) + fv·q̇ ---
+  // fal 平滑库仑摩擦 sign() 跳变，避免零速极限环
+  std::vector<double> friction_coulomb_{std::vector<double>(kArmJoints, 0.0)};
+  std::vector<double> friction_viscous_{std::vector<double>(kArmJoints, 0.0)};
+  double fal_alpha_ = 0.5;   // 非线性指数 (0<α<1)
+  double fal_delta_ = 0.05;  // 线性区宽度 (rad/s)
+
+  static double fal(double e, double alpha, double delta) {
+    if (delta < 1e-10) delta = 1e-10;
+    if (std::abs(e) <= delta)
+      return e / std::pow(delta, 1.0 - alpha);
+    else
+      return std::pow(std::abs(e), alpha) * std::copysign(1.0, e);
+  }
+
+  double computeFrictionTorque(int joint_idx, double velocity) {
+    return friction_coulomb_[joint_idx] * fal(velocity, fal_alpha_, fal_delta_) +
+           friction_viscous_[joint_idx] * velocity;
+  }
 
   // Action 回调函数
   rclcpp_action::GoalResponse handleGoal(const rclcpp_action::GoalUUID &uuid,
@@ -913,7 +947,8 @@ bool TorqueControllerActionServer::initializeDynamics() {
     } else {
       jac_solver_ = std::make_unique<KDL::ChainJntToJacSolver>(kdl_chain_tcp_);
       payload_wrench_.setZero();
-      RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Jacobian solver initialized (%d segments, %d joints)",
+      RCLCPP_INFO(this->get_logger(),
+                  "[PAYLOAD] Jacobian solver initialized (%d segments, %d joints)",
                   kdl_chain_tcp_.getNrOfSegments(), kdl_chain_tcp_.getNrOfJoints());
     }
   }
@@ -1074,14 +1109,16 @@ void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_
 }
 
 // --- 载荷重力补偿: τ_payload = J(q)^T × [0,0,-mg,0,0,0] ---
-bool TorqueControllerActionServer::computePayloadCompensation(
-    const KDL::JntArray &q, double gripper_pos, double gripper_force) {
+bool TorqueControllerActionServer::computePayloadCompensation(const KDL::JntArray &q,
+                                                              double gripper_pos,
+                                                              double gripper_force) {
   for (int i = 0; i < kArmJoints; i++) tau_payload_(i) = 0.0;
 
   if (!payload_compensation_enabled_ || !jac_solver_) return false;
 
   // 抓取检测: 有夹力 + 夹爪未完全闭合 (被物体阻挡)
-  if (gripper_force <= payload_force_threshold_ || gripper_pos <= payload_pos_threshold_) return false;
+  if (gripper_force <= payload_force_threshold_ || gripper_pos <= payload_pos_threshold_)
+    return false;
 
   int ret = jac_solver_->JntToJac(q, jacobian_);
   if (ret < 0) {
@@ -1276,11 +1313,12 @@ void TorqueControllerActionServer::controlLoop() {
     // 载荷重力补偿
     computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy);
 
-    // 发布力矩：重力补偿 + PD + 载荷补偿
+    // 发布力矩：重力补偿 + 摩擦前馈 + PD + 载荷补偿
     std_msgs::msg::Float64MultiArray torque_msg;
     torque_msg.data.resize(kAllJoints);
     for (int i = 0; i < kArmJoints; i++) {
-      torque_msg.data[i] = tau_gravity(i) + tau_pd(i) + tau_payload_(i);
+      double tau_friction = computeFrictionTorque(i, qd_copy(i));
+      torque_msg.data[i] = tau_gravity(i) + tau_friction + tau_pd(i) + tau_payload_(i);
 
       // --- SAFETY: NaN/Inf check before publishing ---
       if (!std::isfinite(torque_msg.data[i])) {
@@ -1375,11 +1413,12 @@ void TorqueControllerActionServer::controlLoop() {
       }
     }
 
-    // 发布力矩：重力补偿 + PD + 载荷补偿
+    // 发布力矩：重力补偿 + 摩擦前馈 + PD + 载荷补偿
     std_msgs::msg::Float64MultiArray hold_torque;
     hold_torque.data.resize(kAllJoints);
     for (int i = 0; i < kArmJoints; i++) {
-      hold_torque.data[i] = tau_gravity(i) + tau_pd(i) + tau_payload_(i);
+      double tau_friction = computeFrictionTorque(i, qd_filtered_copy(i));
+      hold_torque.data[i] = tau_gravity(i) + tau_friction + tau_pd(i) + tau_payload_(i);
 
       // --- SAFETY: NaN/Inf check and saturation ---
       if (!std::isfinite(hold_torque.data[i])) {
@@ -1461,8 +1500,9 @@ void TorqueControllerActionServer::controlLoop() {
 
   KDL::JntArray tau_total(kArmJoints);
   for (int i = 0; i < kArmJoints; i++) {
-    tau_total(i) = tau_ff(i) + tau_fb(i) + tau_payload_(i);
-  }  // 前馈+反馈+载荷
+    double tau_friction = computeFrictionTorque(i, qd_filtered(i));
+    tau_total(i) = tau_ff(i) + tau_friction + tau_fb(i) + tau_payload_(i);
+  }  // 动力学前馈 + 摩擦前馈 + 反馈 + 载荷
 
   // 发送力矩到 ros2_control effort_controller
   std_msgs::msg::Float64MultiArray torque_msg;
@@ -1626,10 +1666,29 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
       RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Mass: %.3f kg", payload_mass_);
     } else if (name == "payload.gripper_force_threshold") {
       payload_force_threshold_ = param.as_double();
-      RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Force threshold: %.2f N", payload_force_threshold_);
+      RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Force threshold: %.2f N",
+                  payload_force_threshold_);
     } else if (name == "payload.gripper_pos_threshold") {
       payload_pos_threshold_ = param.as_double();
       RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Pos threshold: %.3f m", payload_pos_threshold_);
+    }
+    // --- 摩擦前馈参数动态更新 ---
+    else if (name == "friction.coulomb") {
+      friction_coulomb_ = param.as_double_array();
+      RCLCPP_INFO(this->get_logger(), "[FRICTION] Coulomb updated: [%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
+                  friction_coulomb_[0], friction_coulomb_[1], friction_coulomb_[2],
+                  friction_coulomb_[3], friction_coulomb_[4], friction_coulomb_[5]);
+    } else if (name == "friction.viscous") {
+      friction_viscous_ = param.as_double_array();
+      RCLCPP_INFO(this->get_logger(), "[FRICTION] Viscous updated: [%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
+                  friction_viscous_[0], friction_viscous_[1], friction_viscous_[2],
+                  friction_viscous_[3], friction_viscous_[4], friction_viscous_[5]);
+    } else if (name == "friction.fal_alpha") {
+      fal_alpha_ = param.as_double();
+      RCLCPP_INFO(this->get_logger(), "[FRICTION] fal alpha: %.2f", fal_alpha_);
+    } else if (name == "friction.fal_delta") {
+      fal_delta_ = param.as_double();
+      RCLCPP_INFO(this->get_logger(), "[FRICTION] fal delta: %.3f", fal_delta_);
     }
   }
 
