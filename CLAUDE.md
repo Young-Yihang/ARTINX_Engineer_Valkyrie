@@ -214,14 +214,10 @@ ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
 ### Comment Standards
 
 #### File Header
-New files SHOULD have a Doxygen file header. Existing headers MUST NOT be deleted or replaced with single-line comments.
+Use single-line `///` Doxygen format (max 2 lines). Multi-line `/** */` headers are **prohibited** for new files.
 ```cpp
-/**
- * @file filename.cpp
- * @brief One-line English description
- *
- * Optional: control law formula, protocol spec, design rationale
- */
+/// @file filename.cpp
+/// @brief One-line English description.
 ```
 
 #### Section Separators
@@ -229,10 +225,17 @@ Use `// --- Section Name ---` for logical sections within a file.
 DO NOT change existing separator styles (e.g. `---` → `=====`) during unrelated changes.
 
 #### Language
-- Doxygen tags (`@file`, `@brief`, `@param`, `@return`): **English**
+- Doxygen tags (`@file`, `@brief`): **English**
 - Bracketed markers (`[FIX]`, `[SAFETY]`, `[TODO]`, `[OK]`, `[ERROR]`): **English**
-- Implementation comments: Chinese or English, but stay consistent within a single function
+- Inline comments: English preferred; Chinese OK for design rationale / derivation
 - DO NOT translate or rewrite existing comments during unrelated changes
+
+#### Density — Less is More
+- **DO NOT** comment self-explanatory code (variable init, standard API calls, parameter declarations)
+- **DO NOT** use numbered step comments (`// 1. xxx`, `// 2. xxx`) — use one summary at function head
+- Algorithm functions: one formula/intent comment at top, NOT per-line narration
+- Comment **only**: non-obvious logic, safety rationale, magic number derivation, concurrency contracts, external protocol specs
+- Prefer shorter inline comment over multi-line block: `// 限幅防IK跳变` not 4-line explanation
 
 ### Concurrency Rules
 
