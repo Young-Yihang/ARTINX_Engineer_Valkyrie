@@ -226,11 +226,21 @@ void CartesianControllerNode::poseTargetCallback(
     return;  // IK 无解，不发布，torque_controller 保持上一帧
   }
 
-  // 发布关节目标
+  // 关节速度限幅: 防止 IK 多解跳变导致翻转
+  // 同一末端位姿可能对应多组关节解，数值 IK 可能跨分支收敛。
+  // 限幅保证每帧关节变化不超过 max_joint_step，将跳变平滑为渐变。
+  // 推导: 步长 0.005m / 臂展 0.5m ≈ 0.01 rad 正常量，×10 裕量 = 0.1 rad
+  //        J4 腕部 roll 力臂短，同笛卡尔步长对应更大关节变化，放宽到 0.2
+  static constexpr double max_joint_step[] = {0.1, 0.1, 0.1, 0.2, 0.1, 0.2};  // rad/帧 @10Hz
   std_msgs::msg::Float64MultiArray target_msg;
   target_msg.data.resize(kArmJoints);
   for (int i = 0; i < kArmJoints; i++) {
-    target_msg.data[i] = q_result(i);
+    double delta = q_result(i) - q_seed(i);
+    if (std::abs(delta) > max_joint_step[i]) {
+      target_msg.data[i] = q_seed(i) + std::copysign(max_joint_step[i], delta);
+    } else {
+      target_msg.data[i] = q_result(i);
+    }
   }
   joint_target_pub_->publish(target_msg);
 }
