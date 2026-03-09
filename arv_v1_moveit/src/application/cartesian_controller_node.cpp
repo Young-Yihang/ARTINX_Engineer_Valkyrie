@@ -74,12 +74,11 @@ CartesianControllerNode::CartesianControllerNode() : Node("cartesian_controller_
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-  joint_target_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
-      "/joint_position_target", 10);
+  joint_target_pub_ =
+      this->create_publisher<std_msgs::msg::Float64MultiArray>("/joint_position_target", 10);
   current_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
       "/cartesian_controller/current_pose", 10);
-  status_pub_ = this->create_publisher<std_msgs::msg::String>(
-      "/cartesian_controller/status", 10);
+  status_pub_ = this->create_publisher<std_msgs::msg::String>("/cartesian_controller/status", 10);
 
   js_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
       "/joint_states", 10,
@@ -90,11 +89,11 @@ CartesianControllerNode::CartesianControllerNode() : Node("cartesian_controller_
       std::bind(&CartesianControllerNode::poseTargetCallback, this, std::placeholders::_1));
 
   pose_publish_timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(33),
-      std::bind(&CartesianControllerNode::publishCurrentPose, this));
+      std::chrono::milliseconds(33), std::bind(&CartesianControllerNode::publishCurrentPose, this));
 
   if (initializeIK()) {
-    RCLCPP_INFO(this->get_logger(), "Cartesian IK servo node initialized (chain: %s → %s, %d joints)",
+    RCLCPP_INFO(this->get_logger(),
+                "Cartesian IK servo node initialized (chain: %s → %s, %d joints)",
                 reference_frame_.c_str(), end_effector_link_.c_str(),
                 static_cast<int>(kdl_chain_.getNrOfJoints()));
     publishStatus("IDLE");
@@ -120,7 +119,7 @@ bool CartesianControllerNode::initializeIK() {
     return false;
   }
   std::string urdf_string((std::istreambuf_iterator<char>(urdf_file)),
-                           std::istreambuf_iterator<char>());
+                          std::istreambuf_iterator<char>());
 
   KDL::Tree kdl_tree;
   if (!kdl_parser::treeFromString(urdf_string, kdl_tree)) {
@@ -129,8 +128,8 @@ bool CartesianControllerNode::initializeIK() {
   }
 
   if (!kdl_tree.getChain(reference_frame_, end_effector_link_, kdl_chain_)) {
-    RCLCPP_ERROR(this->get_logger(), "Failed to extract chain: %s → %s",
-                 reference_frame_.c_str(), end_effector_link_.c_str());
+    RCLCPP_ERROR(this->get_logger(), "Failed to extract chain: %s → %s", reference_frame_.c_str(),
+                 end_effector_link_.c_str());
     return false;
   }
 
@@ -176,16 +175,14 @@ void CartesianControllerNode::poseTargetCallback(
   if (!ik_solver_ || !has_joint_state_) return;
 
   std::string err;
-  if (!validateTargetPose(msg->pose.position.x, msg->pose.position.y,
-                          msg->pose.position.z, err)) {
+  if (!validateTargetPose(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z, err)) {
     RCLCPP_WARN(this->get_logger(), "Target rejected: %s", err.c_str());
     return;
   }
 
   KDL::Frame target_frame(
-      KDL::Rotation::Quaternion(
-          msg->pose.orientation.x, msg->pose.orientation.y,
-          msg->pose.orientation.z, msg->pose.orientation.w),
+      KDL::Rotation::Quaternion(msg->pose.orientation.x, msg->pose.orientation.y,
+                                msg->pose.orientation.z, msg->pose.orientation.w),
       KDL::Vector(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z));
 
   KDL::JntArray q_seed(kArmJoints), q_result(kArmJoints);
@@ -218,8 +215,7 @@ void CartesianControllerNode::poseTargetCallback(
 
 void CartesianControllerNode::publishCurrentPose() {
   try {
-    auto tf = tf_buffer_->lookupTransform(
-        reference_frame_, end_effector_link_, tf2::TimePointZero);
+    auto tf = tf_buffer_->lookupTransform(reference_frame_, end_effector_link_, tf2::TimePointZero);
     geometry_msgs::msg::PoseStamped pose_msg;
     pose_msg.header.stamp = this->now();
     pose_msg.header.frame_id = reference_frame_;
@@ -229,8 +225,8 @@ void CartesianControllerNode::publishCurrentPose() {
     pose_msg.pose.orientation = tf.transform.rotation;
     current_pose_pub_->publish(pose_msg);
   } catch (const tf2::TransformException& e) {
-    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                          "TF lookup failed: %s", e.what());
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "TF lookup failed: %s",
+                          e.what());
   }
 }
 

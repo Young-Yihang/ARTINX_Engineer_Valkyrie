@@ -3,6 +3,7 @@
 
 #include <ncurses.h>
 #include <signal.h>
+#include <tf2/LinearMath/Quaternion.h>
 #include <yaml-cpp/yaml.h>
 
 #include <chrono>
@@ -22,8 +23,6 @@
 #include <sstream>
 #include <thread>
 #include <vector>
-
-#include <tf2/LinearMath/Quaternion.h>
 
 #include "arv_v1_interfaces/srv/gripper_control.hpp"
 #include "arv_v1_interfaces/srv/list_trajectories.hpp"
@@ -106,8 +105,8 @@ public:
 
     load_client_ = create_client<LoadTrajectory>("/load_trajectory");
     save_client_ = create_client<SaveLastTrajectory>("/save_last_trajectory");
-    cartesian_target_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
-        "/cartesian_target_pose", 10);
+    cartesian_target_pub_ =
+        create_publisher<geometry_msgs::msg::PoseStamped>("/cartesian_target_pose", 10);
     gripper_client_ = create_client<GripperControl>("/gripper_control");
 
     ee_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -433,8 +432,8 @@ private:
           std::lock_guard<std::mutex> lk(pose_mu_);
           if (has_ee_pose_) {
             jog_target_pose_ = current_ee_pose_.pose;
-            quaternionToRPY(jog_target_pose_.orientation,
-                            jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
+            quaternionToRPY(jog_target_pose_.orientation, jog_target_roll_, jog_target_pitch_,
+                            jog_target_yaw_);
             jog_target_initialized_ = true;
           }
         }
@@ -608,8 +607,7 @@ private:
     else if (k == 'r' || k == 'R') {
       loadMissionSequence();
       logOk("Sequence reloaded from yaml.");
-    }
-    else if (k == '0')
+    } else if (k == '0')
       publishControlMode(ControlMode::RELAX);
     else if (k == '1')
       publishControlMode(ControlMode::FREEDRIVE);

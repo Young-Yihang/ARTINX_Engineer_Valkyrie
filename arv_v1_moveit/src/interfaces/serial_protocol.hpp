@@ -26,14 +26,14 @@ constexpr size_t NUM_ALL_JOINTS = 7;  // arm + gripper
 
 // ─────────── 0x0005 TaskCmd: [cmd(1)][param(1)][seq(1)] ───────────
 enum class TaskCmd : uint8_t {
-  EMERGENCY_STOP = 0x01,  // param ignored
-  RESET_HOME = 0x02,      // param ignored
-  PICK_ORE = 0x10,        // param = ore_id (0-5)
-  STOW_ORE = 0x11,        // param = slot_id (0-5)
-  EXCHANGE_MODE = 0x20,   // param: 1=enter, 0=exit
-  NEXT_STEP = 0x30,       // param ignored
-  ABORT_TASK = 0x31,      // param ignored, hold position
-  GRIPPER_CMD = 0x40,     // param = GripperAction
+  EMERGENCY_STOP = 0x01,    // param ignored
+  RESET_HOME = 0x02,        // param ignored
+  PICK_ORE = 0x10,          // param = ore_id (0-5)
+  STOW_ORE = 0x11,          // param = slot_id (0-5)
+  EXCHANGE_MODE = 0x20,     // param: 1=enter, 0=exit
+  NEXT_STEP = 0x30,         // param ignored
+  ABORT_TASK = 0x31,        // param ignored, hold position
+  GRIPPER_CMD = 0x40,       // param = GripperAction
   SET_CONTROL_MODE = 0x50,  // param = ControlMode
 };
 
@@ -91,7 +91,7 @@ struct TaskCommandPacket {
 
 struct ArmStatusPacket {
   ArmState arm_state;
-  uint8_t task_progress;       // 0-100
+  uint8_t task_progress;  // 0-100
   ArmError error_code;
   GripperState gripper_state;
 };

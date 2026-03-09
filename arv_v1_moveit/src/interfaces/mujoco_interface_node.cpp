@@ -526,8 +526,7 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
 
 void MuJoCoInterfaceNode::setInitialPose() {
   // SRDF "Start" pose
-  double initial_q[kSimJoints] = {0.0,   2.6343, 1.0785, 0.0,
-                                  0.0,   0.0,   0.0,   0.0};  // arm + gripper
+  double initial_q[kSimJoints] = {0.0, 2.6343, 1.0785, 0.0, 0.0, 0.0, 0.0, 0.0};  // arm + gripper
   for (int i = 0; i < kSimJoints; i++) {
     data_->qpos[i] = initial_q[i];
   }
@@ -1081,8 +1080,7 @@ void MuJoCoInterfaceNode::mouseMoveCallback(GLFWwindow *window, double xpos, dou
   if (node->button_left_) {
     node->cam_.azimuth += dx * 0.3;
     node->cam_.elevation += dy * 0.3;
-  }
-  else if (node->button_right_) {
+  } else if (node->button_right_) {
     double moveScale = 0.001 * node->cam_.distance;
     double azimuth_rad = node->cam_.azimuth * M_PI / 180.0;
     double right_x = -std::sin(azimuth_rad);
@@ -1091,8 +1089,7 @@ void MuJoCoInterfaceNode::mouseMoveCallback(GLFWwindow *window, double xpos, dou
     node->cam_.lookat[0] -= moveScale * (dx * right_x);
     node->cam_.lookat[1] -= moveScale * (dx * right_y);
     node->cam_.lookat[2] += moveScale * dy;
-  }
-  else if (node->button_middle_) {
+  } else if (node->button_middle_) {
     node->cam_.distance *= (1.0 - dy * 0.01);
     if (node->cam_.distance < 0.1) node->cam_.distance = 0.1;
     if (node->cam_.distance > 50.0) node->cam_.distance = 50.0;

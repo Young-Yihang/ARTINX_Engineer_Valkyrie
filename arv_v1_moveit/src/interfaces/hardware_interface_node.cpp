@@ -313,7 +313,7 @@ private:
       if (torque_data_valid_) {
         double age = (this->now() - last_torque_update_).seconds();
         if (age > 0.1) {
-            torque_data_valid_ = false;
+          torque_data_valid_ = false;
           std::fill(cached_torques_, cached_torques_ + SerialProtocol::NUM_ALL_JOINTS, 0.0f);
           RCLCPP_ERROR(this->get_logger(),
                        "[SAFETY] Torque data stale (%.0f ms), invalidated → sending zeros",
@@ -466,7 +466,7 @@ private:
           } break;
 
           case READ_BODY:
-                    if (data_len > 256) {
+            if (data_len > 256) {
               RCLCPP_ERROR(this->get_logger(),
                            "[SAFETY] data_len=%u too large in READ_BODY, resync", data_len);
               state = WAIT_SOF;
@@ -522,7 +522,7 @@ private:
     (void)flags;
 
     if (cmd_id == SerialProtocol::CMD_JOINT_FEEDBACK) {
-        constexpr size_t expected_payload = SerialProtocol::NUM_ALL_JOINTS * (4 + 4 + 4);  // 84B
+      constexpr size_t expected_payload = SerialProtocol::NUM_ALL_JOINTS * (4 + 4 + 4);  // 84B
       if (offset + expected_payload > packet.size()) {
         RCLCPP_ERROR(this->get_logger(),
                      "[RX] Joint feedback packet too short: %zu bytes, need %zu", packet.size(),
