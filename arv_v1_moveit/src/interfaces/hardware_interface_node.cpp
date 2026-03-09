@@ -1,7 +1,5 @@
-/**
- * @file hardware_interface_node.cpp
- * @brief Hardware serial interface — TX torques/gripper, RX joint states via Seasky protocol
- */
+/// @file hardware_interface_node.cpp
+/// @brief Hardware serial interface — TX torques/gripper, RX joint states via Seasky protocol.
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -20,16 +18,13 @@ class HardwareInterfaceNode : public rclcpp::Node {
 public:
   HardwareInterfaceNode()
       : Node("hardware_interface_node"), running_(false), simulation_mode_(false) {
-    // 1. 声明参数
     this->declare_parameter("serial_port", "/dev/ttyACM0");
     this->declare_parameter("baud_rate", 921600);
-    this->declare_parameter("send_rate_hz", 200);       // 力矩发送频率 (Hz)
-    this->declare_parameter("gripper_rate_hz", 50);     // 夹爪发送频率 (Hz)
-    this->declare_parameter("simulation_mode", false);  // 仿真模式参数
-    this->declare_parameter("force_zero_torque",
-                            false);  // 强制零力矩开关（默认false允许正常控制）
+    this->declare_parameter("send_rate_hz", 200);
+    this->declare_parameter("gripper_rate_hz", 50);
+    this->declare_parameter("simulation_mode", false);
+    this->declare_parameter("force_zero_torque", false);
 
-    // 2. 获取参数
     std::string port = this->get_parameter("serial_port").as_string();
     int baud = this->get_parameter("baud_rate").as_int();
     simulation_mode_ = this->get_parameter("simulation_mode").as_bool();
@@ -40,7 +35,6 @@ public:
       RCLCPP_INFO(this->get_logger(), "[SIMULATION MODE] Serial TX only, no RX feedback");
     }
 
-    // 3. 初始化串口（失败不退出，依赖自动重连）
     if (!initSerial(port, baud)) {
       RCLCPP_WARN(this->get_logger(), "[WARN] Initial serial open failed: %s", port.c_str());
       RCLCPP_INFO(this->get_logger(),
@@ -49,24 +43,18 @@ public:
       RCLCPP_INFO(this->get_logger(), "[OK] Serial port opened: %s @ %d baud", port.c_str(), baud);
     }
 
-    // 4. 初始化 ROS2 通信
     initROS2Communication();
-
-    // 5. 启动收发线程（无论串口是否打开）
     running_ = true;
 
     if (simulation_mode_) {
-      // 仿真模式：不启动串口接收线程，等待MuJoCo反馈
       RCLCPP_INFO(this->get_logger(),
                   "[OK] Simulation mode - Serial TX only, waiting for MuJoCo feedback");
     } else {
-      // 真机模式：启动串口接收线程（会自动重连）
       receive_thread_ = std::thread(&HardwareInterfaceNode::receiveLoop, this);
       RCLCPP_INFO(this->get_logger(),
                   "[OK] Hardware mode - Serial RX/TX enabled (auto-reconnect every 200ms)");
     }
 
-    // 6. 启动发送定时器（解耦架构：独立于解算层）
     const int send_hz = this->get_parameter("send_rate_hz").as_int();
     const int grip_hz = this->get_parameter("gripper_rate_hz").as_int();
     gripper_divider_ = (grip_hz > 0 && send_hz >= grip_hz) ? (send_hz / grip_hz) : 4;
@@ -74,11 +62,10 @@ public:
     send_timer_ =
         this->create_wall_timer(send_period, std::bind(&HardwareInterfaceNode::sendLoop, this));
 
-    last_torque_update_ = this->now();  // 初始化时间戳
+    last_torque_update_ = this->now();
     RCLCPP_INFO(this->get_logger(), "[OK] Send timer started at %dHz, gripper at %dHz (1:%d)",
                 send_hz, grip_hz, gripper_divider_);
 
-    // 7. 启动健康监控定时器 (5Hz)
     last_rx_activity_.store(std::chrono::steady_clock::now());
     health_timer_ = this->create_wall_timer(std::chrono::milliseconds(5000),
                                             std::bind(&HardwareInterfaceNode::healthCheck, this));
@@ -112,11 +99,10 @@ public:
   }
 
 private:
-  // --- 成员变量 ---
   std::atomic<bool> running_;
-  bool simulation_mode_;  // 新增：是否为仿真模式（不从串口读取）
+  bool simulation_mode_;
 
-  // 串口
+  // --- 串口 ---
   std::string device_name_;
   uint32_t baud_rate_{0};
   std::unique_ptr<drivers::common::IoContext> io_ctx_;
@@ -125,25 +111,23 @@ private:
   std::mutex serial_mutex_;  // [FIX] 保护 serial_port_ 跨线程操作 (RX/TX/析构)
   std::thread receive_thread_;
 
-  // ROS2 通信
+  // --- ROS2 ---
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr torque_sub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
-  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr
-      task_command_pub_;                     // 任务指令 (cmd<<16|param<<8|seq)
-  rclcpp::TimerBase::SharedPtr send_timer_;  // 200Hz发送定时器
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr task_command_pub_;
+  rclcpp::TimerBase::SharedPtr send_timer_;
 
-  // 数据缓存
+  // --- 数据缓存 ---
   std::mutex data_mutex_;
   float current_positions_[SerialProtocol::NUM_ALL_JOINTS] = {0};
   float current_velocities_[SerialProtocol::NUM_ALL_JOINTS] = {0};
 
-  // 力矩缓存（解耦架构）：index 0-5 = 6轴, index 6 = 夹爪力矩
+  // 力矩缓存: index 0-5=臂, 6=夹爪
   std::mutex torque_cache_mutex_;
   float cached_torques_[SerialProtocol::NUM_ALL_JOINTS] = {0};
   rclcpp::Time last_torque_update_;
   bool torque_data_valid_ = false;
 
-  // 夹爪分频 (send_rate_hz / gripper_rate_hz, 由参数动态计算)
   int gripper_divider_ = 4;
   int gripper_counter_ = 0;
 
@@ -154,14 +138,11 @@ private:
   std::atomic<uint64_t> rx_crc_errors_{0};
   rclcpp::TimerBase::SharedPtr health_timer_;
 
-  // --- 初始化函数 ---
-
   bool initSerial(const std::string &port, int baud) {
     try {
       device_name_ = port;
       baud_rate_ = static_cast<uint32_t>(baud);
 
-      // IoContext 内部会启动 worker 线程
       io_ctx_ = std::make_unique<drivers::common::IoContext>(1);
       serial_driver_ = std::make_unique<drivers::serial_driver::SerialDriver>(*io_ctx_);
 
@@ -190,7 +171,6 @@ private:
 
       const std::string dev = device_name_.empty() ? std::string("/dev/ttyACM0") : device_name_;
       if (std::filesystem::exists(dev)) {
-        // 设备存在但端口关闭 → 完整 initSerial 重建 fd
         const int baud = static_cast<int>(baud_rate_ == 0 ? 921600 : baud_rate_);
         try {
           if (initSerial(dev, baud)) {
@@ -284,25 +264,18 @@ private:
   }
 
   void initROS2Communication() {
-    // 订阅7轴力矩命令 (index 0-5=臂关节, index 6=夹爪力矩, 由sendLoop做阈值→flag转换)
+    // 7轴命令: [0-5]=臂力矩, [6]=夹爪力(N), sendLoop 转 flag
     torque_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/effort_controller/commands", 10,
         std::bind(&HardwareInterfaceNode::torqueCallback, this, std::placeholders::_1));
 
-    // 发布关节状态到标准话题 (MoveIt/RViz/数字孪生都订阅此话题)
     joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
-
-    // 发布下位机任务指令到 /task_command (Int32: cmd<<16|param<<8|seq)
     task_command_pub_ = this->create_publisher<std_msgs::msg::Int32>("/task_command", 10);
-
-    RCLCPP_INFO(this->get_logger(), "[INIT] Publishing to /joint_states and /task_command");
   }
 
   // --- 回调函数 ---
 
   void torqueCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-    // index 0-5: 6轴臂关节力矩; index 6(可选): 夹爪力矩
-    // 至少需要6个元素，第7个若不存在则夹爪保持STOP
     if (msg->data.size() < SerialProtocol::NUM_ARM_JOINTS) {
       RCLCPP_WARN(this->get_logger(), "[WARN] Torque msg size %zu < %zu", msg->data.size(),
                   SerialProtocol::NUM_ARM_JOINTS);
@@ -313,7 +286,6 @@ private:
     for (size_t i = 0; i < n; ++i) {
       cached_torques_[i] = static_cast<float>(msg->data[i]);
     }
-    // 若消息只有6个元素，第7个(夹爪)置0 → STOP
     if (msg->data.size() < SerialProtocol::NUM_ALL_JOINTS) {
       cached_torques_[SerialProtocol::NUM_ARM_JOINTS] = 0.0f;
     }
@@ -321,20 +293,19 @@ private:
     torque_data_valid_ = true;
   }
 
-  // --- 串口收发函数 ---
+  // --- 串口收发 ---
 
-  // 新增：定时发送循环（解耦架构核心）
   void sendLoop() {
     {
       std::lock_guard<std::mutex> slock(serial_mutex_);
       if (!serial_port_ || !serial_port_->is_open()) {
-        return;  // 串口未打开，等待自动重连
+        return;
       }
     }
 
     const bool force_zero = this->get_parameter("force_zero_torque").as_bool();
 
-    // ── 1. 读取缓存的6轴力矩数据 ──
+    // ── 读取缓存力矩 ──
     float torques_to_send[SerialProtocol::NUM_ARM_JOINTS];
     bool data_fresh = false;
     {
@@ -342,8 +313,7 @@ private:
       if (torque_data_valid_) {
         double age = (this->now() - last_torque_update_).seconds();
         if (age > 0.1) {
-          // 100ms 无新力矩数据 → 自动失效，发零保护
-          torque_data_valid_ = false;
+            torque_data_valid_ = false;
           std::fill(cached_torques_, cached_torques_ + SerialProtocol::NUM_ALL_JOINTS, 0.0f);
           RCLCPP_ERROR(this->get_logger(),
                        "[SAFETY] Torque data stale (%.0f ms), invalidated → sending zeros",
@@ -370,7 +340,7 @@ private:
       }
     }
 
-    // ── 2. 发送6轴力矩包──
+    // ── 发送力矩包 ──
     SerialProtocol::TorqueCommand cmd;
     for (size_t i = 0; i < SerialProtocol::NUM_ARM_JOINTS; ++i) {
       cmd.torques[i] = torques_to_send[i];
@@ -399,9 +369,7 @@ private:
 
     sendRaw(SerialProtocol::buildTorquePacket(cmd));
 
-    // ── 3. 分频发送夹爪包 (send_rate / gripper_rate) ──
-    // effort_controller/commands[6] 单位为 N (prismatic joint), 硬件只用符号判断开关:
-    //   > +0.1 → GRIP,  < -0.1 → RELEASE,  else → STOP
+    // ── 分频发送夹爪包: [6] > +0.1 → GRIP, < -0.1 → RELEASE, else → STOP ──
     gripper_counter_ = (gripper_counter_ + 1) % gripper_divider_;
     if (gripper_counter_ == 0) {
       SerialProtocol::GripperAction action;
@@ -498,8 +466,7 @@ private:
           } break;
 
           case READ_BODY:
-            // 防御性校验: data_len 已过 CRC8，但二次确认防止逻辑错误
-            if (data_len > 256) {
+                    if (data_len > 256) {
               RCLCPP_ERROR(this->get_logger(),
                            "[SAFETY] data_len=%u too large in READ_BODY, resync", data_len);
               state = WAIT_SOF;
@@ -555,8 +522,7 @@ private:
     (void)flags;
 
     if (cmd_id == SerialProtocol::CMD_JOINT_FEEDBACK) {
-      // 校验 payload 长度: 7 joints × (float+float+uint32) = 7×12 = 84 bytes
-      constexpr size_t expected_payload = SerialProtocol::NUM_ALL_JOINTS * (4 + 4 + 4);
+        constexpr size_t expected_payload = SerialProtocol::NUM_ALL_JOINTS * (4 + 4 + 4);  // 84B
       if (offset + expected_payload > packet.size()) {
         RCLCPP_ERROR(this->get_logger(),
                      "[RX] Joint feedback packet too short: %zu bytes, need %zu", packet.size(),
@@ -576,8 +542,7 @@ private:
       updateAndPublishJointStates(positions, velocities);
 
     } else if (cmd_id == SerialProtocol::CMD_TASK_COMMAND) {
-      // 下位机 → 上位机：任务指令 3B [task_cmd, param, seq]
-      // 打包为 Int32: (cmd << 16) | (param << 8) | seq
+      // 3B → Int32: (cmd<<16)|(param<<8)|seq
       if (offset + 3 <= packet.size()) {
         const uint8_t task_cmd = packet[offset];
         const uint8_t param = packet[offset + 1];
@@ -596,14 +561,12 @@ private:
 
   void updateAndPublishJointStates(const float positions[SerialProtocol::NUM_ALL_JOINTS],
                                    const float velocities[SerialProtocol::NUM_ALL_JOINTS]) {
-    // 1. 更新缓存
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
       std::memcpy(current_positions_, positions, sizeof(float) * SerialProtocol::NUM_ALL_JOINTS);
       std::memcpy(current_velocities_, velocities, sizeof(float) * SerialProtocol::NUM_ALL_JOINTS);
     }
 
-    // 2. 发布 ROS2 消息
     auto msg = sensor_msgs::msg::JointState();
     msg.header.stamp = this->now();
     msg.name = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_gripper1"};

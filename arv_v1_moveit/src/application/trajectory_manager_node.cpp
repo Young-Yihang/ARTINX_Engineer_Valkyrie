@@ -1,7 +1,5 @@
-/**
- * @file trajectory_manager_node.cpp
- * @brief Trajectory CRUD manager: save, load, list, and execute via action client
- */
+/// @file trajectory_manager_node.cpp
+/// @brief Trajectory CRUD: save, load, list, execute via action client.
 
 #include <yaml-cpp/yaml.h>
 
@@ -29,18 +27,13 @@ using GoalHandleFJT = rclcpp_action::ClientGoalHandle<FollowJointTrajectory>;
 class TrajectoryManagerNode : public rclcpp::Node {
 public:
   TrajectoryManagerNode() : Node("trajectory_manager_node") {
-    // 声明参数
     this->declare_parameter<std::string>("trajectory_dir", "");
-
-    // 获取轨迹目录路径
     std::string traj_dir = this->get_parameter("trajectory_dir").as_string();
     if (traj_dir.empty()) {
-      // 默认使用包内的config/trajectories目录
       traj_dir = "/home/huan/ros2_ws/src/arv_v1_moveit/config/trajectories";
     }
     trajectory_dir_ = traj_dir;
 
-    // 确保目录存在
     if (!std::filesystem::exists(trajectory_dir_)) {
       std::filesystem::create_directories(trajectory_dir_);
       RCLCPP_INFO(this->get_logger(), "Created trajectory directory: %s", trajectory_dir_.c_str());
@@ -48,24 +41,19 @@ public:
 
     RCLCPP_INFO(this->get_logger(), "Trajectory directory: %s", trajectory_dir_.c_str());
 
-    // 初始化关节名称
     joint_names_ = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"};
 
-    // 订阅关节状态
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
         "/joint_states", 10,
         std::bind(&TrajectoryManagerNode::jointStateCallback, this, std::placeholders::_1));
 
-    // 订阅MoveIt发送的轨迹（用于缓存最近执行的轨迹）
     trajectory_sub_ = this->create_subscription<trajectory_msgs::msg::JointTrajectory>(
         "/ARM_controller/joint_trajectory", 10,
         std::bind(&TrajectoryManagerNode::trajectoryCallback, this, std::placeholders::_1));
 
-    // 创建Action Client
     action_client_ = rclcpp_action::create_client<FollowJointTrajectory>(
         this, "/ARM_controller/follow_joint_trajectory");
 
-    // 创建服务
     save_srv_ = this->create_service<arv_v1_interfaces::srv::SaveTrajectory>(
         "/save_trajectory", std::bind(&TrajectoryManagerNode::saveTrajectoryCallback, this,
                                       std::placeholders::_1, std::placeholders::_2));
@@ -102,19 +90,16 @@ public:
   }
 
 private:
-  // --- 成员变量 ---
   std::string trajectory_dir_;
   std::vector<std::string> joint_names_;
   std::array<double, 6> current_position_{};
   bool joint_state_received_ = false;
   std::mutex state_mutex_;
 
-  // 缓存最近执行的轨迹
   trajectory_msgs::msg::JointTrajectory last_trajectory_;
   std::mutex trajectory_mutex_;
   bool has_last_trajectory_ = false;
 
-  // ROS2通信
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_sub_;
   rclcpp_action::Client<FollowJointTrajectory>::SharedPtr action_client_;
@@ -124,12 +109,8 @@ private:
   rclcpp::Service<arv_v1_interfaces::srv::LoadTrajectory>::SharedPtr load_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::ListTrajectories>::SharedPtr list_srv_;
 
-  // --- 回调函数 ---
-
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(state_mutex_);
-
-    // 按关节名称匹配更新位置
     for (size_t i = 0; i < msg->name.size(); ++i) {
       for (size_t j = 0; j < joint_names_.size(); ++j) {
         if (msg->name[i] == joint_names_[j] && i < msg->position.size()) {
@@ -159,32 +140,25 @@ private:
                 msg->points.size(), duration);
   }
 
-  // --- 轨迹保存核心函数 ---
-
   bool saveTrajectoryToFile(const std::string& name, const std::string& description,
                             const trajectory_msgs::msg::JointTrajectory& trajectory,
                             std::string& saved_path, std::string& error_message) {
-    // 构建文件路径
     std::string filename = trajectory_dir_ + "/" + name + ".yaml";
 
     try {
-      // 构建YAML内容
       YAML::Emitter out;
       out << YAML::BeginMap;
 
-      // Meta信息
       out << YAML::Key << "meta" << YAML::Value << YAML::BeginMap;
       out << YAML::Key << "name" << YAML::Value << name;
       out << YAML::Key << "description" << YAML::Value << description;
 
-      // 获取当前时间
       auto now = std::chrono::system_clock::now();
       auto time_t = std::chrono::system_clock::to_time_t(now);
       std::stringstream ss;
       ss << std::put_time(std::localtime(&time_t), "%Y-%m-%dT%H:%M:%S");
       out << YAML::Key << "saved_at" << YAML::Value << ss.str();
 
-      // 计算总时长
       double duration = 0.0;
       if (!trajectory.points.empty()) {
         const auto& last_point = trajectory.points.back();
@@ -193,7 +167,6 @@ private:
       out << YAML::Key << "duration_sec" << YAML::Value << duration;
       out << YAML::EndMap;  // meta
 
-      // 关节名称
       out << YAML::Key << "joint_names" << YAML::Value << YAML::BeginSeq;
       if (!trajectory.joint_names.empty()) {
         for (const auto& jname : trajectory.joint_names) {
@@ -206,7 +179,6 @@ private:
       }
       out << YAML::EndSeq;
 
-      // 起始位置
       if (!trajectory.points.empty()) {
         out << YAML::Key << "start_position" << YAML::Value << YAML::Flow;
         out << YAML::BeginSeq;
@@ -216,7 +188,6 @@ private:
         out << YAML::EndSeq;
       }
 
-      // 轨迹点
       out << YAML::Key << "points" << YAML::Value << YAML::BeginSeq;
       for (const auto& point : trajectory.points) {
         out << YAML::BeginMap;
@@ -255,7 +226,6 @@ private:
 
       out << YAML::EndMap;  // root
 
-      // 写入文件
       std::ofstream fout(filename);
       if (!fout.is_open()) {
         error_message = "Failed to open file for writing: " + filename;
@@ -278,20 +248,16 @@ private:
     }
   }
 
-  // --- 服务实现 ---
-
   void saveTrajectoryCallback(
       const std::shared_ptr<arv_v1_interfaces::srv::SaveTrajectory::Request> request,
       std::shared_ptr<arv_v1_interfaces::srv::SaveTrajectory::Response> response) {
     RCLCPP_INFO(this->get_logger(), "[SaveTrajectory] Saving: %s", request->name.c_str());
 
-    // 验证输入
     if (request->name.empty()) {
       response->success = false;
       response->message = "Trajectory name cannot be empty";
       return;
     }
-
     if (request->trajectory.points.empty()) {
       response->success = false;
       response->message = "Trajectory has no points";
@@ -315,14 +281,12 @@ private:
       std::shared_ptr<arv_v1_interfaces::srv::SaveLastTrajectory::Response> response) {
     RCLCPP_INFO(this->get_logger(), "[SaveLastTrajectory] Saving: %s", request->name.c_str());
 
-    // 验证输入
     if (request->name.empty()) {
       response->success = false;
       response->message = "Trajectory name cannot be empty";
       return;
     }
 
-    // 获取缓存的轨迹
     trajectory_msgs::msg::JointTrajectory trajectory_to_save;
     {
       std::lock_guard<std::mutex> lock(trajectory_mutex_);
@@ -352,7 +316,6 @@ private:
     RCLCPP_INFO(this->get_logger(), "[LoadTrajectory] Loading: %s, execute: %s",
                 request->name.c_str(), request->execute ? "true" : "false");
 
-    // 构建文件路径
     std::string filename = trajectory_dir_ + "/" + request->name + ".yaml";
 
     if (!std::filesystem::exists(filename)) {
@@ -362,12 +325,10 @@ private:
     }
 
     try {
-      // 加载YAML
       YAML::Node config = YAML::LoadFile(filename);
 
       trajectory_msgs::msg::JointTrajectory trajectory;
 
-      // 解析关节名称
       if (config["joint_names"]) {
         for (const auto& name : config["joint_names"]) {
           trajectory.joint_names.push_back(name.as<std::string>());
@@ -376,7 +337,6 @@ private:
         trajectory.joint_names = joint_names_;
       }
 
-      // 解析轨迹点
       double duration = 0.0;
       if (config["points"]) {
         for (const auto& pt : config["points"]) {
@@ -411,7 +371,6 @@ private:
       RCLCPP_INFO(this->get_logger(), "[LoadTrajectory] Loaded %zu points, duration: %.2fs",
                   trajectory.points.size(), duration);
 
-      // 如果需要执行
       if (request->execute) {
         if (!action_client_->wait_for_action_server(std::chrono::seconds(2))) {
           response->success = false;
@@ -419,7 +378,6 @@ private:
           return;
         }
 
-        // 发送轨迹
         auto goal = FollowJointTrajectory::Goal();
         goal.trajectory = trajectory;
 
@@ -478,7 +436,6 @@ private:
           std::string name = entry.path().stem().string();
           std::string description = "";
 
-          // 尝试读取描述
           try {
             YAML::Node config = YAML::LoadFile(entry.path().string());
             if (config["meta"] && config["meta"]["description"]) {
