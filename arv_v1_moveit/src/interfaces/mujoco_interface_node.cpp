@@ -15,6 +15,7 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <set>
 #include <sstream>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <string>
 #include <thread>
@@ -108,6 +109,14 @@ public:
 
     health_timer_ = this->create_wall_timer(std::chrono::milliseconds(5000),
                                             std::bind(&MuJoCoInterfaceNode::healthCheck, this));
+
+    cartesian_target_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/cartesian_target_pose", rclcpp::SensorDataQoS(),
+        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+          std::lock_guard<std::mutex> lock(target_pose_mutex_);
+          target_pose_ = *msg;
+          has_target_pose_ = true;
+        });
 
     render_running_ = false;
     window_ = nullptr;
@@ -219,6 +228,21 @@ private:
   bool show_ui_ = true;
   bool show_contacts_ = false;
   bool show_forces_ = false;
+
+  // ========== 笛卡尔目标可视化 ==========
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr cartesian_target_sub_;
+  std::mutex target_pose_mutex_;  // 保护 target_pose_ (renderLoop读, callback写)
+  geometry_msgs::msg::PoseStamped target_pose_;
+  bool has_target_pose_ = false;
+  bool show_target_marker_ = true;  // 'T' 键切换
+
+  static void quatToMat(double qw, double qx, double qy, double qz, double mat[9]) {
+    mat[0] = 1 - 2*(qy*qy + qz*qz);  mat[1] = 2*(qx*qy - qz*qw);      mat[2] = 2*(qx*qz + qy*qw);
+    mat[3] = 2*(qx*qy + qz*qw);      mat[4] = 1 - 2*(qx*qx + qz*qz);  mat[5] = 2*(qy*qz - qx*qw);
+    mat[6] = 2*(qx*qz - qy*qw);      mat[7] = 2*(qy*qz + qx*qw);      mat[8] = 1 - 2*(qx*qx + qy*qy);
+  }
+
+  void drawTargetMarker();
 
   static void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods);
   static void mouseMoveCallback(GLFWwindow *window, double xpos, double ypos);
@@ -981,6 +1005,7 @@ void MuJoCoInterfaceNode::renderLoop() {
       std::lock_guard<std::mutex> lock(sim_mutex_);
       mjv_updateScene(model_, data_, &opt_, nullptr, &cam_, mjCAT_ALL, &scene_);
     }
+    drawTargetMarker();
 
     mjrRect viewport;
     glfwGetFramebufferSize(window_, &viewport.width, &viewport.height);
@@ -1033,7 +1058,7 @@ void MuJoCoInterfaceNode::renderLoop() {
                  0.5f, 0.0f);
       }
 
-      mjr_text(mjFONT_NORMAL, "[Space]Pause [H]HideUI [R]ResetCam [C]Contacts [F]Forces [ESC]Exit",
+      mjr_text(mjFONT_NORMAL, "[Space]Pause [H]HideUI [R]Reset [C]Contacts [F]Forces [T]Target [ESC]Exit",
                &con_, margin_x, 10.0f / viewport.height, 0.7f, 0.7f, 0.7f);
     }
 
@@ -1146,6 +1171,12 @@ void MuJoCoInterfaceNode::keyCallback(GLFWwindow *window, int key, int scancode,
       break;
     }
 
+    case GLFW_KEY_T:
+      node->show_target_marker_ = !node->show_target_marker_;
+      RCLCPP_INFO(node->get_logger(), "[INFO] Target marker %s",
+                  node->show_target_marker_ ? "ON" : "OFF");
+      break;
+
     case GLFW_KEY_V:
       node->cam_.azimuth = 90.0;
       node->cam_.elevation = -20.0;
@@ -1159,6 +1190,89 @@ void MuJoCoInterfaceNode::keyCallback(GLFWwindow *window, int key, int scancode,
     case GLFW_KEY_ESCAPE:
       glfwSetWindowShouldClose(window, GLFW_TRUE);
       break;
+  }
+}
+
+// --- 笛卡尔目标标记: 半透明球 + RGB轴箭头 ---
+void MuJoCoInterfaceNode::drawTargetMarker() {
+  if (!show_target_marker_) return;
+
+  // target_pose 在 base_link 坐标系下, 需变换到 MuJoCo 世界系
+  double local_pos[3];
+  double local_mat[9];
+  {
+    std::lock_guard<std::mutex> lock(target_pose_mutex_);
+    if (!has_target_pose_) return;
+    local_pos[0] = target_pose_.pose.position.x;
+    local_pos[1] = target_pose_.pose.position.y;
+    local_pos[2] = target_pose_.pose.position.z;
+    auto &q = target_pose_.pose.orientation;
+    quatToMat(q.w, q.x, q.y, q.z, local_mat);
+  }
+
+  // 从 MuJoCo data 读取 base_link body 的世界位姿 (需持锁)
+  double base_p[3], base_m[9];
+  {
+    std::lock_guard<std::mutex> lock(sim_mutex_);
+    int base_id = mj_name2id(model_, mjOBJ_BODY, "base_link");
+    if (base_id < 0) base_id = 0;
+    std::memcpy(base_p, data_->xpos + 3 * base_id, 3 * sizeof(double));
+    std::memcpy(base_m, data_->xmat + 9 * base_id, 9 * sizeof(double));
+  }
+
+  // pos_world = base_p + base_m * local_pos
+  double pos[3];
+  for (int i = 0; i < 3; i++) {
+    pos[i] = base_p[i]
+           + base_m[i * 3 + 0] * local_pos[0]
+           + base_m[i * 3 + 1] * local_pos[1]
+           + base_m[i * 3 + 2] * local_pos[2];
+  }
+
+  // mat_world = base_m * local_mat
+  double mat[9];
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      mat[i * 3 + j] = base_m[i * 3 + 0] * local_mat[0 * 3 + j]
+                      + base_m[i * 3 + 1] * local_mat[1 * 3 + j]
+                      + base_m[i * 3 + 2] * local_mat[2 * 3 + j];
+    }
+  }
+
+  if (scene_.ngeom + 4 >= scene_.maxgeom) return;
+
+  // 球体: 半透明红
+  const float sphere_rgba[4] = {1.0f, 0.2f, 0.2f, 0.4f};
+  const mjtNum sphere_size[3] = {0.015, 0.015, 0.015};
+  mjv_initGeom(&scene_.geoms[scene_.ngeom], mjGEOM_SPHERE,
+               sphere_size, pos, nullptr, sphere_rgba);
+  scene_.geoms[scene_.ngeom].category = mjCAT_DECOR;
+  scene_.geoms[scene_.ngeom].objtype = mjOBJ_UNKNOWN;
+  scene_.geoms[scene_.ngeom].objid = -1;
+  scene_.ngeom++;
+
+  // XYZ 轴箭头 (50mm)
+  constexpr double kAxisLen = 0.05;
+  constexpr mjtNum kArrowWidth = 0.003;
+  const float axis_rgba[3][4] = {
+      {1.0f, 0.0f, 0.0f, 0.8f},
+      {0.0f, 1.0f, 0.0f, 0.8f},
+      {0.0f, 0.0f, 1.0f, 0.8f},
+  };
+  for (int ax = 0; ax < 3; ax++) {
+    // 旋转矩阵第 ax 列 = 世界坐标下的局部轴方向 (行主序: col j = mat[0*3+j], mat[1*3+j], mat[2*3+j])
+    const mjtNum to[3] = {
+        pos[0] + mat[0 * 3 + ax] * kAxisLen,
+        pos[1] + mat[1 * 3 + ax] * kAxisLen,
+        pos[2] + mat[2 * 3 + ax] * kAxisLen,
+    };
+    mjv_initGeom(&scene_.geoms[scene_.ngeom], mjGEOM_ARROW,
+                 nullptr, nullptr, nullptr, axis_rgba[ax]);
+    scene_.geoms[scene_.ngeom].category = mjCAT_DECOR;
+    scene_.geoms[scene_.ngeom].objtype = mjOBJ_UNKNOWN;
+    scene_.geoms[scene_.ngeom].objid = -1;
+    mjv_connector(&scene_.geoms[scene_.ngeom], mjGEOM_ARROW, kArrowWidth, pos, to);
+    scene_.ngeom++;
   }
 }
 

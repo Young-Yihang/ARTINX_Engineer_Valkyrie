@@ -218,6 +218,7 @@ ament_target_dependencies(mujoco_interface_node
   rclcpp
   sensor_msgs
   std_msgs
+  geometry_msgs
   ament_index_cpp
 )
 

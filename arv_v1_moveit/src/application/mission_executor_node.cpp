@@ -971,6 +971,11 @@ private:
     jog_target_pitch_ += dpitch;
     jog_target_yaw_ += dyaw;
 
+    // wrap to [-π, π]
+    jog_target_roll_ = std::remainder(jog_target_roll_, 2.0 * M_PI);
+    jog_target_pitch_ = std::remainder(jog_target_pitch_, 2.0 * M_PI);
+    jog_target_yaw_ = std::remainder(jog_target_yaw_, 2.0 * M_PI);
+
     tf2::Quaternion q;
     q.setRPY(jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
     q.normalize();
