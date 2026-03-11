@@ -1,5 +1,5 @@
 /// @file hardware_interface_node.cpp
-/// @brief Hardware serial interface — TX torques/gripper, RX joint states via Seasky protocol.
+/// @brief Hardware USB CDC interface — TX torques/gripper, RX joint states via Seasky protocol.
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -19,8 +19,8 @@ public:
   HardwareInterfaceNode()
       : Node("hardware_interface_node"), running_(false), simulation_mode_(false) {
     this->declare_parameter("serial_port", "/dev/ttyACM0");
-    this->declare_parameter("baud_rate", 921600);
-    this->declare_parameter("send_rate_hz", 200);
+    this->declare_parameter("baud_rate", 921600);  // USB CDC 忽略此值, serial_driver API 强制要求
+    this->declare_parameter("send_rate_hz", 1000);
     this->declare_parameter("gripper_rate_hz", 50);
     this->declare_parameter("simulation_mode", false);
     this->declare_parameter("force_zero_torque", false);
@@ -29,7 +29,7 @@ public:
     int baud = this->get_parameter("baud_rate").as_int();
     simulation_mode_ = this->get_parameter("simulation_mode").as_bool();
 
-    RCLCPP_INFO(this->get_logger(), "[INIT] Serial port: %s, Baud: %d", port.c_str(), baud);
+    RCLCPP_INFO(this->get_logger(), "[INIT] USB CDC device: %s (baud=%d ignored by CDC)", port.c_str(), baud);
 
     if (simulation_mode_) {
       RCLCPP_INFO(this->get_logger(), "[SIMULATION MODE] Serial TX only, no RX feedback");
@@ -40,7 +40,7 @@ public:
       RCLCPP_INFO(this->get_logger(),
                   "[INFO] Node will continue running and auto-reconnect when device available");
     } else {
-      RCLCPP_INFO(this->get_logger(), "[OK] Serial port opened: %s @ %d baud", port.c_str(), baud);
+      RCLCPP_INFO(this->get_logger(), "[OK] USB CDC device opened: %s", port.c_str());
     }
 
     initROS2Communication();
@@ -52,7 +52,7 @@ public:
     } else {
       receive_thread_ = std::thread(&HardwareInterfaceNode::receiveLoop, this);
       RCLCPP_INFO(this->get_logger(),
-                  "[OK] Hardware mode - Serial RX/TX enabled (auto-reconnect every 200ms)");
+                  "[OK] Hardware mode - USB CDC RX/TX enabled (auto-reconnect every 200ms)");
     }
 
     const int send_hz = this->get_parameter("send_rate_hz").as_int();
@@ -102,9 +102,9 @@ private:
   std::atomic<bool> running_;
   bool simulation_mode_;
 
-  // --- 串口 ---
+  // --- USB CDC (via serial_driver API) ---
   std::string device_name_;
-  uint32_t baud_rate_{0};
+  uint32_t baud_rate_{0};  // CDC 忽略, serial_driver API 要求
   std::unique_ptr<drivers::common::IoContext> io_ctx_;
   std::unique_ptr<drivers::serial_driver::SerialDriver> serial_driver_;
   std::shared_ptr<drivers::serial_driver::SerialPort> serial_port_;
@@ -171,11 +171,11 @@ private:
 
       const std::string dev = device_name_.empty() ? std::string("/dev/ttyACM0") : device_name_;
       if (std::filesystem::exists(dev)) {
-        const int baud = static_cast<int>(baud_rate_ == 0 ? 921600 : baud_rate_);
+        const int baud = static_cast<int>(baud_rate_ == 0 ? 115200 : baud_rate_);  // CDC 忽略, 占位值
         try {
           if (initSerial(dev, baud)) {
-            RCLCPP_WARN(this->get_logger(), "[RECONNECT] Serial reinitialised: %s @ %d baud",
-                        dev.c_str(), baud);
+            RCLCPP_WARN(this->get_logger(), "[RECONNECT] USB CDC reinitialised: %s",
+                        dev.c_str());
             return true;
           }
         } catch (const std::exception &e) {

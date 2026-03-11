@@ -20,9 +20,9 @@ NC='\033[0m' # No Color
 SAMPLE_TIME=3
 
 # --- 可配置参数 (改频率只改这里) ---
-CONTROL_RATE_HZ=200       # /joint_states 期望频率 (Hz)
-EFFORT_RATE_HZ=200        # /effort_controller/commands 期望频率 (Hz)
-JITTER_WARN_MS=1.0        # 抖动警告阈值 (ms), 200Hz周期=5ms
+CONTROL_RATE_HZ=1000      # /joint_states 期望频率 (Hz)
+EFFORT_RATE_HZ=1000       # /effort_controller/commands 期望频率 (Hz)
+JITTER_WARN_MS=0.2        # 抖动警告阈值 (ms), 1kHz周期=1ms
 RT_CORE=3                 # RT-PREEMPT 隔离核心编号
 
 NODE_OK=0; NODE_FAIL=0

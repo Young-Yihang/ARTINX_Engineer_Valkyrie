@@ -49,14 +49,14 @@ public:
         q_target_(6),
         state_received_(false),
         has_target_(false),
-        control_frequency_(200.0),
+        control_frequency_(1000.0),
         joint_filters_{
-            KalmanFilter1D(1.0 / 200.0),  // Joint 1
-            KalmanFilter1D(1.0 / 200.0),  // Joint 2
-            KalmanFilter1D(1.0 / 200.0),  // Joint 3
-            KalmanFilter1D(1.0 / 200.0),  // Joint 4
-            KalmanFilter1D(1.0 / 200.0),  // Joint 5
-            KalmanFilter1D(1.0 / 200.0)   // Joint 6
+            KalmanFilter1D(1.0 / 1000.0),  // Joint 1
+            KalmanFilter1D(1.0 / 1000.0),  // Joint 2
+            KalmanFilter1D(1.0 / 1000.0),  // Joint 3
+            KalmanFilter1D(1.0 / 1000.0),  // Joint 4
+            KalmanFilter1D(1.0 / 1000.0),  // Joint 5
+            KalmanFilter1D(1.0 / 1000.0)   // Joint 6
         },
         q_dot_filtered_(6),
         kalman_filter_enabled_(false)
@@ -1020,7 +1020,7 @@ void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_
     vel_fdb[i] = qd_actual(i);
   }
 
-  double dt = 1.0 / control_frequency_;  // 200Hz -> 0.005s
+  double dt = 1.0 / control_frequency_;  // 1kHz -> 0.001s
   cascade_pid_->compute(pos_ref, pos_fdb, vel_fdb, dt, torque_out);
 
   // 输出力矩并进行安全限幅
@@ -1082,7 +1082,7 @@ void TorqueControllerActionServer::controlLoop() {
     double period = (now - last_control_loop_time_).seconds();
     if (period > max_control_period_sec_) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                           "[SAFETY] Control loop slow: %.1f ms (expected 5ms @ 200Hz)",
+                           "[SAFETY] Control loop slow: %.1f ms (expected 1ms @ 1kHz)",
                            period * 1000.0);
     }
   }
@@ -1091,8 +1091,8 @@ void TorqueControllerActionServer::controlLoop() {
   // --- Health monitoring ---
   control_loop_count_++;
 
-  // Print health status every 5 seconds (1000 loops at 200Hz)
-  if (control_loop_count_ % 1000 == 0) {
+  // Print health status every 5 seconds (5000 loops at 1kHz)
+  if (control_loop_count_ % 5000 == 0) {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
     double time_since_state =
         state_received_ ? (this->now() - last_joint_state_time_).seconds() : -1.0;

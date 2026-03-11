@@ -1,5 +1,5 @@
 /// @file serial_protocol.hpp
-/// @brief Seasky protocol: [SOF][Len][CRC8][CmdID][Flags][Payload][CRC16]
+/// @brief Seasky protocol over USB CDC: [SOF][Len][CRC8][CmdID][Flags][Payload][CRC16]
 #ifndef SERIAL_PROTOCOL_HPP
 #define SERIAL_PROTOCOL_HPP
 
@@ -9,14 +9,14 @@
 #include <vector>
 
 #include "Crc.hpp"
-// TX: 0x0002 torque 200Hz 24B, 0x0004 gripper 50Hz 1B, 0x0006 status 10Hz 4B
-// RX: 0x0001 feedback 200Hz 84B, 0x0005 task_cmd on-demand 3B
+// TX: 0x0002 torque 1kHz 24B, 0x0004 gripper 50Hz 1B, 0x0006 status 10Hz 4B
+// RX: 0x0001 feedback 1kHz 84B, 0x0005 task_cmd on-demand 3B
 
 namespace SerialProtocol {
 constexpr uint8_t SOF = 0xA5;
 
-constexpr uint16_t CMD_JOINT_FEEDBACK = 0x0001;   // RX 7-joint state 200Hz
-constexpr uint16_t CMD_TORQUE_CONTROL = 0x0002;   // TX 6-axis torque 200Hz
+constexpr uint16_t CMD_JOINT_FEEDBACK = 0x0001;   // RX 7-joint state 1kHz
+constexpr uint16_t CMD_TORQUE_CONTROL = 0x0002;   // TX 6-axis torque 1kHz
 constexpr uint16_t CMD_GRIPPER_CONTROL = 0x0004;  // TX gripper flag 50Hz
 constexpr uint16_t CMD_TASK_COMMAND = 0x0005;     // RX task cmd 3B
 constexpr uint16_t CMD_ARM_STATUS = 0x0006;       // TX arm status 4B 10Hz

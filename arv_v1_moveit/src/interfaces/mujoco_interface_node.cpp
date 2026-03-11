@@ -33,7 +33,7 @@ public:
       : Node("mujoco_interface"),
         model_(nullptr),
         data_(nullptr),
-        sim_frequency_(200.0),
+        sim_frequency_(1000.0),
         received_first_command_(false),
         visualization_only_(false) {
     RCLCPP_INFO(this->get_logger(), "[START] MuJoCo interface node starting");
@@ -285,7 +285,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
       "    <compiler meshdir=\"" +
       mesh_dir_ +
       "\" strippath=\"false\"/>\n"
-      "    <option timestep=\"0.005\"/>\n"
+      "    <option timestep=\"0.001\"/>\n"
       "    <size nconmax=\"0\" njmax=\"0\"/>\n"
       "  </mujoco>\n";
 

@@ -413,7 +413,7 @@ start_serial_mode() {
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
 
     update_status "SerialInterface ($DETECTED_SERIAL_DEVICE)"
-    start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 2
+    start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE" 2
 
     update_status "MuJoCo (数字孪生)"
     start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true" 2
