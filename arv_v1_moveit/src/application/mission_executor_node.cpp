@@ -36,8 +36,7 @@
 namespace ControlMode {
 constexpr uint8_t RELAX = 0;      // 全零力矩
 constexpr uint8_t FREEDRIVE = 1;  // 仅重力补偿
-constexpr uint8_t HOLD = 2;       // 重力补偿+PD
-constexpr uint8_t EXECUTE = 3;    // 轨迹执行
+constexpr uint8_t ARMED = 2;     // 就绪: G(q)+PD 保持, 可接受轨迹执行
 }  // namespace ControlMode
 
 using LoadTrajectory = arv_v1_interfaces::srv::LoadTrajectory;
@@ -123,9 +122,9 @@ public:
 
     control_mode_pub_ = create_publisher<std_msgs::msg::UInt8>("/control_mode", 10);
 
-    // [FIX] 立即发布 HOLD，防止 torque_controller 默认 RELAX 导致上电掉落。
+    // [FIX] 立即发布 ARMED，防止 torque_controller 默认 RELAX 导致上电掉落。
     // torque_controller 在 sleep 2 前已启动，此时订阅已建立。
-    publishControlMode(ControlMode::HOLD);
+    publishControlMode(ControlMode::ARMED);
 
     log("Checking services (non-blocking)...", COLOR_PAIR_DEFAULT);
     if (!load_client_->wait_for_service(2s)) {
@@ -138,7 +137,7 @@ public:
     fetchTrajectories();
 
     // 重发: 覆盖 wait_for_service 期间可能重启的节点
-    publishControlMode(ControlMode::HOLD);
+    publishControlMode(ControlMode::ARMED);
     log("Mission Executor v4.0 ready", COLOR_PAIR_SUCCESS);
   }
 
@@ -257,15 +256,15 @@ private:
 
   // --- 控制模式 ---
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr control_mode_pub_;
-  uint8_t control_mode_ = ControlMode::HOLD;
+  uint8_t control_mode_ = ControlMode::ARMED;
 
   void publishControlMode(uint8_t mode) {
     control_mode_ = mode;
     auto msg = std_msgs::msg::UInt8();
     msg.data = mode;
     control_mode_pub_->publish(msg);
-    static const char* names[] = {"RELAX", "FREEDRIVE", "HOLD", "EXECUTE"};
-    log(std::string("[MODE] -> ") + (mode <= 3 ? names[mode] : "?"),
+    static const char* names[] = {"RELAX", "FREEDRIVE", "ARMED"};
+    log(std::string("[MODE] -> ") + (mode <= ControlMode::ARMED ? names[mode] : "?"),
         mode == 0 ? COLOR_PAIR_WARNING : COLOR_PAIR_SUCCESS);
   }
 
@@ -544,7 +543,7 @@ private:
       case 0x50:  // SET_CONTROL_MODE
         snprintf(log_buf, sizeof(log_buf), "[HW] SET_CONTROL_MODE param=%u", param);
         logOk(log_buf);
-        if (param <= ControlMode::EXECUTE) {
+        if (param <= ControlMode::ARMED) {
           publishControlMode(param);
         } else {
           logWarn("[HW] Invalid control mode value");
@@ -558,8 +557,8 @@ private:
   }
 
   void executeTrajectoryByKey(const std::string& name) {
-    if (control_mode_ != ControlMode::HOLD) {
-      logWarn("须先切到 HOLD 模式才能执行: " + name);
+    if (control_mode_ != ControlMode::ARMED) {
+      logWarn("须先切到 ARMED 模式才能执行: " + name);
       return;
     }
     bool expected = false;
@@ -612,12 +611,12 @@ private:
     else if (k == '1')
       publishControlMode(ControlMode::FREEDRIVE);
     else if (k == '2')
-      publishControlMode(ControlMode::HOLD);
+      publishControlMode(ControlMode::ARMED);
   }
 
   void executeCurrentState() {
-    if (control_mode_ != ControlMode::HOLD) {
-      logWarn("须先切到 HOLD 模式 [2] 才能执行轨迹");
+    if (control_mode_ != ControlMode::ARMED) {
+      logWarn("须先切到 ARMED 模式 [2] 才能执行轨迹");
       return;
     }
     if (current_idx_ >= states_.size()) {
@@ -1054,12 +1053,12 @@ private:
     drawTab("[G] Gripper", View::GRIPPER);
 
     {
-      static const char* mode_labels[] = {"RELAX", "FREEDRIVE", "HOLD", "EXECUTE"};
+      static const char* mode_labels[] = {"RELAX", "FREEDRIVE", "ARMED"};
       int mode_color = (control_mode_ == ControlMode::RELAX)     ? COLOR_PAIR_ERROR
                      : (control_mode_ == ControlMode::FREEDRIVE) ? COLOR_PAIR_WARNING
                                                                  : COLOR_PAIR_SUCCESS;
       attron(A_BOLD | COLOR_PAIR(mode_color));
-      printw(" [%s] ", control_mode_ <= 3 ? mode_labels[control_mode_] : "?");
+      printw(" [%s] ", control_mode_ <= ControlMode::ARMED ? mode_labels[control_mode_] : "?");
       attroff(A_BOLD | COLOR_PAIR(mode_color));
     }
 

@@ -52,8 +52,7 @@ enum class ArmState : uint8_t {
 enum class ControlMode : uint8_t {
   RELAX = 0,      // zero torque
   FREEDRIVE = 1,  // G(q) only
-  HOLD = 2,       // G(q) + PD
-  EXECUTE = 3,    // full dynamics (action server)
+  ARMED = 2,      // G(q) + PD hold, accepts trajectory execution
 };
 
 enum class ArmError : uint8_t {
