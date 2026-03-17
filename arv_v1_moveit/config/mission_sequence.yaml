@@ -24,7 +24,7 @@
 
 mission:
   name: "pick_and_deliver"
-  description: "取矿+兑矿 完整流程"
+  description: "取物+存放 完整流程"
 
   # 复位时执行的轨迹 (回 Home 位), 为空则直接复位索引不执行轨迹
   reset_trajectory: ""
@@ -34,74 +34,74 @@ mission:
       trajectory: ""
       description: "Home位 等待指令"
 
-    - id: "PICK_ORE_1_FORWARD"
+    - id: "PICK_OBJ_1_FORWARD"
       trajectory: ""
       description: "取1号位能量单元"
 
-    - id: "PICK_ORE_1_OUT"
+    - id: "PICK_OBJ_1_OUT"
       trajectory: ""
       description: "取出1号位能量单元"
 
     - id: "DELIVER_1"
       trajectory: ""
-      description: "送到兑矿站"
+      description: "送到存放点"
 
-    - id: "PICK_ORE_2_FORWARD"
+    - id: "PICK_OBJ_2_FORWARD"
       trajectory: ""
       description: "取2号位能量单元"
 
-    - id: "PICK_ORE_2_OUT"
+    - id: "PICK_OBJ_2_OUT"
       trajectory: ""
       description: "取出2号位能量单元"
 
     - id: "DELIVER_2"
       trajectory: ""
-      description: "送到兑矿站"
+      description: "送到存放点"
 
-    - id: "PICK_ORE_3_FORWARD"
+    - id: "PICK_OBJ_3_FORWARD"
       trajectory: ""
       description: "取3号位能量单元"
 
-    - id: "PICK_ORE_3_OUT"
+    - id: "PICK_OBJ_3_OUT"
       trajectory: ""
       description: "取出3号位能量单元"
 
     - id: "DELIVER_3"
       trajectory: ""
-      description: "送到兑矿站"
+      description: "送到存放点"
 
-    - id: "PICK_ORE_4_FORWARD"
+    - id: "PICK_OBJ_4_FORWARD"
       trajectory: ""
       description: "取4号位能量单元"
 
-    - id: "PICK_ORE_4_OUT"
+    - id: "PICK_OBJ_4_OUT"
       trajectory: ""
       description: "取出4号位能量单元"
 
     - id: "DELIVER_4"
       trajectory: ""
-      description: "送到兑矿站"
+      description: "送到存放点"
 
-    - id: "PICK_ORE_5_FORWARD"
+    - id: "PICK_OBJ_5_FORWARD"
       trajectory: ""
       description: "取5号位能量单元"
 
-    - id: "PICK_ORE_5_OUT"
+    - id: "PICK_OBJ_5_OUT"
       trajectory: ""
       description: "取出5号位能量单元"
 
     - id: "DELIVER_5"
       trajectory: ""
-      description: "送到兑矿站"
+      description: "送到存放点"
 
-    - id: "PICK_ORE_6_FORWARD"
+    - id: "PICK_OBJ_6_FORWARD"
       trajectory: ""
       description: "取6号位能量单元"
 
-    - id: "PICK_ORE_6_OUT"
+    - id: "PICK_OBJ_6_OUT"
       trajectory: ""
       description: "取出6号位能量单元"
 
     - id: "DELIVER_6"
       trajectory: ""
-      description: "送到兑矿站"
+      description: "送到存放点"

@@ -502,24 +502,24 @@ private:
         logOk("[HW] RESET_HOME");
         resetToIdle();
         break;
-      case 0x10:  // PICK_ORE
-        snprintf(log_buf, sizeof(log_buf), "[HW] PICK_ORE ore_id=%u", param);
+      case 0x10:  // PICK_OBJ
+        snprintf(log_buf, sizeof(log_buf), "[HW] PICK_OBJ obj_id=%u", param);
         logOk(log_buf);
-        executeTrajectoryByKey("pick_ore_" + std::to_string(param));
+        executeTrajectoryByKey("pick_obj_" + std::to_string(param));
         break;
-      case 0x11:  // STOW_ORE
-        snprintf(log_buf, sizeof(log_buf), "[HW] STOW_ORE slot_id=%u", param);
+      case 0x11:  // STOW_OBJ
+        snprintf(log_buf, sizeof(log_buf), "[HW] STOW_OBJ slot_id=%u", param);
         logOk(log_buf);
         executeTrajectoryByKey("stow_slot_" + std::to_string(param));
         break;
-      case 0x20:  // MOVE_TO_EXCHANGE
-        logOk("[HW] MOVE_TO_EXCHANGE");
-        executeTrajectoryByKey("move_to_exchange");
+      case 0x20:  // MOVE_TO_DEPOSIT
+        logOk("[HW] MOVE_TO_DEPOSIT");
+        executeTrajectoryByKey("move_to_deposit");
         break;
-      case 0x21:  // EXECUTE_EXCHANGE
-        snprintf(log_buf, sizeof(log_buf), "[HW] EXECUTE_EXCHANGE slot_id=%u", param);
+      case 0x21:  // EXECUTE_DEPOSIT
+        snprintf(log_buf, sizeof(log_buf), "[HW] EXECUTE_DEPOSIT slot_id=%u", param);
         logOk(log_buf);
-        executeTrajectoryByKey("exchange_slot_" + std::to_string(param));
+        executeTrajectoryByKey("deposit_slot_" + std::to_string(param));
         break;
       case 0x30:  // NEXT_STEP
         logOk("[HW] NEXT_STEP");

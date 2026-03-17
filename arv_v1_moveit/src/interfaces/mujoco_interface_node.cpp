@@ -471,7 +471,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     mjcf_string = robot_part + obs_part;
   }
 
-  // 夹爪↔矿石 硬接触 pair: 覆盖默认 solref/solimp, 不影响矿石↔框架
+  // 夹爪↔目标 硬接触 pair: 覆盖默认 solref/solimp, 不影响目标↔框架
   {
     std::vector<std::string> vcol_names;
     size_t p = 0;

@@ -28,9 +28,9 @@ constexpr size_t NUM_ALL_JOINTS = 7;  // arm + gripper
 enum class TaskCmd : uint8_t {
   EMERGENCY_STOP = 0x01,    // param ignored
   RESET_HOME = 0x02,        // param ignored
-  PICK_ORE = 0x10,          // param = ore_id (0-5)
-  STOW_ORE = 0x11,          // param = slot_id (0-5)
-  EXCHANGE_MODE = 0x20,     // param: 1=enter, 0=exit
+  PICK_OBJ = 0x10,          // param = obj_id (0-5)
+  STOW_OBJ = 0x11,          // param = slot_id (0-5)
+  DEPOSIT_MODE = 0x20,      // param: 1=enter, 0=exit
   NEXT_STEP = 0x30,         // param ignored
   ABORT_TASK = 0x31,        // param ignored, hold position
   GRIPPER_CMD = 0x40,       // param = GripperAction
