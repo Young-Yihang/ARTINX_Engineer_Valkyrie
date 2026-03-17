@@ -29,7 +29,7 @@
         pos_Ki: 0.0
         pos_Kd: 0.0       # Kd_eq = (0+1)*1 = 1.0 = 原Kd
         max_integral_pos: 2.0
-        vel_Kp: 1.0        # 透传: 内环天然阻尼=1.0
+        vel_Kp: 3.0        # 透传: 内环天然阻尼=1.0
         vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0
@@ -39,7 +39,7 @@
         pos_Ki: 0.0
         pos_Kd: 0.0
         max_integral_pos: 2.0
-        vel_Kp: 1.0
+        vel_Kp: 2.0
         vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0
@@ -49,7 +49,7 @@
         pos_Ki: 0.0
         pos_Kd: 0.0
         max_integral_pos: 2.0
-        vel_Kp: 1.0
+        vel_Kp: 2.0
         vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0
@@ -65,21 +65,21 @@
         vel_limit: 10.0
 
       joint_5:
-        pos_Kp: 1.0
+        pos_Kp: 50.0
         pos_Ki: 0.0
         pos_Kd: 0.0
         max_integral_pos: 0.5
-        vel_Kp: 1.0
+        vel_Kp: 3.0
         vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0
 
       joint_6:
-        pos_Kp: 1.0
+        pos_Kp: 50.0
         pos_Ki: 0.0
         pos_Kd: 0.0
         max_integral_pos: 0.3
-        vel_Kp: 1.0
+        vel_Kp: 2.0
         vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0

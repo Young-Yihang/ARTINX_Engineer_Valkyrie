@@ -19,4 +19,4 @@ moveit_simple_controller_manager:
       - joint_6
 
 trajectory_execution:
-  allowed_start_tolerance: 0.1 # 误差大约10度
+  allowed_start_tolerance: 0.4 # 误差大约40度

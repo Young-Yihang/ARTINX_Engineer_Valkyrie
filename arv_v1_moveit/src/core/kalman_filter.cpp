@@ -22,7 +22,7 @@ void KalmanFilter1D::predict() {
 
 void KalmanFilter1D::update(double q_measured, double qd_measured) {
   Eigen::Vector2d z(q_measured, qd_measured);
-  Eigen::Vector2d y = z - H_ * x_;           // innovation
+  Eigen::Vector2d y = z - H_ * x_;  // innovation
   Eigen::Matrix2d S = H_ * P_ * H_.transpose() + R_;
   Eigen::Matrix2d K = P_ * H_.transpose() * S.inverse();
   x_ = x_ + K * y;

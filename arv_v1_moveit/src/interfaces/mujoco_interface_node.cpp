@@ -11,11 +11,11 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <map>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <set>
 #include <sstream>
-#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <string>
 #include <thread>
@@ -237,9 +237,15 @@ private:
   bool show_target_marker_ = true;  // 'T' 键切换
 
   static void quatToMat(double qw, double qx, double qy, double qz, double mat[9]) {
-    mat[0] = 1 - 2*(qy*qy + qz*qz);  mat[1] = 2*(qx*qy - qz*qw);      mat[2] = 2*(qx*qz + qy*qw);
-    mat[3] = 2*(qx*qy + qz*qw);      mat[4] = 1 - 2*(qx*qx + qz*qz);  mat[5] = 2*(qy*qz - qx*qw);
-    mat[6] = 2*(qx*qz - qy*qw);      mat[7] = 2*(qy*qz + qx*qw);      mat[8] = 1 - 2*(qx*qx + qy*qy);
+    mat[0] = 1 - 2 * (qy * qy + qz * qz);
+    mat[1] = 2 * (qx * qy - qz * qw);
+    mat[2] = 2 * (qx * qz + qy * qw);
+    mat[3] = 2 * (qx * qy + qz * qw);
+    mat[4] = 1 - 2 * (qx * qx + qz * qz);
+    mat[5] = 2 * (qy * qz - qx * qw);
+    mat[6] = 2 * (qx * qz - qy * qw);
+    mat[7] = 2 * (qy * qz + qx * qw);
+    mat[8] = 1 - 2 * (qx * qx + qy * qy);
   }
 
   void drawTargetMarker();
@@ -344,10 +350,10 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
       "ctrlrange=\"-20 20\"/>\n"
       "    <motor name=\"actuator_gripper\" joint=\"joint_gripper1\" gear=\"1\" "
       "ctrllimited=\"true\" "
-      "ctrlrange=\"-5 5\"/>\n"
+      "ctrlrange=\"-70 70\"/>\n"
       "    <motor name=\"actuator_gripper2\" joint=\"joint_gripper2\" gear=\"1\" "
       "ctrllimited=\"true\" "
-      "ctrlrange=\"-5 5\"/>\n"
+      "ctrlrange=\"-70 70\"/>\n"
       "  </actuator>\n";
 
   size_t mujoco_end = mjcf_string.find("</mujoco>");
@@ -419,7 +425,77 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     inject_contype(obs_part,
                    " contype=\"4\" conaffinity=\"1\" friction=\"0.001 0.001 0.0001\""
                    " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"");
+
+    // 夹爪碰撞替换: mesh → 纯视觉, 新增 box → 碰撞体
+    // mesh 碰撞面不规则导致接触力不稳定，box 提供干净的平面接触
+    for (const auto &grip_name : {"link_gripper1", "link_gripper2"}) {
+      std::string body_tag = "<body name=\"" + std::string(grip_name) + "\"";
+      size_t body_pos = robot_part.find(body_tag);
+      if (body_pos == std::string::npos) continue;
+
+      // 找到该 body 内的 geom (mesh)，将其碰撞组清零
+      size_t geom_pos = robot_part.find("<geom", body_pos);
+      if (geom_pos == std::string::npos) continue;
+      size_t geom_end = robot_part.find("/>", geom_pos);
+      if (geom_end == std::string::npos) continue;
+
+      // 替换 contype="1" → "0", conaffinity="4" → "0" (纯视觉)
+      std::string geom_str = robot_part.substr(geom_pos, geom_end + 2 - geom_pos);
+      std::string orig_geom = geom_str;
+      auto replace_attr = [](std::string &s, const std::string &attr, const std::string &val) {
+        size_t p = s.find(attr + "=\"");
+        if (p == std::string::npos) return;
+        size_t v_start = p + attr.size() + 2;
+        size_t v_end = s.find("\"", v_start);
+        s.replace(v_start, v_end - v_start, val);
+      };
+      replace_attr(geom_str, "contype", "0");
+      replace_attr(geom_str, "conaffinity", "0");
+      robot_part.replace(geom_pos, orig_geom.size(), geom_str);
+
+      // 在 geom 后插入 box 碰撞体
+      // gripper1: 内侧面朝 +Y, gripper2: 内侧面朝 -Y (对称)
+      bool is_grip1 = (std::string(grip_name) == "link_gripper1");
+      double box_cy = is_grip1 ? -0.035 : 0.054;  // box 中心 Y (靠内侧)
+      size_t insert_pos = geom_pos + geom_str.size();
+      char box_buf[512];
+      std::snprintf(box_buf, sizeof(box_buf),
+                    "\n      <geom name=\"%s_col\" type=\"box\" size=\"0.012 0.012 0.055\""
+                    " pos=\"0 %.4f 0.118\" contype=\"1\" conaffinity=\"4\""
+                    " friction=\"5.0 0.1 0.01\" solref=\"0.001 1\""
+                    " solimp=\"0.999 0.999 0.0001 0.5 2\" rgba=\"1 0.3 0.3 0.3\"/>",
+                    grip_name, box_cy);
+      robot_part.insert(insert_pos, box_buf);
+    }
+
     mjcf_string = robot_part + obs_part;
+  }
+
+  // 夹爪↔矿石 硬接触 pair: 覆盖默认 solref/solimp, 不影响矿石↔框架
+  {
+    std::vector<std::string> vcol_names;
+    size_t p = 0;
+    while ((p = mjcf_string.find("name=\"", p)) != std::string::npos) {
+      size_t ns = p + 6;
+      size_t ne = mjcf_string.find("\"", ns);
+      std::string name = mjcf_string.substr(ns, ne - ns);
+      if (name.find("_vcol_") != std::string::npos) vcol_names.push_back(name);
+      p = ne + 1;
+    }
+    if (!vcol_names.empty()) {
+      std::ostringstream contact_ss;
+      contact_ss << "\n  <contact>\n";
+      for (const auto &vcol : vcol_names) {
+        for (const auto &grip : {"link_gripper1_col", "link_gripper2_col"}) {
+          contact_ss << "    <pair geom1=\"" << grip << "\" geom2=\"" << vcol << "\""
+                     << " solref=\"0.001 1\" solimp=\"0.999 0.999 0.0001 0.5 2\""
+                     << " friction=\"5.0 5.0 0.1 0.1 0.01\"/>\n";
+        }
+      }
+      contact_ss << "  </contact>\n";
+      size_t muj_end = mjcf_string.find("</mujoco>");
+      mjcf_string.insert(muj_end, contact_ss.str());
+    }
   }
 
   std::string final_mjcf_path = temp_dir_ / ".mujoco_final.xml";
@@ -793,7 +869,7 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
           // static:    ct=2       ca=1       → 碰臂
           // 非弹性碰撞: solref 5ms+过阻尼, solimp 99%吸收
           if (graspable) {
-            gs << " mass=\"0\" rgba=\"" << rgba
+            gs << " name=\"" << id << "_vcol_" << si << "\"" << " mass=\"0\" rgba=\"" << rgba
                << "\" contype=\"8\" conaffinity=\"3\" friction=\"0.01 0.005 0.0001\""
                << " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"/>\n";
           } else {
@@ -1058,8 +1134,9 @@ void MuJoCoInterfaceNode::renderLoop() {
                  0.5f, 0.0f);
       }
 
-      mjr_text(mjFONT_NORMAL, "[Space]Pause [H]HideUI [R]Reset [C]Contacts [F]Forces [T]Target [ESC]Exit",
-               &con_, margin_x, 10.0f / viewport.height, 0.7f, 0.7f, 0.7f);
+      mjr_text(mjFONT_NORMAL,
+               "[Space]Pause [H]HideUI [R]Reset [C]Contacts [F]Forces [T]Target [ESC]Exit", &con_,
+               margin_x, 10.0f / viewport.height, 0.7f, 0.7f, 0.7f);
     }
 
     glfwSwapBuffers(window_);
@@ -1223,19 +1300,17 @@ void MuJoCoInterfaceNode::drawTargetMarker() {
   // pos_world = base_p + base_m * local_pos
   double pos[3];
   for (int i = 0; i < 3; i++) {
-    pos[i] = base_p[i]
-           + base_m[i * 3 + 0] * local_pos[0]
-           + base_m[i * 3 + 1] * local_pos[1]
-           + base_m[i * 3 + 2] * local_pos[2];
+    pos[i] = base_p[i] + base_m[i * 3 + 0] * local_pos[0] + base_m[i * 3 + 1] * local_pos[1] +
+             base_m[i * 3 + 2] * local_pos[2];
   }
 
   // mat_world = base_m * local_mat
   double mat[9];
   for (int i = 0; i < 3; i++) {
     for (int j = 0; j < 3; j++) {
-      mat[i * 3 + j] = base_m[i * 3 + 0] * local_mat[0 * 3 + j]
-                      + base_m[i * 3 + 1] * local_mat[1 * 3 + j]
-                      + base_m[i * 3 + 2] * local_mat[2 * 3 + j];
+      mat[i * 3 + j] = base_m[i * 3 + 0] * local_mat[0 * 3 + j] +
+                       base_m[i * 3 + 1] * local_mat[1 * 3 + j] +
+                       base_m[i * 3 + 2] * local_mat[2 * 3 + j];
     }
   }
 
@@ -1244,8 +1319,7 @@ void MuJoCoInterfaceNode::drawTargetMarker() {
   // 球体: 半透明红
   const float sphere_rgba[4] = {1.0f, 0.2f, 0.2f, 0.4f};
   const mjtNum sphere_size[3] = {0.015, 0.015, 0.015};
-  mjv_initGeom(&scene_.geoms[scene_.ngeom], mjGEOM_SPHERE,
-               sphere_size, pos, nullptr, sphere_rgba);
+  mjv_initGeom(&scene_.geoms[scene_.ngeom], mjGEOM_SPHERE, sphere_size, pos, nullptr, sphere_rgba);
   scene_.geoms[scene_.ngeom].category = mjCAT_DECOR;
   scene_.geoms[scene_.ngeom].objtype = mjOBJ_UNKNOWN;
   scene_.geoms[scene_.ngeom].objid = -1;
@@ -1260,14 +1334,15 @@ void MuJoCoInterfaceNode::drawTargetMarker() {
       {0.0f, 0.0f, 1.0f, 0.8f},
   };
   for (int ax = 0; ax < 3; ax++) {
-    // 旋转矩阵第 ax 列 = 世界坐标下的局部轴方向 (行主序: col j = mat[0*3+j], mat[1*3+j], mat[2*3+j])
+    // 旋转矩阵第 ax 列 = 世界坐标下的局部轴方向 (行主序: col j = mat[0*3+j], mat[1*3+j],
+    // mat[2*3+j])
     const mjtNum to[3] = {
         pos[0] + mat[0 * 3 + ax] * kAxisLen,
         pos[1] + mat[1 * 3 + ax] * kAxisLen,
         pos[2] + mat[2 * 3 + ax] * kAxisLen,
     };
-    mjv_initGeom(&scene_.geoms[scene_.ngeom], mjGEOM_ARROW,
-                 nullptr, nullptr, nullptr, axis_rgba[ax]);
+    mjv_initGeom(&scene_.geoms[scene_.ngeom], mjGEOM_ARROW, nullptr, nullptr, nullptr,
+                 axis_rgba[ax]);
     scene_.geoms[scene_.ngeom].category = mjCAT_DECOR;
     scene_.geoms[scene_.ngeom].objtype = mjOBJ_UNKNOWN;
     scene_.geoms[scene_.ngeom].objid = -1;

@@ -33,7 +33,9 @@ private:
   std::unique_ptr<KDL::ChainFkSolverPos_recursive> fk_solver_;
   std::unique_ptr<KDL::ChainIkSolverPos_LMA> ik_solver_;
 
-  KDL::JntArray q_current_{kArmJoints};  // IK seed
+  KDL::JntArray q_current_{kArmJoints};  // 反馈关节角 (jointStateCallback写)
+  KDL::JntArray q_last_target_{kArmJoints};  // 上一帧IK输出，用作seed+限幅基准，避免跟踪误差累积
+  bool has_last_target_ = false;
   std::mutex js_mutex_;
   bool has_joint_state_ = false;
 
@@ -188,7 +190,8 @@ void CartesianControllerNode::poseTargetCallback(
   KDL::JntArray q_seed(kArmJoints), q_result(kArmJoints);
   {
     std::lock_guard<std::mutex> lock(js_mutex_);
-    q_seed = q_current_;
+    // 优先用上一帧IK输出做seed，避免跟踪误差(带载下垂)被反馈进IK链路
+    q_seed = has_last_target_ ? q_last_target_ : q_current_;
   }
 
   int ret = ik_solver_->CartToJnt(q_seed, target_frame, q_result);
@@ -198,7 +201,7 @@ void CartesianControllerNode::poseTargetCallback(
     return;
   }
 
-  // 限幅防 IK 多解跳变: 0.005m步长/0.5m臂展≈0.01rad, ×10裕量=0.1; J4/J6腕部放宽0.2
+  // 限幅防 IK 多解跳变: 基于上一帧target而非q_actual
   static constexpr double max_joint_step[] = {0.1, 0.1, 0.1, 0.2, 0.1, 0.2};  // rad/frame @10Hz
   std_msgs::msg::Float64MultiArray target_msg;
   target_msg.data.resize(kArmJoints);
@@ -209,7 +212,9 @@ void CartesianControllerNode::poseTargetCallback(
     } else {
       target_msg.data[i] = q_result(i);
     }
+    q_last_target_(i) = target_msg.data[i];
   }
+  has_last_target_ = true;
   joint_target_pub_->publish(target_msg);
 }
 

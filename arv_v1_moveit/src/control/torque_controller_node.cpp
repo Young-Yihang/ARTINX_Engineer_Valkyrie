@@ -29,14 +29,13 @@
 namespace ControlMode {
 constexpr uint8_t RELAX = 0;      // 全零力矩
 constexpr uint8_t FREEDRIVE = 1;  // 仅重力补偿
-constexpr uint8_t ARMED = 2;     // 就绪: G(q)+PD 保持, 可接受轨迹执行
+constexpr uint8_t ARMED = 2;      // 就绪: G(q)+PD 保持, 可接受轨迹执行
 }  // namespace ControlMode
 
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GoalHandleFJT = rclcpp_action::ServerGoalHandle<FollowJointTrajectory>;
 
-class TorqueControllerActionServer : public rclcpp::Node
-{
+class TorqueControllerActionServer : public rclcpp::Node {
   static constexpr int kArmJoints = 6;  // 6-DOF arm
   static constexpr int kAllJoints = 7;  // 6-DOF arm + 1 gripper
 public:
@@ -214,8 +213,7 @@ public:
 
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
         "/joint_states", 10,
-        std::bind(&TorqueControllerActionServer::jointStateCallback,
-                  this, std::placeholders::_1));
+        std::bind(&TorqueControllerActionServer::jointStateCallback, this, std::placeholders::_1));
 
     action_server_ = rclcpp_action::create_server<FollowJointTrajectory>(
         this, "ARM_controller/follow_joint_trajectory",
@@ -297,8 +295,7 @@ private:
   size_t control_loop_count_ = 0;
   rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_;
-  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
-      trajectory_forward_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_forward_pub_;
   double control_frequency_;
 
   // 安全参数
@@ -340,7 +337,7 @@ private:
       0.0;  // 夹爪位置 (state_mutex_ 保护, jointStateCallback写/controlLoop读)
 
   void computePayloadCompensation(const KDL::JntArray &q, double gripper_pos, double gripper_force,
-                                    KDL::JntArray &tau_out);
+                                  KDL::JntArray &tau_out);
 
   // --- 摩擦前馈: τ_friction = fc·fal(q̇,α,δ) + fv·q̇ ---
   // fal 平滑库仑摩擦 sign() 跳变，避免零速极限环
@@ -1061,8 +1058,8 @@ bool TorqueControllerActionServer::safeTorquePublish(const KDL::JntArray &tau_ar
       emergencyStop("Non-finite torque detected");
       return false;
     }
-    double limit =
-        (i < static_cast<int>(max_torque_per_joint_.size())) ? max_torque_per_joint_[i] : max_torque_default_;
+    double limit = (i < static_cast<int>(max_torque_per_joint_.size())) ? max_torque_per_joint_[i]
+                                                                        : max_torque_default_;
     msg.data[i] = std::clamp(tau_arm(i), -limit, limit);
     if (std::abs(tau_arm(i)) > limit) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
@@ -1104,11 +1101,10 @@ void TorqueControllerActionServer::controlLoop() {
     static const char *mode_names[] = {"RELAX", "FREEDRIVE", "ARMED"};
     uint8_t m = control_mode_.load(std::memory_order_acquire);
     const char *mode_str = (m <= ControlMode::ARMED) ? mode_names[m] : "UNKNOWN";
-    RCLCPP_INFO(this->get_logger(),
-                "[HEALTH] Loop #%zu | Mode: %s%s | State age: %.1f ms | Kalman: %s",
-                control_loop_count_, mode_str,
-                is_executing_.load(std::memory_order_acquire) ? "+EXEC" : "",
-                time_since_state * 1000.0, kalman_filter_enabled_ ? "ON" : "OFF");
+    RCLCPP_INFO(
+        this->get_logger(), "[HEALTH] Loop #%zu | Mode: %s%s | State age: %.1f ms | Kalman: %s",
+        control_loop_count_, mode_str, is_executing_.load(std::memory_order_acquire) ? "+EXEC" : "",
+        time_since_state * 1000.0, kalman_filter_enabled_ ? "ON" : "OFF");
   }
 
   bool executing = is_executing_.load(std::memory_order_acquire);
@@ -1364,8 +1360,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
         RCLCPP_INFO(this->get_logger(),
                     "[CONFIG] Measurement noise updated: R_pos=%.1e, R_vel=%.1e", R_pos, R_vel);
       }
-    }
-    else if (name.find("cascade_pid.joint_") == 0) {
+    } else if (name.find("cascade_pid.joint_") == 0) {
       size_t first_dot = name.find('.', 13);
       if (first_dot == std::string::npos) continue;
 
@@ -1399,8 +1394,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
         RCLCPP_INFO(this->get_logger(), "[CONFIG] Cascade PID Joint %d updated: %s.%s = %.2f",
                     joint_idx + 1, loop_type.c_str(), gain_type.c_str(), new_value);
       }
-    }
-    else if (name == "payload.enabled") {
+    } else if (name == "payload.enabled") {
       payload_compensation_enabled_ = param.as_bool();
       RCLCPP_INFO(this->get_logger(), "[PAYLOAD] %s",
                   payload_compensation_enabled_ ? "ENABLED" : "DISABLED");
@@ -1414,8 +1408,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
     } else if (name == "payload.gripper_pos_threshold") {
       payload_pos_threshold_ = param.as_double();
       RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Pos threshold: %.3f m", payload_pos_threshold_);
-    }
-    else if (name == "friction.coulomb") {
+    } else if (name == "friction.coulomb") {
       friction_coulomb_ = param.as_double_array();
       RCLCPP_INFO(this->get_logger(), "[FRICTION] Coulomb updated: [%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
                   friction_coulomb_[0], friction_coulomb_[1], friction_coulomb_[2],

@@ -211,6 +211,47 @@ ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
 
 ## Development Guidelines
 
+### Code Formatting (clang-format)
+
+All `.cpp` / `.hpp` files under `arv_v1_moveit/src/` MUST be formatted with `clang-format` before committing. The config lives at the workspace root:
+
+**Config**: `src/.clang-format` (BasedOnStyle: Google)
+
+| Setting | Value |
+|---------|-------|
+| BasedOnStyle | Google |
+| IndentWidth | 2 |
+| UseTab | Never |
+| ColumnLimit | 100 |
+| AccessModifierOffset | -2 |
+| AllowShortFunctionsOnASingleLine | Inline |
+| AllowShortBlocksOnASingleLine | false |
+| BreakBeforeBraces | Attach |
+| SpaceBeforeParens | ControlStatements |
+| MaxEmptyLinesToKeep | 2 |
+| AlignTrailingComments | true |
+
+#### Quick Commands
+```bash
+# Format a single file
+clang-format -i arv_v1_moveit/src/path/to/file.cpp
+
+# Format all project files (excluding third_party)
+find arv_v1_moveit/src -name '*.cpp' -o -name '*.hpp' | xargs clang-format -i
+
+# Dry-run check (CI / pre-commit)
+find arv_v1_moveit/src -name '*.cpp' -o -name '*.hpp' | xargs clang-format --dry-run -Werror
+```
+
+#### Scope
+- **Format**: `arv_v1_moveit/src/**/*.{cpp,hpp}`
+- **DO NOT format**: `arv_v1_moveit/third_party/` (vendored imgui/implot)
+
+#### Rules
+- Run `clang-format -i` on every new/modified `.cpp`/`.hpp` before committing
+- DO NOT manually fight the formatter — if output looks wrong, adjust `.clang-format` config instead
+- Include ordering is enforced by clang-format (`SortIncludes: true` per Google style)
+
 ### Comment Standards
 
 #### File Header

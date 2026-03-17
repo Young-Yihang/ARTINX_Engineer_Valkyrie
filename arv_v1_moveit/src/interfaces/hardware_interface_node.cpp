@@ -29,7 +29,8 @@ public:
     int baud = this->get_parameter("baud_rate").as_int();
     simulation_mode_ = this->get_parameter("simulation_mode").as_bool();
 
-    RCLCPP_INFO(this->get_logger(), "[INIT] USB CDC device: %s (baud=%d ignored by CDC)", port.c_str(), baud);
+    RCLCPP_INFO(this->get_logger(), "[INIT] USB CDC device: %s (baud=%d ignored by CDC)",
+                port.c_str(), baud);
 
     if (simulation_mode_) {
       RCLCPP_INFO(this->get_logger(), "[SIMULATION MODE] Serial TX only, no RX feedback");
@@ -171,11 +172,11 @@ private:
 
       const std::string dev = device_name_.empty() ? std::string("/dev/ttyACM0") : device_name_;
       if (std::filesystem::exists(dev)) {
-        const int baud = static_cast<int>(baud_rate_ == 0 ? 115200 : baud_rate_);  // CDC 忽略, 占位值
+        const int baud =
+            static_cast<int>(baud_rate_ == 0 ? 115200 : baud_rate_);  // CDC 忽略, 占位值
         try {
           if (initSerial(dev, baud)) {
-            RCLCPP_WARN(this->get_logger(), "[RECONNECT] USB CDC reinitialised: %s",
-                        dev.c_str());
+            RCLCPP_WARN(this->get_logger(), "[RECONNECT] USB CDC reinitialised: %s", dev.c_str());
             return true;
           }
         } catch (const std::exception &e) {

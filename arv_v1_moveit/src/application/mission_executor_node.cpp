@@ -36,7 +36,7 @@
 namespace ControlMode {
 constexpr uint8_t RELAX = 0;      // 全零力矩
 constexpr uint8_t FREEDRIVE = 1;  // 仅重力补偿
-constexpr uint8_t ARMED = 2;     // 就绪: G(q)+PD 保持, 可接受轨迹执行
+constexpr uint8_t ARMED = 2;      // 就绪: G(q)+PD 保持, 可接受轨迹执行
 }  // namespace ControlMode
 
 using LoadTrajectory = arv_v1_interfaces::srv::LoadTrajectory;
