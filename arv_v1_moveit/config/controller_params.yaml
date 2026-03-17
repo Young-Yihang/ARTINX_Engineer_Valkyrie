@@ -1,5 +1,5 @@
-# 级联P+PI控制器参数 | 修改后执行 ./reload_params.sh 热重载
-# PD转Cascade: vel_Kp≈Kd_single, pos_Kp≈Kp_single/vel_Kp, vel_Ki从0.1*vel_Kp起调
+# 控制器参数 | 修改后执行 ./reload_params.sh 热重载
+# 控制律: τ = 动力学前馈(M+C+G) + 摩擦前馈(fc·fal+fv·q̇) + cascade_PD + 载荷补偿
 
 /torque_controller_action_server:
   ros__parameters:
@@ -11,67 +11,76 @@
       R_pos: 1.0e-3    # 测量噪声：位置
       R_vel: 2.5e-2    # 测量噪声：速度
 
-    # 级联P+PI: 外环P(位置→速度), 内环PI(速度→力矩)
+    # ========== 摩擦前馈: τ_friction = fc·fal(q̇,α,δ) + fv·q̇ ==========
+    # fal 函数平滑库仑摩擦 sign() 跳变，避免零速极限环
+    # 初始值来自 URDF <dynamics friction= damping=>，需实测微调
+    friction:
+      coulomb: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # fc (Nm), J1-J6
+      viscous: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # fv (Nm·s/rad), J1-J6
+      fal_alpha: 0.5    # 非线性指数 (0<α<1, 越小零速附近越陡)
+      fal_delta: 0.05   # 线性区宽度 (rad/s, ≈ Kalman滤波后噪声2-3倍)
+
+    # ========== cascade PD: 外环PD(位置→速度), 内环P(速度→力矩) ==========
+    # 等效单环PD回退: vel_Kp=1 透传, Kp_eq=pos_Kp, Kd_eq=(pos_Kd+1)*vel_Kp
+    # 原始单环参数(566971e): J1=30/1, J2=50/1, J3=30/1, J4=10/0.3, J5=1/1, J6=1/1
     cascade_pid:
       joint_1:
-        # 外环（位置）：P + 条件积分 (anti-windup clamp)
-        pos_Kp: 4.0
-        pos_Ki: 0.3    # 位置积分：消除稳态误差，2-10s收敛
-        pos_Kd: 0.0
-        max_integral_pos: 2.0  # 积分限幅 → 最大积分力矩 0.3×2=0.6 Nm
-        # 内环（速度）：PI
-        vel_Kp: 7.0
-        vel_Ki: 0.5
+        pos_Kp: 30.0
+        pos_Ki: 0.0
+        pos_Kd: 0.0       # Kd_eq = (0+1)*1 = 1.0 = 原Kd
+        max_integral_pos: 2.0
+        vel_Kp: 3.0        # 透传: 内环天然阻尼=1.0
+        vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0
 
       joint_2:
-        pos_Kp: 6.0
-        pos_Ki: 0.3
+        pos_Kp: 50.0
+        pos_Ki: 0.0
         pos_Kd: 0.0
-        max_integral_pos: 2.0  # 最大积分力矩 0.6 Nm
-        vel_Kp: 7.0
-        vel_Ki: 0.5
+        max_integral_pos: 2.0
+        vel_Kp: 2.0
+        vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0
 
       joint_3:
-        pos_Kp: 4.0
-        pos_Ki: 0.3    # 链条摩擦靠积分缓慢消除
+        pos_Kp: 30.0
+        pos_Ki: 0.0
         pos_Kd: 0.0
-        max_integral_pos: 2.0  # 最大积分力矩 0.6 Nm
-        vel_Kp: 6.0
-        vel_Ki: 0.5
+        max_integral_pos: 2.0
+        vel_Kp: 2.0
+        vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0
 
       joint_4:
-        pos_Kp: 1.5
-        pos_Ki: 0.2
-        pos_Kd: 0.0
-        max_integral_pos: 0.3  # 最大积分力矩 0.06 Nm (effort limit 1.2)
-        vel_Kp: 6.3
-        vel_Ki: 0.3
+        pos_Kp: 10.0
+        pos_Ki: 0.0
+        pos_Kd: 0.0       # Kd_eq = 1.0 > 原0.3, J4过阻尼但更稳
+        max_integral_pos: 0.3
+        vel_Kp: 1.0
+        vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0
 
       joint_5:
-        pos_Kp: 1.5
-        pos_Ki: 0.2
+        pos_Kp: 50.0
+        pos_Ki: 0.0
         pos_Kd: 0.0
-        max_integral_pos: 0.5  # 最大积分力矩 0.1 Nm (effort limit 7)
-        vel_Kp: 1.0
-        vel_Ki: 0.1
+        max_integral_pos: 0.5
+        vel_Kp: 3.0
+        vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0
 
       joint_6:
-        pos_Kp: 1.00
-        pos_Ki: 0.15
+        pos_Kp: 50.0
+        pos_Ki: 0.0
         pos_Kd: 0.0
-        max_integral_pos: 0.3  # 最大积分力矩 0.045 Nm (effort limit 1)
-        vel_Kp: 1.0
-        vel_Ki: 0.1
+        max_integral_pos: 0.3
+        vel_Kp: 2.0
+        vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 10.0
 
@@ -93,7 +102,7 @@
       max_torque_default: 20.0              # Nm - conservative default
 
       joint_state_timeout_ms: 100     # Max time without sensor update before emergency stop
-      max_control_period_ms: 10       # Detect slow control loop (200Hz = 5ms nominal)
+      max_control_period_ms: 2        # Detect slow control loop (1kHz = 1ms nominal)
       max_velocity_sanity: 20.0       # rad/s - reject sensor glitches (20 rad/s = ~1910 RPM)
       max_position_error: 0.8         # rad - emergency stop threshold for position tracking error
 

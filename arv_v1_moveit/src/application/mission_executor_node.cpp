@@ -1,13 +1,9 @@
-/**
- * @file mission_executor_node.cpp
- * @brief Application Layer - ncurses TUI for Mission Control (v4.0)
- *
- * Provides a non-blocking, hotkey-driven interface using ncurses.
- * Features strict "Takeover Mode" isolation to prevent hotkey conflicts.
- */
+/// @file mission_executor_node.cpp
+/// @brief ncurses TUI for mission control — hotkey-driven, non-blocking.
 
 #include <ncurses.h>
 #include <signal.h>
+#include <tf2/LinearMath/Quaternion.h>
 #include <yaml-cpp/yaml.h>
 
 #include <chrono>
@@ -28,8 +24,6 @@
 #include <thread>
 #include <vector>
 
-#include <tf2/LinearMath/Quaternion.h>
-
 #include "arv_v1_interfaces/srv/gripper_control.hpp"
 #include "arv_v1_interfaces/srv/list_trajectories.hpp"
 #include "arv_v1_interfaces/srv/load_trajectory.hpp"
@@ -38,12 +32,11 @@
 #include "std_msgs/msg/int32.hpp"   // /task_command from hardware_interface
 #include "std_msgs/msg/u_int8.hpp"  // /control_mode
 
-// 控制模式常量 (与 serial_protocol.hpp ControlMode 保持同步)
+// 与 serial_protocol.hpp ControlMode 同步
 namespace ControlMode {
 constexpr uint8_t RELAX = 0;      // 全零力矩
 constexpr uint8_t FREEDRIVE = 1;  // 仅重力补偿
-constexpr uint8_t HOLD = 2;       // 重力补偿+PD
-constexpr uint8_t EXECUTE = 3;    // 轨迹执行
+constexpr uint8_t ARMED = 2;      // 就绪: G(q)+PD 保持, 可接受轨迹执行
 }  // namespace ControlMode
 
 using LoadTrajectory = arv_v1_interfaces::srv::LoadTrajectory;
@@ -65,7 +58,7 @@ struct TrajectoryEntry {
   std::string description;
 };
 
-// 日志环形缓冲区
+// 日志环形缓冲
 class LogBuffer {
 public:
   void add(const std::string& msg, int color_pair) {
@@ -80,7 +73,7 @@ public:
 
 private:
   std::deque<std::pair<std::string, int>> logs_;
-  const size_t max_size_ = 5;  // 底部显示5行日志
+  const size_t max_size_ = 5;  // 底部5行
   std::mutex mu_;
 };
 
@@ -111,11 +104,10 @@ public:
 
     load_client_ = create_client<LoadTrajectory>("/load_trajectory");
     save_client_ = create_client<SaveLastTrajectory>("/save_last_trajectory");
-    cartesian_target_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
-        "/cartesian_target_pose", 10);
+    cartesian_target_pub_ =
+        create_publisher<geometry_msgs::msg::PoseStamped>("/cartesian_target_pose", 10);
     gripper_client_ = create_client<GripperControl>("/gripper_control");
 
-    // 订阅末端位姿 (30Hz from cartesian_controller_node)
     ee_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
         "/cartesian_controller/current_pose", 10,
         [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -124,31 +116,28 @@ public:
           has_ee_pose_ = true;
         });
 
-    // 订阅下位机任务指令 (Int32: cmd<<16 | param<<8 | seq)
     task_command_sub_ = create_subscription<std_msgs::msg::Int32>(
         "/task_command", 10,
         std::bind(&MissionExecutorNode::onTaskCommand, this, std::placeholders::_1));
 
-    // 控制模式发布者
     control_mode_pub_ = create_publisher<std_msgs::msg::UInt8>("/control_mode", 10);
 
-    // [FIX] 立即发布 HOLD，防止 torque_controller 默认 RELAX 导致上电掉落。
+    // [FIX] 立即发布 ARMED，防止 torque_controller 默认 RELAX 导致上电掉落。
     // torque_controller 在 sleep 2 前已启动，此时订阅已建立。
-    publishControlMode(ControlMode::HOLD);
+    publishControlMode(ControlMode::ARMED);
 
-    // 非阻塞服务检测 (避免 TUI 启动黑屏)
     log("Checking services (non-blocking)...", COLOR_PAIR_DEFAULT);
     if (!load_client_->wait_for_service(2s)) {
       logWarn("load_trajectory service not ready, will retry on use");
     }
-    // 其他服务不阻塞等待，首次调用时自然检测
+    // 其他服务首次调用时检测
     save_client_->wait_for_service(500ms);
 
     loadMissionSequence();
     fetchTrajectories();
 
-    // 再次发布，保证 wait_for_service 期间重启的节点也能接收到
-    publishControlMode(ControlMode::HOLD);
+    // 重发: 覆盖 wait_for_service 期间可能重启的节点
+    publishControlMode(ControlMode::ARMED);
     log("Mission Executor v4.0 ready", COLOR_PAIR_SUCCESS);
   }
 
@@ -162,12 +151,12 @@ public:
     int mode_broadcast_counter_ = 0;
     while (rclcpp::ok() && running_) {
       drawUI();
-      ch = getch();  // 非阻塞, timeout=100ms
+      ch = getch();
       if (ch != ERR) {
         handleInput(ch);
       }
       rclcpp::spin_some(get_node_base_interface());
-      // 每 10 次循环 (~1s) 重发一次当前控制模式，防止节点重启后模式丢失
+      // ~1s 重发控制模式，防节点重启后丢失
       if (++mode_broadcast_counter_ >= 10) {
         mode_broadcast_counter_ = 0;
         auto msg = std_msgs::msg::UInt8();
@@ -229,9 +218,8 @@ private:
   enum class View { STATE_MACHINE, TRAJECTORY, CARTESIAN, GRIPPER, HELP };
   View view_ = View::STATE_MACHINE;
 
-  bool takeover_mode_ = false;  // "接管模式"，隔离全局按键
+  bool takeover_mode_ = false;  // 隔离全局按键
 
-  // 弹窗输入状态
   enum class InputMode { NONE, SAVE_NAME, SAVE_DESC, DELETE_CONFIRM, OVERWRITE_CONFIRM };
   InputMode input_mode_ = InputMode::NONE;
   std::string input_buffer_;
@@ -253,12 +241,12 @@ private:
   size_t traj_page_ = 0;
 
   // --- 夹爪状态 ---
-  double gripper_torque_cmd_ = 0.0;  // 本地预设想发的力 (N, prismatic joint)
-  double gripper_last_sent_ = 0.0;   // 实际最后发送的力 (N)
+  double gripper_torque_cmd_ = 0.0;  // 预设力 (N)
+  double gripper_last_sent_ = 0.0;   // 已发送力 (N)
 
   // --- 笛卡尔状态 ---
-  double cartesian_step_ = 0.005;  // 5mm (10Hz × 5mm = 50mm/s 长按速度)
-  // Jog 目标位姿：增量叠加在目标上而非 TF 反馈上，避免 PD 跟踪延迟导致漂移
+  double cartesian_step_ = 0.005;  // 5mm
+  // 增量叠加在目标上(非TF反馈)，避免PD延迟漂移
   geometry_msgs::msg::Pose jog_target_pose_;
   double jog_target_roll_ = 0.0, jog_target_pitch_ = 0.0, jog_target_yaw_ = 0.0;
   bool jog_target_initialized_ = false;
@@ -268,15 +256,15 @@ private:
 
   // --- 控制模式 ---
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr control_mode_pub_;
-  uint8_t control_mode_ = ControlMode::HOLD;
+  uint8_t control_mode_ = ControlMode::ARMED;
 
   void publishControlMode(uint8_t mode) {
     control_mode_ = mode;
     auto msg = std_msgs::msg::UInt8();
     msg.data = mode;
     control_mode_pub_->publish(msg);
-    static const char* names[] = {"RELAX", "FREEDRIVE", "HOLD", "EXECUTE"};
-    log(std::string("[MODE] -> ") + (mode <= 3 ? names[mode] : "?"),
+    static const char* names[] = {"RELAX", "FREEDRIVE", "ARMED"};
+    log(std::string("[MODE] -> ") + (mode <= ControlMode::ARMED ? names[mode] : "?"),
         mode == 0 ? COLOR_PAIR_WARNING : COLOR_PAIR_SUCCESS);
   }
 
@@ -287,16 +275,16 @@ private:
   rclcpp::Client<GripperControl>::SharedPtr gripper_client_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr ee_pose_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr task_command_sub_;
-  uint8_t last_task_seq_ = 0xFF;  // 去重: 上一次处理的 seq
+  uint8_t last_task_seq_ = 0xFF;  // 去重
 
   // --- Ncurses 初始化 ---
 
   void initNcurses() {
-    initscr();             // 初始化
-    cbreak();              // 禁用行缓冲，直接读字符
-    noecho();              // 不回显
-    keypad(stdscr, TRUE);  // 捕获特殊按键(方向键、F1等)
-    timeout(100);          // getch() 阻塞 100ms，保证 10Hz 顺滑刷新
+    initscr();
+    cbreak();
+    noecho();
+    keypad(stdscr, TRUE);
+    timeout(100);  // 10Hz 刷新
 
     if (has_colors()) {
       start_color();
@@ -313,7 +301,7 @@ private:
 
   void log(const std::string& msg, int color = COLOR_PAIR_DEFAULT) {
     log_buffer_.add(msg, color);
-    // 移除 RCLCPP_INFO，防止底层的标准输出与 ncurses 争夺屏幕控制权导致 UI 撕裂/上移
+    // 不用 RCLCPP_INFO，防 stdout 与 ncurses 冲突致 UI 撕裂
   }
 
   void logErr(const std::string& msg) { log(msg, COLOR_PAIR_ERROR); }
@@ -379,7 +367,7 @@ private:
     });
   }
 
-  std::mutex status_mu_;  // 保护后台数据刷新
+  std::mutex status_mu_;  // 保护后台数据
 
   // --- 输入分发 (核心防冲突逻辑) ---
 
@@ -400,18 +388,15 @@ private:
       return;
     }
 
-    // 全局防冲突: 此时不在接管模式，也不在输入框，允许 M/T/C/G 切换
     handleGlobalInput(ch);
   }
 
   void handleGlobalInput(int ch) {
-    // 退出
     if (ch == 'q' || ch == 'Q') {
       running_ = false;
       return;
     }
 
-    // 视图切换
     if (ch == 'm' || ch == 'M') {
       view_ = View::STATE_MACHINE;
       return;
@@ -426,7 +411,6 @@ private:
       return;
     }
 
-    // 需要接管的视图
     if (ch == 'c' || ch == 'C') {
       view_ = View::CARTESIAN;
       return;
@@ -436,29 +420,25 @@ private:
       return;
     }
 
-    // 视图内操作
     if (view_ == View::STATE_MACHINE)
       handleSMCommand(ch);
     else if (view_ == View::TRAJECTORY)
       handleTrajCommand(ch);
     else if (view_ == View::CARTESIAN) {
-      // Cartesian 视图：Enter 触发接管模式
       if (ch == '\n' || ch == '\r') {
         takeover_mode_ = true;
-        // 初始化 jog 目标为当前 TF 位姿
         {
           std::lock_guard<std::mutex> lk(pose_mu_);
           if (has_ee_pose_) {
             jog_target_pose_ = current_ee_pose_.pose;
-            quaternionToRPY(jog_target_pose_.orientation,
-                            jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
+            quaternionToRPY(jog_target_pose_.orientation, jog_target_roll_, jog_target_pitch_,
+                            jog_target_yaw_);
             jog_target_initialized_ = true;
           }
         }
         logWarn("Entered Takeover mode. Press 'Esc' to release.");
       }
     } else if (view_ == View::GRIPPER) {
-      // 夹爪视图：Z 已全局生效，此处仅处理 Space 停止
       handleGripperInput(ch);
     }
   }
@@ -474,7 +454,6 @@ private:
   }
 
   void handleStringInput(int ch) {
-    // 字符串弹窗统一处理
     if (ch == 27) {  // Esc cancel
       input_mode_ = InputMode::NONE;
       log("Input canceled.");
@@ -482,7 +461,6 @@ private:
     }
 
     if (input_mode_ == InputMode::DELETE_CONFIRM || input_mode_ == InputMode::OVERWRITE_CONFIRM) {
-      // 单字符确认
       if (input_mode_ == InputMode::DELETE_CONFIRM)
         handleDeleteConfirm(ch);
       else if (input_mode_ == InputMode::OVERWRITE_CONFIRM)
@@ -490,7 +468,6 @@ private:
       return;
     }
 
-    // 否则是字符累加
     if (ch == '\n' || ch == '\r') {
       std::string val = input_buffer_;
       input_buffer_.clear();
@@ -501,20 +478,18 @@ private:
     } else if (ch == KEY_BACKSPACE || ch == 127 || ch == '\b') {
       if (!input_buffer_.empty()) input_buffer_.pop_back();
     } else if (isprint(ch)) {
-      // 限制名字不能有空格
-      if (input_mode_ == InputMode::SAVE_NAME && ch == ' ') return;
+      if (input_mode_ == InputMode::SAVE_NAME && ch == ' ') return;  // 名字禁空格
       input_buffer_.push_back(ch);
     }
   }
 
-  // 下位机任务指令回调 (Int32: cmd<<16 | param<<8 | seq)
+  // 协议: Int32 = cmd<<16 | param<<8 | seq
   void onTaskCommand(const std_msgs::msg::Int32::SharedPtr msg) {
     const uint8_t cmd = static_cast<uint8_t>((msg->data >> 16) & 0xFF);
     const uint8_t param = static_cast<uint8_t>((msg->data >> 8) & 0xFF);
     const uint8_t seq = static_cast<uint8_t>(msg->data & 0xFF);
 
-    // 去重: 同一 seq 不重复执行
-    if (seq == last_task_seq_) return;
+    if (seq == last_task_seq_) return;  // 去重
     last_task_seq_ = seq;
 
     char log_buf[64];
@@ -527,24 +502,24 @@ private:
         logOk("[HW] RESET_HOME");
         resetToIdle();
         break;
-      case 0x10:  // PICK_ORE
-        snprintf(log_buf, sizeof(log_buf), "[HW] PICK_ORE ore_id=%u", param);
+      case 0x10:  // PICK_OBJ
+        snprintf(log_buf, sizeof(log_buf), "[HW] PICK_OBJ obj_id=%u", param);
         logOk(log_buf);
-        executeTrajectoryByKey("pick_ore_" + std::to_string(param));
+        executeTrajectoryByKey("pick_obj_" + std::to_string(param));
         break;
-      case 0x11:  // STOW_ORE
-        snprintf(log_buf, sizeof(log_buf), "[HW] STOW_ORE slot_id=%u", param);
+      case 0x11:  // STOW_OBJ
+        snprintf(log_buf, sizeof(log_buf), "[HW] STOW_OBJ slot_id=%u", param);
         logOk(log_buf);
         executeTrajectoryByKey("stow_slot_" + std::to_string(param));
         break;
-      case 0x20:  // MOVE_TO_EXCHANGE
-        logOk("[HW] MOVE_TO_EXCHANGE");
-        executeTrajectoryByKey("move_to_exchange");
+      case 0x20:  // MOVE_TO_DEPOSIT
+        logOk("[HW] MOVE_TO_DEPOSIT");
+        executeTrajectoryByKey("move_to_deposit");
         break;
-      case 0x21:  // EXECUTE_EXCHANGE
-        snprintf(log_buf, sizeof(log_buf), "[HW] EXECUTE_EXCHANGE slot_id=%u", param);
+      case 0x21:  // EXECUTE_DEPOSIT
+        snprintf(log_buf, sizeof(log_buf), "[HW] EXECUTE_DEPOSIT slot_id=%u", param);
         logOk(log_buf);
-        executeTrajectoryByKey("exchange_slot_" + std::to_string(param));
+        executeTrajectoryByKey("deposit_slot_" + std::to_string(param));
         break;
       case 0x30:  // NEXT_STEP
         logOk("[HW] NEXT_STEP");
@@ -568,7 +543,7 @@ private:
       case 0x50:  // SET_CONTROL_MODE
         snprintf(log_buf, sizeof(log_buf), "[HW] SET_CONTROL_MODE param=%u", param);
         logOk(log_buf);
-        if (param <= ControlMode::EXECUTE) {
+        if (param <= ControlMode::ARMED) {
           publishControlMode(param);
         } else {
           logWarn("[HW] Invalid control mode value");
@@ -581,10 +556,9 @@ private:
     }
   }
 
-  // 按轨迹名执行 (供 TaskCmd 和 TUI 共用)
   void executeTrajectoryByKey(const std::string& name) {
-    if (control_mode_ != ControlMode::HOLD) {
-      logWarn("须先切到 HOLD 模式才能执行: " + name);
+    if (control_mode_ != ControlMode::ARMED) {
+      logWarn("须先切到 ARMED 模式才能执行: " + name);
       return;
     }
     bool expected = false;
@@ -632,19 +606,17 @@ private:
     else if (k == 'r' || k == 'R') {
       loadMissionSequence();
       logOk("Sequence reloaded from yaml.");
-    }
-    // 控制模式切换: [0] RELAX  [1] FREEDRIVE  [2] HOLD
-    else if (k == '0')
+    } else if (k == '0')
       publishControlMode(ControlMode::RELAX);
     else if (k == '1')
       publishControlMode(ControlMode::FREEDRIVE);
     else if (k == '2')
-      publishControlMode(ControlMode::HOLD);
+      publishControlMode(ControlMode::ARMED);
   }
 
   void executeCurrentState() {
-    if (control_mode_ != ControlMode::HOLD) {
-      logWarn("须先切到 HOLD 模式 [2] 才能执行轨迹");
+    if (control_mode_ != ControlMode::ARMED) {
+      logWarn("须先切到 ARMED 模式 [2] 才能执行轨迹");
       return;
     }
     if (current_idx_ >= states_.size()) {
@@ -884,12 +856,11 @@ private:
   // --- 夹爪全局切换 ---
 
   void toggleGripper() {
-    // 当前为正（夹紧）→ 松开（-70 N）；否则 → 夹紧（70 N）
     gripper_torque_cmd_ = (gripper_torque_cmd_ > 0.0) ? -70.0 : 70.0;
     sendGripper(gripper_torque_cmd_);
   }
 
-  // --- 夹爪直接控制：GRIPPER 视图内 Space 停止 ---
+  // --- 夹爪视图操作 ---
 
   void handleGripperInput(int ch) {
     if (ch == ' ') {
@@ -928,7 +899,6 @@ private:
   // --- 接管操作：笛卡尔 (Jogging) ---
 
   void handleCartesianTakeover(int ch) {
-    // 改变步长
     if (ch == '+' || ch == '=') {
       cartesian_step_ = std::min(0.1, cartesian_step_ + 0.001);
       return;
@@ -973,7 +943,7 @@ private:
     sendCartesianRelative(dx, dy, dz, droll, dpitch, dyaw);
   }
 
-  // 从 quaternion 提取 RPY (ZYX convention)
+  // Quaternion → RPY (ZYX convention)
   static void quaternionToRPY(const geometry_msgs::msg::Quaternion& q, double& roll, double& pitch,
                               double& yaw) {
     double sinr_cosp = 2.0 * (q.w * q.x + q.y * q.z);
@@ -993,13 +963,17 @@ private:
       return;
     }
 
-    // 增量叠加在目标上（而非 TF 反馈），避免 PD 跟踪延迟导致漂移
     jog_target_pose_.position.x += dx;
     jog_target_pose_.position.y += dy;
     jog_target_pose_.position.z += dz;
     jog_target_roll_ += droll;
     jog_target_pitch_ += dpitch;
     jog_target_yaw_ += dyaw;
+
+    // wrap to [-π, π]
+    jog_target_roll_ = std::remainder(jog_target_roll_, 2.0 * M_PI);
+    jog_target_pitch_ = std::remainder(jog_target_pitch_, 2.0 * M_PI);
+    jog_target_yaw_ = std::remainder(jog_target_yaw_, 2.0 * M_PI);
 
     tf2::Quaternion q;
     q.setRPY(jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
@@ -1025,10 +999,7 @@ private:
 
   // --- UTF-8 工具 ---
 
-  /**
-   * @brief 将 UTF-8 字符串截断至不超过 max_cols 个终端列宽，并以空格补齐。
-   * ASCII = 1字节/1列；CJK (U+1100..U+FFFF 3字节) = 2列；其余多字节 = 1列。
-   */
+  // UTF-8 截断至 field_cols 列宽并补齐空格 (CJK=2列)
   static std::string utf8Pad(const std::string& s, int field_cols) {
     int cols = 0;
     size_t pos = 0;
@@ -1060,11 +1031,10 @@ private:
   // --- NCURSES UI 重绘 (全屏 10Hz) ---
 
   void drawUI() {
-    erase();  // 清空缓存区
+    erase();
     int max_y, max_x;
     getmaxyx(stdscr, max_y, max_x);
 
-    // 1. 顶部栏 F1-F4
     attron(COLOR_PAIR(COLOR_PAIR_HEADER));
     mvprintw(0, 0, "===================== ARV_V1 Mission Executor v4.0 =====================");
     mvprintw(1, 0, "|");
@@ -1082,14 +1052,13 @@ private:
     drawTab("[C] Cartesian", View::CARTESIAN);
     drawTab("[G] Gripper", View::GRIPPER);
 
-    // 控制模式指示器
     {
-      static const char* mode_labels[] = {"RELAX", "FREEDRIVE", "HOLD", "EXECUTE"};
+      static const char* mode_labels[] = {"RELAX", "FREEDRIVE", "ARMED"};
       int mode_color = (control_mode_ == ControlMode::RELAX)     ? COLOR_PAIR_ERROR
                      : (control_mode_ == ControlMode::FREEDRIVE) ? COLOR_PAIR_WARNING
                                                                  : COLOR_PAIR_SUCCESS;
       attron(A_BOLD | COLOR_PAIR(mode_color));
-      printw(" [%s] ", control_mode_ <= 3 ? mode_labels[control_mode_] : "?");
+      printw(" [%s] ", control_mode_ <= ControlMode::ARMED ? mode_labels[control_mode_] : "?");
       attroff(A_BOLD | COLOR_PAIR(mode_color));
     }
 
@@ -1098,7 +1067,6 @@ private:
     mvprintw(2, 0, "------------------------------------------------------------------------");
     attroff(COLOR_PAIR(COLOR_PAIR_HEADER));
 
-    // 2. 接管模式全局提醒
     if (takeover_mode_) {
       attron(COLOR_PAIR(COLOR_PAIR_ERROR) | A_BOLD);
       mvprintw(3, 2, ">>> TAKEOVER MODE ACTIVE <<< [Esc] to exit. Global hotkeys M/T/C/G blocked.");
@@ -1113,15 +1081,13 @@ private:
       }
     }
 
-    // 3. 核心视图区
     int cur_line = 5;
-    std::lock_guard<std::mutex> lk(status_mu_);  // 防止访问后台数据时越界
+    std::lock_guard<std::mutex> lk(status_mu_);
 
     if (view_ == View::STATE_MACHINE) {
       mvprintw(cur_line++, 2, "Mission: %s - %s", mission_name_.c_str(),
                utf8Pad(mission_desc_, max_x - 12 - (int)mission_name_.size()).c_str());
       cur_line++;
-      // 列布局: col4=[x] col8=ID(16) col25=Traj(16) col42=Desc(剩余) col(max_x-8)<-NOW
       for (size_t i = 0; i < states_.size(); i++) {
         if (i == current_idx_)
           attron(A_BOLD | COLOR_PAIR(COLOR_PAIR_WARNING));
@@ -1133,8 +1099,7 @@ private:
         const char* marker = (i < current_idx_ ? "*" : (i == current_idx_ ? ">" : " "));
         const std::string& traj_str =
             states_[i].trajectory.empty() ? "(No Traj)" : states_[i].trajectory;
-        // 描述最多用至 (max_x - 42 - 8) 列，至少留 8 列给 " <- NOW"
-        int desc_cols = std::max(1, max_x - 42 - 8);
+        int desc_cols = std::max(1, max_x - 42 - 8);  // 留 8 列给 "<- NOW"
         std::string desc_field = utf8Pad(states_[i].description, desc_cols);
 
         mvprintw(cur_line, 4, "[%s] ", marker);
@@ -1197,7 +1162,6 @@ private:
       mvprintw(cur_line++, 2, "Gripper Status");
       cur_line++;
 
-      // 当前状态
       const char* state_str = (gripper_last_sent_ > 0.0) ? "GRIP"
                             : (gripper_last_sent_ < 0.0) ? "RELEASE"
                                                          : "STOP";
@@ -1215,7 +1179,6 @@ private:
       mvprintw(cur_line++, 6, "[ SPACE ] Stop (0 N)  -- only in this view");
     }
 
-    // 4. 输入区
     cur_line = max_y - 7;
     attron(COLOR_PAIR(COLOR_PAIR_HEADER));
     mvprintw(cur_line++, 0,
@@ -1238,7 +1201,6 @@ private:
       if (!takeover_mode_) mvprintw(cur_line, 2, "Press [H] for Help | [Q] to Quit");
     }
 
-    // 5. 日志区
     cur_line++;
     auto logs = log_buffer_.get();
     for (const auto& l : logs) {
@@ -1247,12 +1209,12 @@ private:
       attroff(COLOR_PAIR(l.second));
     }
 
-    refresh();  // 应用屏幕缓存
+    refresh();
   }
 };
 
 int main(int argc, char** argv) {
-  setlocale(LC_ALL, "");  // 使 ncurses 支持当前终端的字符集 (UTF-8)
+  setlocale(LC_ALL, "");  // ncurses UTF-8 支持
   rclcpp::init(argc, argv);
   try {
     auto node = std::make_shared<MissionExecutorNode>();

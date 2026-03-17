@@ -20,9 +20,9 @@ NC='\033[0m' # No Color
 SAMPLE_TIME=3
 
 # --- 可配置参数 (改频率只改这里) ---
-CONTROL_RATE_HZ=200       # /joint_states 期望频率 (Hz)
-EFFORT_RATE_HZ=200        # /effort_controller/commands 期望频率 (Hz)
-JITTER_WARN_MS=1.0        # 抖动警告阈值 (ms), 200Hz周期=5ms
+CONTROL_RATE_HZ=1000      # /joint_states 期望频率 (Hz)
+EFFORT_RATE_HZ=1000       # /effort_controller/commands 期望频率 (Hz)
+JITTER_WARN_MS=0.2        # 抖动警告阈值 (ms), 1kHz周期=1ms
 RT_CORE=3                 # RT-PREEMPT 隔离核心编号
 
 NODE_OK=0; NODE_FAIL=0
@@ -36,10 +36,34 @@ declare -a REPORT_BUFFER  # 用于存储详细日志，最后显示
 cursor_hide() { tput civis; }
 cursor_show() { tput cnorm; }
 
+# 极光渐变: 蓝(50,100,255) → 紫(180,50,255) → 品红(255,50,200)
+aurora_rgb() {
+    local row=$1 total=$2
+    local max=$((total - 1))
+    (( max < 1 )) && max=1
+    local r g b
+    if (( row * 2 < total )); then
+        local t=$(( row * 2 ))
+        r=$(( 50 + 130 * t / total ))
+        g=$(( 100 - 50 * t / total ))
+        b=255
+    else
+        local t=$(( row * 2 - total ))
+        r=$(( 180 + 75 * t / total ))
+        g=$(( 50 ))
+        b=$(( 255 - 55 * t / total ))
+    fi
+    printf "%d;%d;%d" $r $g $b
+}
+
 show_mascot() {
     clear
-    echo -e "${PURPLE}"
-    cat << 'MASCOT'
+    printf "\033[?25l"
+
+    local -a mlines=()
+    while IFS= read -r line; do
+        mlines+=("$line")
+    done << 'MASCOT'
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣤⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⢀⣀⣀⣀⠀⢠⠂⢢⢀⠔⠢⠀⠀⠀⠀⠀⠀⠀⡴⣱⣧⠀⠉⠲⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⡰⠁⢀⣀⠀⢳⠘⡀⠈⠁⠀⢎⡀⢰⣉⣑⣊⠗⣸⢱⣿⣿⠀⠀⠀⠀⠙⢦⡀⠀⠀⠀⢀⣀⣀⡀⠀⠀⠀  あー
@@ -61,30 +85,55 @@ show_mascot() {
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠀⣿⣿⣿⡇⠙⠋⢉⣽⣿⣿⣿⣿⣿⣿⡿⠃⠋⠀⢻⡆⢰⣿⣿⣿⣧⢸⣧⣌⣳⡀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠛⠛⠛⠁⠀⠀⠛⠛⠛⠛⠛⠛⠃⠈⠀⠐⠀⠀⠈⠛⠚⠛⠛⠛⠛⠓⠃⠀⠀⠀⠀⠀⠀⠀⠀
 MASCOT
-    echo -e "${NC}"
-    echo -e "${CYAN}  :: ARV_V1 SYSTEM DIAGNOSTICS ::${NC}"
+    local total=${#mlines[@]}
+
+    # 逐行极光浮现
+    for (( i=0; i<total; i++ )); do
+        local rgb
+        rgb=$(aurora_rgb $i $total)
+        printf "\033[%d;1H\033[2;38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+        sleep 0.012
+    done
+    sleep 0.05
+
+    # 极光波动 6 帧 (色带滚动)
+    for (( frame=0; frame<6; frame++ )); do
+        for (( i=0; i<total; i++ )); do
+            local shifted=$(( (i + frame * 4) % total ))
+            local rgb
+            rgb=$(aurora_rgb $shifted $total)
+            printf "\033[%d;1H\033[1;38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+        done
+        sleep 0.07
+    done
+
+    # 定格
+    for (( i=0; i<total; i++ )); do
+        local rgb
+        rgb=$(aurora_rgb $i $total)
+        printf "\033[%d;1H\033[38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+    done
+
+    echo ""
+    echo -e "  \033[38;2;180;100;255m:: ARV_V1 SYSTEM DIAGNOSTICS ::\033[0m"
     echo "  ──────────────────────────────────────────"
-    echo "" # 留一行空行作为状态显示区
-    echo "" # 留一行空行作为进度条区
+    echo ""
 }
 
-# 核心魔法：在固定位置刷新文字
+# 步骤计数器
+CHECK_STEP=0
+CHECK_TOTAL=6
+
+# 进度: 逐行 spinner
 update_loading() {
     local text="$1"
-    local percent="$2"
-    local bar_len=40
-    local filled=$((percent * bar_len / 100))
-    local empty=$((bar_len - filled))
-    
-    # 构造进度条
-    local bar_str=$(printf "%${filled}s" | tr ' ' '█')
-    local empty_str=$(printf "%${empty}s" | tr ' ' '░')
-    
-    # 移动光标：向上2行 (\033[2A) -> 清除行 (\033[K) -> 打印
-    # 这里的逻辑是：假设当前光标在进度条下方，我们需要往回跳
-    
-    echo -e "\033[2A\033[K  ${BOLD}STATUS:${NC} $text"
-    echo -e "\033[K  ${BLUE}[${bar_str}${empty_str}]${NC} ${percent}%"
+    CHECK_STEP=$((CHECK_STEP + 1))
+    local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+    for i in $(seq 0 5); do
+        printf "\r  ${CYAN}${frames[$((i % ${#frames[@]}))]}${NC} ${BOLD}[${CHECK_STEP}/${CHECK_TOTAL}]${NC} $text"
+        sleep 0.1
+    done
+    printf "\r  ${GREEN}✓${NC} ${BOLD}[${CHECK_STEP}/${CHECK_TOTAL}]${NC} $text\n"
 }
 
 # 将日志写入缓冲区，不直接打印
@@ -277,47 +326,33 @@ check_resources_silently() {
 cursor_hide
 show_mascot
 
-# 初始化进度条位置
-# 此时光标在进度条下方，我们需要保持它在这里
-
 # --- 步骤 1: 节点检查 ---
-update_loading "正在连接 ROS2 上下文..." 8
-sleep 0.5
-update_loading "正在扫描活动节点..." 16
+update_loading "扫描活动节点"
 check_nodes_silently
 
 # --- 步骤 2: 话题频率 + 抖动 (耗时) ---
 log_section "2. 话题与通信质量"
-update_loading "采样关节数据 (/joint_states)..." 30
+update_loading "采样 /joint_states"
 check_hz_silently "/joint_states" $CONTROL_RATE_HZ "关节状态"
 
-update_loading "采样控制指令 (/effort_controller/commands)..." 44
+update_loading "采样 /effort_controller/commands"
 check_hz_silently "/effort_controller/commands" $EFFORT_RATE_HZ "力矩指令"
 
 # --- 步骤 3: 错误扫描 ---
-update_loading "分析系统日志与错误..." 58
+update_loading "分析系统日志"
 check_errors_silently
 
 # --- 步骤 4: 节点性能 ---
-update_loading "采集节点 CPU/内存..." 72
+update_loading "采集节点 CPU/内存"
 check_node_perf_silently
 
 # --- 步骤 5: 系统资源 + RT核心 ---
-update_loading "检测系统资源与RT核心..." 88
+update_loading "检测系统资源与RT核心"
 check_resources_silently
 
-# --- 完成 ---
-update_loading "诊断完成！生成报告中..." 100
-sleep 0.5
-
 # ==================== 最终报告渲染 ====================
-clear
-show_mascot # 重新画头
-echo -e "\033[2A\033[K" # 擦除上面 show_mascot留下的空行
-echo -e "\033[K" 
-
-# 打印详细列表
-echo -e "  ${BOLD}📋 详细诊断报告:${NC}"
+echo ""
+echo -e "  ${BOLD}详细诊断报告:${NC}"
 for line in "${REPORT_BUFFER[@]}"; do
     echo -e "  $line"
 done

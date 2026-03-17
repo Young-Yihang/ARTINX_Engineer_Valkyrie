@@ -15,11 +15,136 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# ========== 可爱的启动画面 ==========
+# ========== ARTINX Splash ==========
+get_artinx_art() {
+    echo '⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣦⣤⡄⠀⠀⠀⢀⣀⣤⣤⣀⠀⠀⠀⢀⣀⣀⣠⡄⠀⣀⣤⣄⠀⠀⢀⣀⠀⠀⠀⢀⣀⡀⢀⣀⡀⠤⠤⠒⢂⣀⠀⠀⠀⠀⠀⠀⠀⠀'
+    echo '⠀⠀⠀⠀⠀⠠⠐⣢⣽⣿⡿⠋⠙⣿⡄⠀⣾⡿⢛⣫⣿⠿⠁⠘⠛⠛⣿⠟⠋⠉⢀⣿⠏⠁⢀⣴⣿⣿⡆⣠⣾⡿⠋⠙⣿⣶⣶⣤⣶⣾⠿⠟⠁⠀⠀⠀⠀⠀⠀⠀'
+    echo '⠀⠀⠀⠀⠀⣠⣾⣿⣿⣧⣶⣶⣻⣿⠃⣸⣿⣿⣿⡛⠁⡆⠀⠀⠀⣼⡿⠀⣠⣤⣾⣏⠀⣰⣿⠟⠁⣿⣷⡿⠛⢁⣤⣾⣷⠿⠛⠛⠛⠿⠿⠶⣶⣦⣤⣀⡀⠀⠀⠀'
+    echo '⠀⠀⢀⣴⣿⣿⣋⣭⠿⠛⠋⠙⠻⡟⠀⠿⠃⠈⠙⠻⢿⣿⠄⠀⠀⠛⠃⠘⠛⠛⣋⣁⣀⣘⣁⣠⣤⣬⣯⣤⣤⣿⣿⣿⣶⡶⠶⠶⠶⠶⠶⢶⣶⣾⣿⣿⣿⣷⡦⠀'
+    echo '⠀⢴⣿⡿⠟⠋⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠒⠒⠒⠛⠉⠉⠉⠉⠉⠉⠉⠀⠀⠀⠀⠀⠈⠉⠉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀'
+}
+
+# 紫→绿渐变
+splash_row_color() {
+    local row=$1 total=$2
+    local max=$((total - 1))
+    (( max < 1 )) && max=1
+    local r=$(( 180 - 180 * row / max ))
+    local g=$(( 255 * row / max ))
+    local b=$(( 255 - 155 * row / max ))
+    printf "%d;%d;%d" $r $g $b
+}
+
+show_splash() {
+    local -a lines=()
+    while IFS= read -r line; do
+        lines+=("$line")
+    done < <(get_artinx_art)
+    local num_lines=${#lines[@]}
+
+    local term_cols term_rows
+    term_cols=$(tput cols)
+    term_rows=$(tput lines)
+    local display_w=60
+    local pad_left=$(( (term_cols - display_w) / 2 ))
+    local pad_top=$(( (term_rows - num_lines) / 2 - 2 ))
+    (( pad_left < 0 )) && pad_left=0
+    (( pad_top < 0 )) && pad_top=0
+
+    printf "\033[?25l"
+    clear
+
+    # 逐行暗色浮现 (紫→绿)
+    for (( row=0; row<num_lines; row++ )); do
+        local rgb
+        rgb=$(splash_row_color $row $num_lines)
+        printf "\033[%d;%dH\033[2;38;2;${rgb}m%s\033[0m" \
+            $((pad_top + row + 1)) $((pad_left + 1)) "${lines[$row]}"
+        sleep 0.08
+    done
+    sleep 0.08
+
+    # 亮起
+    for (( row=0; row<num_lines; row++ )); do
+        local rgb
+        rgb=$(splash_row_color $row $num_lines)
+        printf "\033[%d;%dH\033[1;38;2;${rgb}m%s\033[0m" \
+            $((pad_top + row + 1)) $((pad_left + 1)) "${lines[$row]}"
+    done
+    sleep 0.15
+
+    # 霓虹呼吸 12 帧
+    for (( frame=0; frame<12; frame++ )); do
+        for (( row=0; row<num_lines; row++ )); do
+            local phase=$(( (frame * 40 + row * 50) % 360 ))
+            local r g b
+            if (( phase < 120 )); then
+                r=$(( 180 - 180 * phase / 120 ))
+                g=$(( 100 * phase / 120 ))
+                b=$(( 255 - 55 * phase / 120 ))
+            elif (( phase < 240 )); then
+                local p2=$(( phase - 120 ))
+                r=$(( 50 * p2 / 120 ))
+                g=$(( 100 + 155 * p2 / 120 ))
+                b=$(( 200 - 100 * p2 / 120 ))
+            else
+                local p3=$(( phase - 240 ))
+                r=$(( 50 + 130 * p3 / 120 ))
+                g=$(( 255 - 155 * p3 / 120 ))
+                b=$(( 100 + 155 * p3 / 120 ))
+            fi
+            printf "\033[%d;%dH\033[1;38;2;%d;%d;%dm%s\033[0m" \
+                $((pad_top + row + 1)) $((pad_left + 1)) $r $g $b "${lines[$row]}"
+        done
+        sleep 0.08
+    done
+
+    # 稳定渐变
+    for (( row=0; row<num_lines; row++ )); do
+        local rgb
+        rgb=$(splash_row_color $row $num_lines)
+        printf "\033[%d;%dH\033[1;38;2;${rgb}m%s\033[0m" \
+            $((pad_top + row + 1)) $((pad_left + 1)) "${lines[$row]}"
+    done
+
+    # 副标题
+    local subtitle="R O B O M A S T E R  2 0 2 6"
+    local sub_pad=$(( (term_cols - ${#subtitle}) / 2 ))
+    printf "\033[%d;%dH\033[38;2;100;255;180m%s\033[0m" \
+        $((pad_top + num_lines + 2)) $((sub_pad + 1)) "$subtitle"
+
+    sleep 0.8
+}
+
+# ========== 彩虹猫 ==========
+rainbow_rgb() {
+    local row=$1 total=$2
+    local phase=$(( row * 360 / total ))
+    local r g b
+    if (( phase < 60 )); then
+        r=255; g=$(( 255 * phase / 60 )); b=0
+    elif (( phase < 120 )); then
+        r=$(( 255 - 255 * (phase - 60) / 60 )); g=255; b=0
+    elif (( phase < 180 )); then
+        r=0; g=255; b=$(( 255 * (phase - 120) / 60 ))
+    elif (( phase < 240 )); then
+        r=0; g=$(( 255 - 255 * (phase - 180) / 60 )); b=255
+    elif (( phase < 300 )); then
+        r=$(( 255 * (phase - 240) / 60 )); g=0; b=255
+    else
+        r=255; g=0; b=$(( 255 - 255 * (phase - 300) / 60 ))
+    fi
+    printf "%d;%d;%d" $r $g $b
+}
+
 show_mascot() {
     clear
-    echo -e "${CYAN}"
-    cat << 'MASCOT'
+    printf "\033[?25l"
+
+    local -a mlines=()
+    while IFS= read -r line; do
+        mlines+=("$line")
+    done << 'MASCOT'
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡴⢋⣷⡄⠈⠉⠓⠶⣤⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡞⢡⣿⣿⣇⠀⠀⠀⠀⠀⠹⠷⠶⠦⠤⢤⣄⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
@@ -44,24 +169,66 @@ show_mascot() {
 ⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⣿⣿⠦⣤⣀⣀⣸⡿⠿⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⢿⣏⣿⣿⡿⣯⢾⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠉⠉⠑⠀⠀⠉⠀⠀⠀⠈⠉⠉⠉⠉⠙⠋⠙⠉⠋⠘⠛⠉⠉⠈⠃⠈⠉⠉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀
 MASCOT
-    echo -e "${NC}"
-    echo -e "  ${CYAN}:: ARV_V1 SYSTEM LAUNCHER ::${NC}"
+    local total=${#mlines[@]}
+
+    # 逐行暗色彩虹浮现
+    for (( i=0; i<total; i++ )); do
+        local rgb
+        rgb=$(rainbow_rgb $i $total)
+        printf "\033[%d;1H\033[2;38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+        sleep 0.012
+    done
+    sleep 0.05
+
+    # 亮起彩虹
+    for (( i=0; i<total; i++ )); do
+        local rgb
+        rgb=$(rainbow_rgb $i $total)
+        printf "\033[%d;1H\033[1;38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+    done
+    sleep 0.15
+
+    # 彩虹滚动 8 帧
+    for (( frame=0; frame<8; frame++ )); do
+        for (( i=0; i<total; i++ )); do
+            local shifted=$(( (i + frame * 3) % total ))
+            local rgb
+            rgb=$(rainbow_rgb $shifted $total)
+            printf "\033[%d;1H\033[1;38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+        done
+        sleep 0.07
+    done
+
+    # 定格彩虹
+    for (( i=0; i<total; i++ )); do
+        local rgb
+        rgb=$(rainbow_rgb $i $total)
+        printf "\033[%d;1H\033[38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+    done
+
+    echo ""
+    echo -e "  \033[38;2;100;255;180m:: ARV_V1 SYSTEM LAUNCHER ::\033[0m"
     echo "  ──────────────────────────────────────────"
     echo ""
     echo ""
 }
 
-# 进度更新（固定位置刷新，猫猫不动）
+# 步骤计数器
+STEP_CURRENT=0
+STEP_TOTAL=6
+
+# 进度: 逐行输出, 每步一行带 spinner
 update_status() {
     local text="$1"
-    local percent="$2"
-    local bar_len=40
-    local filled=$((percent * bar_len / 100))
-    local empty=$((bar_len - filled))
-    local bar_str=$(printf "%${filled}s" | tr ' ' '█')
-    local empty_str=$(printf "%${empty}s" | tr ' ' '░')
-    echo -e "\033[2A\033[K  ${BOLD}STATUS:${NC} $text"
-    echo -e "\033[K  ${GREEN}[${bar_str}${empty_str}]${NC} ${percent}%"
+    STEP_CURRENT=$((STEP_CURRENT + 1))
+
+    # spinner 动画 (0.6s)
+    local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+    for i in $(seq 0 5); do
+        printf "\r  ${CYAN}${frames[$((i % ${#frames[@]}))]}${NC} ${BOLD}[${STEP_CURRENT}/${STEP_TOTAL}]${NC} $text"
+        sleep 0.1
+    done
+    printf "\r  ${GREEN}✓${NC} ${BOLD}[${STEP_CURRENT}/${STEP_TOTAL}]${NC} $text\n"
 }
 
 # ========== 工作空间路径 ==========
@@ -200,25 +367,26 @@ start_node() {
 start_sim_mode() {
     local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
     local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
+    STEP_CURRENT=0; STEP_TOTAL=6
 
-    update_status "MoveIt + RViz..." 10
+    update_status "MoveIt + RViz"
     start_node "MoveIt+RViz" "ros2 launch arv_v1_moveit mujoco_demo.launch.py" 0
 
-    update_status "TorqueController..." 25
+    update_status "TorqueController"
     start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
 
-    update_status "MissionExecutor..." 40
+    update_status "MissionExecutor"
     # [FIX] MissionExecutor 必须先于 MuJoCo 启动，以便在物理仿真开始前发布 HOLD 模式。
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
 
-    update_status "MuJoCo (仿真)..." 55
+    update_status "MuJoCo (仿真)"
     start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node" 2
 
-    update_status "TrajectoryManager..." 70
+    update_status "TrajectoryManager"
     start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
 
-    update_status "CartesianController (IK)..." 85
+    update_status "CartesianController (IK)"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
 }
 
@@ -226,35 +394,34 @@ start_sim_mode() {
 start_serial_mode() {
     local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
     local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
+    STEP_CURRENT=0; STEP_TOTAL=7
 
-    update_status "探测串口设备..." 8
-    if detect_serial_device; then
-        :
-    else
+    update_status "探测串口设备"
+    if ! detect_serial_device; then
         export DETECTED_SERIAL_DEVICE="/dev/ttyACM0"
     fi
 
-    update_status "MoveIt + RViz..." 15
+    update_status "MoveIt + RViz"
     start_node "MoveIt+RViz" "ros2 launch arv_v1_moveit mujoco_demo.launch.py" 0
 
-    update_status "TorqueController..." 25
+    update_status "TorqueController"
     start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
 
-    update_status "MissionExecutor..." 38
+    update_status "MissionExecutor"
     # [FIX] MissionExecutor 先启动，确保 HOLD 模式在物理接口启动前到达 torque_controller。
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
 
-    update_status "SerialInterface ($DETECTED_SERIAL_DEVICE)..." 50
-    start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE -p baud_rate:=921600" 2
+    update_status "SerialInterface ($DETECTED_SERIAL_DEVICE)"
+    start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE" 2
 
-    update_status "MuJoCo (数字孪生)..." 65
+    update_status "MuJoCo (数字孪生)"
     start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true" 2
 
-    update_status "TrajectoryManager..." 78
+    update_status "TrajectoryManager"
     start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
 
-    update_status "CartesianController (IK)..." 90
+    update_status "CartesianController (IK)"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
 }
 
@@ -266,8 +433,8 @@ main() {
     setup_environment
     build_workspace
 
-    # 阶段2: 猫猫 + 菜单
-    tput civis  # 隐藏光标
+    # 阶段2: ARTINX splash → 猫猫 + 菜单
+    show_splash
     show_mascot
 
     # 菜单选择（覆盖进度条预留行）
@@ -286,24 +453,21 @@ main() {
         esac
     done
 
-    # 阶段3: 猫猫 + 进度条
+    # 阶段3: 猫猫 + 逐步启动
     show_mascot
 
     if [ "$selected_mode" = "sim" ]; then
-        update_status "启动纯仿真模式..." 5
+        echo -e "  ${CYAN}>> 纯仿真模式${NC}"
+        echo ""
         start_sim_mode
     else
-        update_status "启动串口真机模式..." 5
+        echo -e "  ${CYAN}>> 串口真机 + 数字孪生${NC}"
+        echo ""
         start_serial_mode
     fi
 
-    update_status "所有节点已启动！" 100
-    sleep 0.5
-
-    # 最终提示
     echo ""
-    echo ""
-    echo -e "  ${GREEN}${BOLD}[完成]${NC} 系统已就绪"
+    echo -e "  ${GREEN}${BOLD}✓ 所有节点已启动！${NC}"
     echo ""
     echo -e "  ${YELLOW}停止:${NC} ./stop_all_nodes.sh"
     echo -e "  ${YELLOW}诊断:${NC} ./scripts/check_system.sh"

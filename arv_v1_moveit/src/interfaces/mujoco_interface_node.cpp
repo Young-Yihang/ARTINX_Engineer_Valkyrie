@@ -1,7 +1,5 @@
-/**
- * @file mujoco_interface_node.cpp
- * @brief MuJoCo interface — simulation mode (torque→state) / digital-twin mode (state→visual)
- */
+/// @file mujoco_interface_node.cpp
+/// @brief MuJoCo interface — simulation mode (torque→state) / digital-twin mode (state→visual).
 
 #include <GLFW/glfw3.h>
 #include <mujoco/mujoco.h>
@@ -13,6 +11,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <map>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <set>
@@ -34,12 +33,11 @@ public:
       : Node("mujoco_interface"),
         model_(nullptr),
         data_(nullptr),
-        sim_frequency_(200.0),
+        sim_frequency_(1000.0),
         received_first_command_(false),
         visualization_only_(false) {
     RCLCPP_INFO(this->get_logger(), "[START] MuJoCo interface node starting");
 
-    // ========== 声明并获取运行模式参数 ==========
     this->declare_parameter("visualization_only", false);
     visualization_only_ = this->get_parameter("visualization_only").as_bool();
 
@@ -51,7 +49,6 @@ public:
                   "[MODE] Physics Simulation (subscribing /effort_controller/commands)");
     }
 
-    // 动态获取包路径（编译时查表，零运行时开销）
     try {
       pkg_share_dir_ = ament_index_cpp::get_package_share_directory("arv_v1_model");
       urdf_path_ = pkg_share_dir_ + "/urdf/arv_v1.urdf";
@@ -63,16 +60,14 @@ public:
       throw;
     }
 
-    // 创建临时目录（使用 /tmp 避免权限问题）
     temp_dir_ = std::filesystem::temp_directory_path() / "arv_v1_mujoco";
     std::filesystem::create_directories(temp_dir_);
     RCLCPP_INFO(this->get_logger(), "[OK] Temp directory: %s", temp_dir_.c_str());
 
-    // 障碍物场景配置文件路径
     this->declare_parameter("scene_config_file", std::string(""));
     scene_config_path_ = this->get_parameter("scene_config_file").as_string();
     if (scene_config_path_.empty()) {
-      // 默认查找 arv_v1_moveit 包下的配置
+      // 默认: arv_v1_moveit/config/scene_obstacles.yaml
       try {
         auto moveit_share = ament_index_cpp::get_package_share_directory("arv_v1_moveit");
         scene_config_path_ = moveit_share + "/config/scene_obstacles.yaml";
@@ -82,7 +77,6 @@ public:
       }
     }
 
-    // ========== 步骤1: 加载MuJoCo模型 ==========
     if (!loadMuJoCoModel()) {
       RCLCPP_ERROR(this->get_logger(), "[ERROR] MuJoCo model loading failed");
       throw std::runtime_error("Failed to load MuJoCo model");
@@ -90,18 +84,14 @@ public:
     RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo model loaded successfully");
     RCLCPP_INFO(this->get_logger(), "   Number of joints: %d", model_->nq);
 
-    // ========== 步骤2: 设置初始位姿 ==========
     setInitialPose();
 
-    // ========== 步骤3: 根据模式设置话题通信 ==========
     if (visualization_only_) {
-      // 数字孪生模式: 订阅 /joint_states，不发布
       joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
           "/joint_states", 10,
           std::bind(&MuJoCoInterfaceNode::jointStateCallback, this, std::placeholders::_1));
       RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /joint_states (digital twin)");
     } else {
-      // 物理仿真模式: 订阅力矩，发布关节状态
       effort_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
           "/effort_controller/commands", 10,
           std::bind(&MuJoCoInterfaceNode::effortCallback, this, std::placeholders::_1));
@@ -110,7 +100,6 @@ public:
       joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
       RCLCPP_INFO(this->get_logger(), "[OK] Publishing: /joint_states");
 
-      // 仿真模式: 200Hz定时器
       auto period = std::chrono::duration<double, std::milli>(1000.0 / sim_frequency_);
       sim_timer_ =
           this->create_wall_timer(period, std::bind(&MuJoCoInterfaceNode::simulationStep, this));
@@ -118,11 +107,17 @@ public:
     }
     RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo interface node initialization completed");
 
-    // ========== 步骤5.5: 启动健康监控定时器 (5Hz) ==========
     health_timer_ = this->create_wall_timer(std::chrono::milliseconds(5000),
                                             std::bind(&MuJoCoInterfaceNode::healthCheck, this));
 
-    // ========== 步骤6: 初始化并启动可视化 ==========
+    cartesian_target_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/cartesian_target_pose", rclcpp::SensorDataQoS(),
+        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+          std::lock_guard<std::mutex> lock(target_pose_mutex_);
+          target_pose_ = *msg;
+          has_target_pose_ = true;
+        });
+
     render_running_ = false;
     window_ = nullptr;
 
@@ -140,13 +135,11 @@ public:
   ~MuJoCoInterfaceNode() {
     RCLCPP_INFO(this->get_logger(), "[INFO] Cleaning up MuJoCo resources...");
 
-    // 停止渲染线程
     render_running_ = false;
     if (render_thread_.joinable()) {
       render_thread_.join();
     }
 
-    // 清理渲染资源
     if (window_) {
       mjr_freeContext(&con_);
       mjv_freeScene(&scene_);
@@ -166,28 +159,28 @@ public:
   }
 
 private:
-  // ========== MuJoCo相关成员变量 ==========
+  // ========== MuJoCo ==========
   mjModel *model_;
   mjData *data_;
 
-  // ========== ROS2接口 ==========
+  // ========== ROS2 ==========
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr effort_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;  // 数字孪生模式
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;  // digital-twin
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::TimerBase::SharedPtr sim_timer_;
 
   // ========== 运行模式 ==========
-  bool visualization_only_;  // true=数字孪生模式，false=物理仿真模式
+  bool visualization_only_;  // true=digital-twin, false=physics-sim
 
-  // ========== 配置参数 ==========
-  std::string pkg_share_dir_;       // arv_v1_model 包共享目录
-  std::string urdf_path_;           // URDF 文件路径
-  std::string mesh_dir_;            // Mesh 文件目录
-  std::filesystem::path temp_dir_;  // 临时文件目录
+  // ========== 配置 ==========
+  std::string pkg_share_dir_;
+  std::string urdf_path_;
+  std::string mesh_dir_;
+  std::filesystem::path temp_dir_;
   double sim_frequency_;
-  std::string scene_config_path_;  // 障碍物配置 YAML 路径
+  std::string scene_config_path_;  // scene_obstacles.yaml path
 
-  // ========== 可视化相关成员变量 ==========
+  // ========== 可视化 ==========
   std::thread render_thread_;
   std::atomic<bool> render_running_;
 
@@ -198,7 +191,7 @@ private:
   mjrContext con_;
   std::mutex sim_mutex_;
 
-  // ========== 启动安全相关 ==========
+  // ========== 启动安全 ==========
   std::atomic<bool> received_first_command_;
 
   // ========== Health monitoring ==========
@@ -206,25 +199,25 @@ private:
   std::atomic<uint64_t> command_rx_count_{0};
   rclcpp::TimerBase::SharedPtr health_timer_;
 
-  // ========== 关节名称 ==========
+  // ========== 关节 ==========
   const std::vector<std::string> joint_names_ = {"joint_1",        "joint_2",       "joint_3",
                                                  "joint_4",        "joint_5",       "joint_6",
                                                  "joint_gripper1", "joint_gripper2"};
 
-  // ========== 磁力吸引系统 ==========
-  // 恒力模型: 所有矿核指向六边形中心, 被棍子碰撞挡住 → 无穿越振荡
+  // ========== 磁力吸引 ==========
+  // 恒力模型: 矿核指向六边形中心, 被棍子碰撞挡住 → 无穿越振荡
   struct MagnetAnchor {
-    int body_id;         // MuJoCo body ID
-    double anchor[3];    // 锚点: 六边形中心世界坐标
-    double force_mag;    // 吸引力大小 (N)
-    double detach_dist;  // 脱离距离 (m), 从中心算
-    bool detached;       // 已脱离标志
+    int body_id;
+    double anchor[3];    // 锚点世界坐标
+    double force_mag;    // N
+    double detach_dist;  // 脱离距离 (m)
+    bool detached;
   };
   std::vector<MagnetAnchor> magnet_anchors_;
   double magnet_force_default_ = 14.4;  // mg + 10N
-  double magnet_detach_dist_ = 0.25;    // 从中心脱离距 (core~0.11m离中心, 留余量)
+  double magnet_detach_dist_ = 0.25;    // core~0.11m离中心, 留余量
 
-  // ========== 交互状态变量 ==========
+  // ========== 交互状态 ==========
   bool button_left_ = false;
   bool button_middle_ = false;
   bool button_right_ = false;
@@ -236,35 +229,50 @@ private:
   bool show_contacts_ = false;
   bool show_forces_ = false;
 
-  // ========== 静态回调函数声明 ==========
+  // ========== 笛卡尔目标可视化 ==========
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr cartesian_target_sub_;
+  std::mutex target_pose_mutex_;  // 保护 target_pose_ (renderLoop读, callback写)
+  geometry_msgs::msg::PoseStamped target_pose_;
+  bool has_target_pose_ = false;
+  bool show_target_marker_ = true;  // 'T' 键切换
+
+  static void quatToMat(double qw, double qx, double qy, double qz, double mat[9]) {
+    mat[0] = 1 - 2 * (qy * qy + qz * qz);
+    mat[1] = 2 * (qx * qy - qz * qw);
+    mat[2] = 2 * (qx * qz + qy * qw);
+    mat[3] = 2 * (qx * qy + qz * qw);
+    mat[4] = 1 - 2 * (qx * qx + qz * qz);
+    mat[5] = 2 * (qy * qz - qx * qw);
+    mat[6] = 2 * (qx * qz - qy * qw);
+    mat[7] = 2 * (qy * qz + qx * qw);
+    mat[8] = 1 - 2 * (qx * qx + qy * qy);
+  }
+
+  void drawTargetMarker();
+
   static void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods);
   static void mouseMoveCallback(GLFWwindow *window, double xpos, double ypos);
   static void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
   static void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
 
-  // ========== 成员函数声明 ==========
   bool loadMuJoCoModel();
   void setInitialPose();
-  std::string buildObstacleMJCF();  // 从 YAML 生成障碍物 MJCF
-  std::string loadObstacleURDF(const std::string &id,
-                               const std::string &urdf_uri);  // URDF→MJCF 转换
+  std::string buildObstacleMJCF();
+  std::string loadObstacleURDF(const std::string &id, const std::string &urdf_uri);
   void effortCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
-  void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);  // 数字孪生
+  void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
   void simulationStep();
   void publishJointStates();
   bool initializeVisualization();
   void renderLoop();
   void healthCheck();
-  void applyMagnetForces();     // 磁力吸引
-  void collectMagnetAnchors();  // 模型加载后收集锚点
+  void applyMagnetForces();
+  void collectMagnetAnchors();
 };
-
-// ========== 成员函数实现 ==========
 
 bool MuJoCoInterfaceNode::loadMuJoCoModel() {
   RCLCPP_INFO(this->get_logger(), "[INFO] Loading URDF: %s", urdf_path_.c_str());
 
-  // 读取URDF文件
   std::ifstream urdf_file(urdf_path_);
   if (!urdf_file.is_open()) {
     RCLCPP_ERROR(this->get_logger(), "[ERROR] Cannot open URDF file: %s", urdf_path_.c_str());
@@ -277,13 +285,13 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
 
   RCLCPP_INFO(this->get_logger(), "[OK] URDF file read successfully");
 
-  // 插入MuJoCo编译器设置（使用动态获取的 mesh 目录）
+  // 插入 <mujoco> 编译器设置 (meshdir 指向动态包路径)
   std::string mujoco_compiler =
       "\n  <mujoco>\n"
       "    <compiler meshdir=\"" +
       mesh_dir_ +
       "\" strippath=\"false\"/>\n"
-      "    <option timestep=\"0.005\"/>\n"
+      "    <option timestep=\"0.001\"/>\n"
       "    <size nconmax=\"0\" njmax=\"0\"/>\n"
       "  </mujoco>\n";
 
@@ -296,7 +304,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
   size_t bracket_pos = urdf_string.find(">", robot_pos);
   urdf_string.insert(bracket_pos + 1, mujoco_compiler);
 
-  // 替换mesh路径
+  // strip package:// prefix (meshdir already set in compiler tag)
   std::string find_str = "package://arv_v1_model/meshes/";
   std::string replace_str = "";
   size_t pos = 0;
@@ -305,13 +313,11 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     pos += replace_str.length();
   }
 
-  // 写入临时文件（使用 /tmp 目录）
   std::string temp_urdf_path = temp_dir_ / ".mujoco_temp.urdf";
   std::ofstream temp_file(temp_urdf_path);
   temp_file << urdf_string;
   temp_file.close();
 
-  // 加载URDF
   char error[1000] = "Could not load XML model";
   mjModel *temp_model = mj_loadXML(temp_urdf_path.c_str(), nullptr, error, 1000);
   if (!temp_model) {
@@ -319,12 +325,10 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     return false;
   }
 
-  // 保存为MJCF（使用 /tmp 目录）
   std::string mjcf_path = temp_dir_ / ".mujoco_converted.xml";
   mj_saveLastXML(mjcf_path.c_str(), temp_model, error, 1000);
   mj_deleteModel(temp_model);
 
-  // 修改MJCF添加执行器
   std::ifstream mjcf_file(mjcf_path);
   std::string mjcf_string((std::istreambuf_iterator<char>(mjcf_file)),
                           std::istreambuf_iterator<char>());
@@ -346,16 +350,16 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
       "ctrlrange=\"-20 20\"/>\n"
       "    <motor name=\"actuator_gripper\" joint=\"joint_gripper1\" gear=\"1\" "
       "ctrllimited=\"true\" "
-      "ctrlrange=\"-5 5\"/>\n"
+      "ctrlrange=\"-70 70\"/>\n"
       "    <motor name=\"actuator_gripper2\" joint=\"joint_gripper2\" gear=\"1\" "
       "ctrllimited=\"true\" "
-      "ctrlrange=\"-5 5\"/>\n"
+      "ctrlrange=\"-70 70\"/>\n"
       "  </actuator>\n";
 
   size_t mujoco_end = mjcf_string.find("</mujoco>");
   mjcf_string.insert(mujoco_end, actuator_mjcf);
 
-  // 注入场景障碍物 (仅可视化，无碰撞，会被后续禁用碰撞循环统一禁用)
+  // 注入障碍物 (碰撞由下方 contype/conaffinity 统一设置)
   std::string obstacle_mjcf = buildObstacleMJCF();
   if (!obstacle_mjcf.empty()) {
     mujoco_end = mjcf_string.find("</mujoco>");
@@ -363,7 +367,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     RCLCPP_INFO(this->get_logger(), "[OK] Scene obstacles injected into MJCF");
   }
 
-  // 注入光照设置（提升 ambient，防止 MuJoCo 默认 ambient=0 导致背光面全黑）
+  // 提升 ambient 光照 (MuJoCo 默认 ambient=0 导致背光面全黑)
   std::string visual_mjcf =
       "\n  <visual>\n"
       "    <headlight ambient=\".4 .4 .4\" diffuse=\".8 .8 .8\" specular=\".1 .1 .1\"/>\n"
@@ -396,7 +400,7 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     size_t obs_start = mjcf_string.find("<body name=\"obstacle_");
     if (obs_start == std::string::npos) obs_start = mjcf_string.size();
 
-    // 分段处理，避免插入后偏移量失效
+    // 分段: 避免 insert 后偏移失效
     std::string robot_part = mjcf_string.substr(0, obs_start);
     std::string obs_part = mjcf_string.substr(obs_start);
 
@@ -414,25 +418,91 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
       }
     };
 
-    // 完全非弹性碰撞:
-    //   solref="0.005 2": 5ms时间常数(1步) + 阻尼比2(重度过阻尼, 零回弹)
-    //   solimp="0.99 0.99 0.0001 0.5 2": dmin=dmax=0.99 → 99%能量吸收
+    // 非弹性碰撞: solref 5ms+过阻尼, solimp 99%能量吸收
     inject_contype(robot_part,
                    " contype=\"1\" conaffinity=\"4\" friction=\"5.0 0.1 0.01\""
                    " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"");
     inject_contype(obs_part,
                    " contype=\"4\" conaffinity=\"1\" friction=\"0.001 0.001 0.0001\""
                    " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"");
+
+    // 夹爪碰撞替换: mesh → 纯视觉, 新增 box → 碰撞体
+    // mesh 碰撞面不规则导致接触力不稳定，box 提供干净的平面接触
+    for (const auto &grip_name : {"link_gripper1", "link_gripper2"}) {
+      std::string body_tag = "<body name=\"" + std::string(grip_name) + "\"";
+      size_t body_pos = robot_part.find(body_tag);
+      if (body_pos == std::string::npos) continue;
+
+      // 找到该 body 内的 geom (mesh)，将其碰撞组清零
+      size_t geom_pos = robot_part.find("<geom", body_pos);
+      if (geom_pos == std::string::npos) continue;
+      size_t geom_end = robot_part.find("/>", geom_pos);
+      if (geom_end == std::string::npos) continue;
+
+      // 替换 contype="1" → "0", conaffinity="4" → "0" (纯视觉)
+      std::string geom_str = robot_part.substr(geom_pos, geom_end + 2 - geom_pos);
+      std::string orig_geom = geom_str;
+      auto replace_attr = [](std::string &s, const std::string &attr, const std::string &val) {
+        size_t p = s.find(attr + "=\"");
+        if (p == std::string::npos) return;
+        size_t v_start = p + attr.size() + 2;
+        size_t v_end = s.find("\"", v_start);
+        s.replace(v_start, v_end - v_start, val);
+      };
+      replace_attr(geom_str, "contype", "0");
+      replace_attr(geom_str, "conaffinity", "0");
+      robot_part.replace(geom_pos, orig_geom.size(), geom_str);
+
+      // 在 geom 后插入 box 碰撞体
+      // gripper1: 内侧面朝 +Y, gripper2: 内侧面朝 -Y (对称)
+      bool is_grip1 = (std::string(grip_name) == "link_gripper1");
+      double box_cy = is_grip1 ? -0.035 : 0.054;  // box 中心 Y (靠内侧)
+      size_t insert_pos = geom_pos + geom_str.size();
+      char box_buf[512];
+      std::snprintf(box_buf, sizeof(box_buf),
+                    "\n      <geom name=\"%s_col\" type=\"box\" size=\"0.012 0.012 0.055\""
+                    " pos=\"0 %.4f 0.118\" contype=\"1\" conaffinity=\"4\""
+                    " friction=\"5.0 0.1 0.01\" solref=\"0.001 1\""
+                    " solimp=\"0.999 0.999 0.0001 0.5 2\" rgba=\"1 0.3 0.3 0.3\"/>",
+                    grip_name, box_cy);
+      robot_part.insert(insert_pos, box_buf);
+    }
+
     mjcf_string = robot_part + obs_part;
   }
 
-  // 保存最终MJCF（使用 /tmp 目录）
+  // 夹爪↔目标 硬接触 pair: 覆盖默认 solref/solimp, 不影响目标↔框架
+  {
+    std::vector<std::string> vcol_names;
+    size_t p = 0;
+    while ((p = mjcf_string.find("name=\"", p)) != std::string::npos) {
+      size_t ns = p + 6;
+      size_t ne = mjcf_string.find("\"", ns);
+      std::string name = mjcf_string.substr(ns, ne - ns);
+      if (name.find("_vcol_") != std::string::npos) vcol_names.push_back(name);
+      p = ne + 1;
+    }
+    if (!vcol_names.empty()) {
+      std::ostringstream contact_ss;
+      contact_ss << "\n  <contact>\n";
+      for (const auto &vcol : vcol_names) {
+        for (const auto &grip : {"link_gripper1_col", "link_gripper2_col"}) {
+          contact_ss << "    <pair geom1=\"" << grip << "\" geom2=\"" << vcol << "\""
+                     << " solref=\"0.001 1\" solimp=\"0.999 0.999 0.0001 0.5 2\""
+                     << " friction=\"5.0 5.0 0.1 0.1 0.01\"/>\n";
+        }
+      }
+      contact_ss << "  </contact>\n";
+      size_t muj_end = mjcf_string.find("</mujoco>");
+      mjcf_string.insert(muj_end, contact_ss.str());
+    }
+  }
+
   std::string final_mjcf_path = temp_dir_ / ".mujoco_final.xml";
   std::ofstream final_mjcf_file(final_mjcf_path);
   final_mjcf_file << mjcf_string;
   final_mjcf_file.close();
 
-  // 加载最终模型
   model_ = mj_loadXML(final_mjcf_path.c_str(), nullptr, error, 1000);
   if (!model_) {
     RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to load final MJCF: %s", error);
@@ -449,10 +519,8 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
 
   RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo model loaded successfully");
 
-  // mj_forward 计算初始状态，使 data_->xpos 有效 (collectMagnetAnchors 从中读取锚点)
+  // mj_forward 使 data_->xpos 有效 (collectMagnetAnchors 需要)
   mj_forward(model_, data_);
-
-  // 收集磁力锚点
   collectMagnetAnchors();
 
   return true;
@@ -461,7 +529,6 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
 void MuJoCoInterfaceNode::collectMagnetAnchors() {
   magnet_anchors_.clear();
 
-  // 从 scene_obstacles.yaml 读取 graspable 物体的初始位置作为锚点
   if (scene_config_path_.empty() || !std::filesystem::exists(scene_config_path_)) return;
 
   YAML::Node config;
@@ -474,7 +541,6 @@ void MuJoCoInterfaceNode::collectMagnetAnchors() {
   auto params = config["scene_manager"]["ros__parameters"];
   if (!params) return;
 
-  // 读取磁力参数 (可选覆盖默认值)
   if (params["magnet_force_N"]) magnet_force_default_ = params["magnet_force_N"].as<double>(14.4);
   if (params["magnet_detach_dist"])
     magnet_detach_dist_ = params["magnet_detach_dist"].as<double>(0.15);
@@ -487,7 +553,6 @@ void MuJoCoInterfaceNode::collectMagnetAnchors() {
     auto obs = params["obstacles"][id];
     if (!obs || !obs["graspable"] || !obs["graspable"].as<bool>(false)) continue;
 
-    // 查找 MuJoCo body ID
     std::string body_name = "obstacle_" + id;
     int bid = mj_name2id(model_, mjOBJ_BODY, body_name.c_str());
     if (bid < 0) {
@@ -495,14 +560,12 @@ void MuJoCoInterfaceNode::collectMagnetAnchors() {
       continue;
     }
 
-    // 锚点 = ore_frame 六边形中心 (所有core共用)
-    // X = core X, YZ = 六边形几何中心
-    // 力永远指向中心 → 被棍子碰撞挡住 → 无穿越振荡
+    // 锚点 = 六边形中心, 力指向中心 → 被棍子挡住无穿越
     MagnetAnchor anchor;
     anchor.body_id = bid;
     anchor.anchor[0] = obs["position"][0].as<double>(0);
-    anchor.anchor[1] = 0.0;  // 六边形中心 Y
-    anchor.anchor[2] = 0.7;  // 六边形中心 Z (6棒平均高度)
+    anchor.anchor[1] = 0.0;  // 六边形中心Y
+    anchor.anchor[2] = 0.7;  // 六边形中心Z (6棒平均高度)
     anchor.force_mag = magnet_force_default_;
     anchor.detach_dist = magnet_detach_dist_;
     anchor.detached = false;
@@ -520,24 +583,19 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
   for (auto &ma : magnet_anchors_) {
     if (ma.detached) continue;
 
-    // 获取当前 body 世界坐标
     const double *xpos = data_->xpos + 3 * ma.body_id;
-
-    // 计算偏移向量: 锚点 - 当前位置
     double dx = ma.anchor[0] - xpos[0];
     double dy = ma.anchor[1] - xpos[1];
     double dz = ma.anchor[2] - xpos[2];
     double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-    // 调试日志: 前5秒每秒输出一次锚点 vs 实际位置
     RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "[MAGNET-DBG] body=%d anchor=[%.4f,%.4f,%.4f] xpos=[%.4f,%.4f,%.4f] dist=%.4f F=%.1fN",
         ma.body_id, ma.anchor[0], ma.anchor[1], ma.anchor[2], xpos[0], xpos[1], xpos[2], dist,
         ma.force_mag);
 
-    // 热身保护: 前200步(~1s@200Hz)不检测脱离, 等碰撞求解器稳定
-    // 防止初始帧碰撞弹力瞬间超 detach_dist 导致误脱离
+    // [SAFETY] 前200步不检测脱离, 防止初始碰撞弹力误触发
     if (dist > ma.detach_dist && sim_step_count_ > 200) {
       ma.detached = true;
       data_->xfrc_applied[6 * ma.body_id + 0] = 0;
@@ -547,21 +605,18 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
       continue;
     }
 
-    // 施加吸引力 (方向: 指向锚点, 恒定大小)
     if (dist > 1e-6) {
       double scale = ma.force_mag / dist;
       double fx = dx * scale, fy = dy * scale, fz = dz * scale;
       data_->xfrc_applied[6 * ma.body_id + 0] = fx;
       data_->xfrc_applied[6 * ma.body_id + 1] = fy;
       data_->xfrc_applied[6 * ma.body_id + 2] = fz;
-      // 前10步逐帧输出力向量, 确认方向正确
       if (sim_step_count_ < 10) {
         RCLCPP_WARN(get_logger(),
                     "[MAGNET-INIT] body=%d F=[%.2f,%.2f,%.2f] dist=%.4f dx=[%.4f,%.4f,%.4f]",
                     ma.body_id, fx, fy, fz, dist, dx, dy, dz);
       }
     } else {
-      // 已在锚点上，清零
       data_->xfrc_applied[6 * ma.body_id + 0] = 0;
       data_->xfrc_applied[6 * ma.body_id + 1] = 0;
       data_->xfrc_applied[6 * ma.body_id + 2] = 0;
@@ -570,10 +625,8 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
 }
 
 void MuJoCoInterfaceNode::setInitialPose() {
-  // 使用 MoveIt SRDF 中定义的 "Start" 姿态值
-  // joint_1~joint_6 = {0, 2.6343, 1.0785, 0, 0, 0}
-  double initial_q[kSimJoints] = {0.0,   2.6343, 1.0785, 0.0,
-                                  0.0,   0.0,   0.0,   0.0};  // arm + gripper
+  // SRDF "Start" pose
+  double initial_q[kSimJoints] = {0.0, 2.6343, 1.0785, 0.0, 0.0, 0.0, 0.0, 0.0};  // arm + gripper
   for (int i = 0; i < kSimJoints; i++) {
     data_->qpos[i] = initial_q[i];
   }
@@ -584,7 +637,6 @@ void MuJoCoInterfaceNode::setInitialPose() {
 
 std::string MuJoCoInterfaceNode::loadObstacleURDF(const std::string &id,
                                                   const std::string &urdf_uri) {
-  // 解析 package:// URI → 磁盘路径
   std::string disk_path = urdf_uri;
   const std::string pkg_prefix = "package://";
   if (urdf_uri.find(pkg_prefix) == 0) {
@@ -610,20 +662,15 @@ std::string MuJoCoInterfaceNode::loadObstacleURDF(const std::string &id,
     return "";
   }
 
-  // 读取 URDF 文件
   std::ifstream f(disk_path);
   std::string urdf_str((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
   f.close();
 
-  // 获取 mesh 目录 (URDF 在 urdf/obstacles/ 下, meshes 在包 share 根目录下)
-  // disk_path: .../share/arv_v1_model/urdf/obstacles/ore_frame.urdf
-  // obs_dir:   .../share/arv_v1_model/urdf/obstacles
-  // 需要上溯两级到包 share 根目录, 再拼 meshes/
+  // 上溯两级: urdf/obstacles/ → share/arv_v1_model/ → meshes/
   std::string obs_dir = std::filesystem::path(disk_path).parent_path().string();
   std::string obs_mesh_dir =
       (std::filesystem::path(obs_dir).parent_path().parent_path() / "meshes").string();
 
-  // 插入 MuJoCo compiler 设置 (meshdir 指向 mesh 目录)
   std::string compiler_tag = "\n  <mujoco>\n    <compiler meshdir=\"" + obs_mesh_dir +
                              "\" strippath=\"false\"/>\n  </mujoco>\n";
   size_t robot_pos = urdf_str.find("<robot");
@@ -634,20 +681,17 @@ std::string MuJoCoInterfaceNode::loadObstacleURDF(const std::string &id,
   size_t bracket = urdf_str.find(">", robot_pos);
   urdf_str.insert(bracket + 1, compiler_tag);
 
-  // 替换 package:// mesh 路径 (和主机械臂一样的处理方式)
   std::string find_str = "package://arv_v1_model/meshes/";
   size_t pos = 0;
   while ((pos = urdf_str.find(find_str, pos)) != std::string::npos) {
     urdf_str.replace(pos, find_str.length(), "");
   }
 
-  // 写入临时 URDF
   std::string temp_path = (temp_dir_ / (".obs_" + id + ".urdf")).string();
   std::ofstream out(temp_path);
   out << urdf_str;
   out.close();
 
-  // MuJoCo 加载 URDF → 导出 MJCF
   char error[1000] = "";
   mjModel *tmp = mj_loadXML(temp_path.c_str(), nullptr, error, 1000);
   if (!tmp) {
@@ -660,7 +704,6 @@ std::string MuJoCoInterfaceNode::loadObstacleURDF(const std::string &id,
   mj_saveLastXML(mjcf_path.c_str(), tmp, error, 1000);
   mj_deleteModel(tmp);
 
-  // 读取生成的 MJCF
   std::ifstream mf(mjcf_path);
   std::string mjcf_str((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
   mf.close();
@@ -696,8 +739,8 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
   std::ostringstream body_ss;
   bool has_asset = false;
   int count = 0;
-  std::map<std::string, std::string> urdf_mjcf_cache;  // urdf_uri → MJCF 缓存
-  std::set<std::string> loaded_assets;                 // 已注入 asset 的 urdf_uri
+  std::map<std::string, std::string> urdf_mjcf_cache;
+  std::set<std::string> loaded_assets;
 
   for (const auto &id_node : obstacle_ids) {
     std::string id = id_node.as<std::string>();
@@ -709,7 +752,7 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
     double px = pos[0].as<double>(0), py = pos[1].as<double>(0), pz = pos[2].as<double>(0);
     bool graspable = obs["graspable"].as<bool>(false);
 
-    // RPY → MuJoCo euler (弧度, 因为 mj_saveLastXML 导出 angle="radian")
+    // RPY 弧度 (mj_saveLastXML 导出 angle="radian")
     std::string euler_attr;
     if (obs["orientation_rpy"]) {
       double r = obs["orientation_rpy"][0].as<double>(0);
@@ -726,7 +769,6 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
       std::string urdf_uri = obs["urdf_path"].as<std::string>("");
       if (urdf_uri.empty()) continue;
 
-      // 缓存 URDF→MJCF 转换结果 (同一 STL 只转换一次)
       std::string child_mjcf;
       if (urdf_mjcf_cache.count(urdf_uri)) {
         child_mjcf = urdf_mjcf_cache[urdf_uri];
@@ -736,7 +778,6 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
       }
       if (child_mjcf.empty()) continue;
 
-      // 从子 MJCF 提取 <asset> 内容和 <worldbody> 内容
       auto extract = [](const std::string &src, const std::string &tag) -> std::string {
         std::string open = "<" + tag + ">";
         std::string close = "</" + tag + ">";
@@ -749,7 +790,7 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
       std::string child_asset = extract(child_mjcf, "asset");
       std::string child_body = extract(child_mjcf, "worldbody");
 
-      // collision_shapes: 虚拟碰撞体替代 STL 凸包 (直接定义或模板引用)
+      // 虚拟碰撞体 (直接定义或模板引用)
       YAML::Node vcol_shapes;
       if (obs["collision_shapes"] && obs["collision_shapes"].IsSequence()) {
         vcol_shapes = obs["collision_shapes"];
@@ -765,7 +806,6 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
       }
       bool use_vcol = vcol_shapes && vcol_shapes.IsSequence() && vcol_shapes.size() > 0;
       if (use_vcol) {
-        // 禁用 URDF mesh geom 碰撞 (仅保留视觉)
         size_t gp = 0;
         while ((gp = child_body.find("<geom", gp)) != std::string::npos) {
           size_t ge = child_body.find("/>", gp);
@@ -777,14 +817,12 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
                     "[OK] '%s': STL mesh set visual-only, using virtual collision", id.c_str());
       }
 
-      // 仅首次遇到该 URDF 时注入 asset (避免同名 mesh 重复)
       if (!child_asset.empty() && loaded_assets.find(urdf_uri) == loaded_assets.end()) {
         asset_ss << child_asset;
         has_asset = true;
         loaded_assets.insert(urdf_uri);
       }
 
-      // 包裹在带位置的 body 中
       body_ss << "    <body name=\"obstacle_" << id << "\" pos=\"" << px << " " << py << " " << pz
               << "\"" << euler_attr << ">\n";
       if (graspable) {
@@ -792,7 +830,6 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
       }
       body_ss << child_body;
 
-      // 生成虚拟碰撞几何体
       if (use_vcol) {
         int si = 0;
         for (const auto &shape : vcol_shapes) {
@@ -828,13 +865,11 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
           } else if (st == "sphere") {
             gs << " type=\"sphere\" size=\"" << shape["dimensions"][0].as<double>(0.05) << "\"";
           }
-          // graspable vcol: contype=8(1000), conaffinity=3(0011)
-          //   bit0: 碰机械臂(ct=1) ✓  bit1: 碰矿框(ct=2) ✓
-          //   bit3不设: 矿核间(ct=8) 不碰撞 → 避免初始穿插爆炸
-          // 静态障碍物 vcol: contype=2, conaffinity=1
-          // 完全非弹性碰撞: solref 5ms+阻尼比2, solimp 99%能量吸收
+          // graspable: ct=8(1000) ca=3(0011) → 碰臂+矿框, 矿核间不碰
+          // static:    ct=2       ca=1       → 碰臂
+          // 非弹性碰撞: solref 5ms+过阻尼, solimp 99%吸收
           if (graspable) {
-            gs << " mass=\"0\" rgba=\"" << rgba
+            gs << " name=\"" << id << "_vcol_" << si << "\"" << " mass=\"0\" rgba=\"" << rgba
                << "\" contype=\"8\" conaffinity=\"3\" friction=\"0.01 0.005 0.0001\""
                << " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"/>\n";
           } else {
@@ -849,7 +884,7 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
 
       body_ss << "    </body>\n";
     } else {
-      // box / cylinder / sphere (保留原有逻辑)
+      // box / cylinder / sphere primitives
       std::string geom_attrs;
       if (type == "box") {
         auto d = obs["dimensions"];
@@ -877,8 +912,7 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
       if (graspable) {
         body_ss << "      <freejoint name=\"fj_" << id << "\"/>\n";
       }
-      // 地面: contype=4 conaffinity=9(0b1001) → 碰机械臂(bit0) + 碰矿核(bit3)
-      // 非弹性碰撞, 矿核掉地面不弹
+      // ground: ct=4 ca=9(1001) → 碰臂+矿核, 非弹性
       if (id == "ground_plane") {
         body_ss << "      <geom " << geom_attrs << " rgba=\"0.5 0.5 0.5 0.4\""
                 << " contype=\"4\" conaffinity=\"9\""
@@ -923,10 +957,9 @@ void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray:
     data_->ctrl[i] = msg->data[i];
   }
 
-  data_->ctrl[kSimJoints - 1] = -data_->ctrl[kAllJoints - 1];  // 添加反向夹爪对应
+  data_->ctrl[kSimJoints - 1] = -data_->ctrl[kAllJoints - 1];  // mimic gripper
 }
 
-// 数字孪生模式: 接收外部关节状态，更新MuJoCo显示
 void MuJoCoInterfaceNode::jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
   if (msg->position.size() < static_cast<size_t>(kAllJoints)) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
@@ -935,12 +968,11 @@ void MuJoCoInterfaceNode::jointStateCallback(const sensor_msgs::msg::JointState:
   }
 
   std::lock_guard<std::mutex> lock(sim_mutex_);
-  // 更新 MuJoCo qpos 用于3D渲染 (6轴 + 夹爪)
   for (int i = 0; i < kAllJoints; ++i) {
     data_->qpos[i] = msg->position[i];
   }
-  data_->qpos[kSimJoints - 1] = -data_->qpos[kAllJoints - 1];  // 反向夹爪对应
-  // 更新前向运动学（仅用于渲染，不做物理仿真）
+  data_->qpos[kSimJoints - 1] = -data_->qpos[kAllJoints - 1];  // mimic gripper
+  // FK only (no physics step in digital-twin mode)
   mj_forward(model_, data_);
 }
 
@@ -961,7 +993,7 @@ void MuJoCoInterfaceNode::simulationStep() {
   applyMagnetForces();
   mj_step(model_, data_);
 
-  // NaN 检测: 仅日志, 不重置 (调试模式)
+  // [SAFETY] NaN检测 (仅日志, TODO: 调试后恢复重置)
   if (data_->warning[mjWARN_BADQACC].number > 0) {
     RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000,
                           "[SAFETY] QACC NaN detected (count=%d) — reset DISABLED for debug",
@@ -983,7 +1015,7 @@ void MuJoCoInterfaceNode::publishJointStates() {
   auto msg = sensor_msgs::msg::JointState();
   msg.header.stamp = this->now();
 
-  // 只发布 7 个硬件对应的关节 (6 arm + 1 main gripper)
+  // 7 joints (6 arm + 1 gripper), 不含 mimic
   for (int i = 0; i < kAllJoints; i++) {
     msg.name.push_back(joint_names_[i]);
     msg.position.push_back(data_->qpos[i]);
@@ -1049,6 +1081,7 @@ void MuJoCoInterfaceNode::renderLoop() {
       std::lock_guard<std::mutex> lock(sim_mutex_);
       mjv_updateScene(model_, data_, &opt_, nullptr, &cam_, mjCAT_ALL, &scene_);
     }
+    drawTargetMarker();
 
     mjrRect viewport;
     glfwGetFramebufferSize(window_, &viewport.width, &viewport.height);
@@ -1058,7 +1091,7 @@ void MuJoCoInterfaceNode::renderLoop() {
     mjr_render(viewport, &scene_, &con_);
 
     if (show_ui_) {
-      // 快照数据（持锁期间只做内存拷贝，不做 OpenGL 调用）
+      // 持锁快照, 避免 OpenGL 调用阻塞 sim_mutex_
       double snap_time, snap_qpos[6], snap_qvel[6], snap_ctrl[6];
       bool snap_paused;
       {
@@ -1078,25 +1111,21 @@ void MuJoCoInterfaceNode::renderLoop() {
       const float line_step = 20.0f / viewport.height;
       int ln = 0;
 
-      // Line 1: time + mode
       snprintf(status, sizeof(status), "Time: %.2f s | %s", snap_time,
                snap_paused ? "PAUSED" : "RUNNING");
       mjr_text(mjFONT_NORMAL, status, &con_, margin_x, 1.0f - margin_y - (ln++) * line_step, 1.0f,
                1.0f, 1.0f);
 
-      // Line 2: joint positions
       snprintf(status, sizeof(status), "Pos: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f] rad",
                snap_qpos[0], snap_qpos[1], snap_qpos[2], snap_qpos[3], snap_qpos[4], snap_qpos[5]);
       mjr_text(mjFONT_NORMAL, status, &con_, margin_x, 1.0f - margin_y - (ln++) * line_step, 1.0f,
                1.0f, 0.0f);
 
-      // Line 3: joint velocities
       snprintf(status, sizeof(status), "Vel: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f] rad/s",
                snap_qvel[0], snap_qvel[1], snap_qvel[2], snap_qvel[3], snap_qvel[4], snap_qvel[5]);
       mjr_text(mjFONT_NORMAL, status, &con_, margin_x, 1.0f - margin_y - (ln++) * line_step, 0.0f,
                1.0f, 1.0f);
 
-      // Line 4: torque (simulation mode only; in digital-twin mode ctrl is always 0)
       if (!visualization_only_) {
         snprintf(status, sizeof(status), "Torque: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f] Nm",
                  snap_ctrl[0], snap_ctrl[1], snap_ctrl[2], snap_ctrl[3], snap_ctrl[4],
@@ -1105,9 +1134,9 @@ void MuJoCoInterfaceNode::renderLoop() {
                  0.5f, 0.0f);
       }
 
-      // Bottom-left: key hints
-      mjr_text(mjFONT_NORMAL, "[Space]Pause [H]HideUI [R]ResetCam [C]Contacts [F]Forces [ESC]Exit",
-               &con_, margin_x, 10.0f / viewport.height, 0.7f, 0.7f, 0.7f);
+      mjr_text(mjFONT_NORMAL,
+               "[Space]Pause [H]HideUI [R]Reset [C]Contacts [F]Forces [T]Target [ESC]Exit", &con_,
+               margin_x, 10.0f / viewport.height, 0.7f, 0.7f, 0.7f);
     }
 
     glfwSwapBuffers(window_);
@@ -1117,7 +1146,7 @@ void MuJoCoInterfaceNode::renderLoop() {
   RCLCPP_INFO(this->get_logger(), "[INFO] Render loop ended");
 }
 
-// ========== 静态回调函数实现 ==========
+// ========== GLFW callbacks ==========
 
 void MuJoCoInterfaceNode::mouseButtonCallback(GLFWwindow *window, int button, int action,
                                               int mods) {
@@ -1150,16 +1179,11 @@ void MuJoCoInterfaceNode::mouseMoveCallback(GLFWwindow *window, double xpos, dou
   node->lastx_ = xpos;
   node->lasty_ = ypos;
 
-  // 左键：旋转视角
   if (node->button_left_) {
     node->cam_.azimuth += dx * 0.3;
     node->cam_.elevation += dy * 0.3;
-  }
-  // 右键：平移（简化版，直接修改 lookat）
-  else if (node->button_right_) {
+  } else if (node->button_right_) {
     double moveScale = 0.001 * node->cam_.distance;
-
-    // 计算相机方向（简化版）
     double azimuth_rad = node->cam_.azimuth * M_PI / 180.0;
     double right_x = -std::sin(azimuth_rad);
     double right_y = std::cos(azimuth_rad);
@@ -1167,9 +1191,7 @@ void MuJoCoInterfaceNode::mouseMoveCallback(GLFWwindow *window, double xpos, dou
     node->cam_.lookat[0] -= moveScale * (dx * right_x);
     node->cam_.lookat[1] -= moveScale * (dx * right_y);
     node->cam_.lookat[2] += moveScale * dy;
-  }
-  // 中键：缩放
-  else if (node->button_middle_) {
+  } else if (node->button_middle_) {
     node->cam_.distance *= (1.0 - dy * 0.01);
     if (node->cam_.distance < 0.1) node->cam_.distance = 0.1;
     if (node->cam_.distance > 50.0) node->cam_.distance = 50.0;
@@ -1216,17 +1238,21 @@ void MuJoCoInterfaceNode::keyCallback(GLFWwindow *window, int key, int scancode,
       std::lock_guard<std::mutex> lock(node->sim_mutex_);
       mj_resetData(node->model_, node->data_);
       node->setInitialPose();
-      // 清除所有外力和控制量
       std::fill(node->data_->xfrc_applied, node->data_->xfrc_applied + 6 * node->model_->nbody,
                 0.0);
       std::fill(node->data_->ctrl, node->data_->ctrl + node->model_->nu, 0.0);
-      // 重置磁力锚点 (恢复 detached 状态)
       node->collectMagnetAnchors();
       node->sim_step_count_ = 0;
       node->received_first_command_ = false;
       RCLCPP_INFO(node->get_logger(), "[RESET] Simulation reset to initial pose (press R)");
       break;
     }
+
+    case GLFW_KEY_T:
+      node->show_target_marker_ = !node->show_target_marker_;
+      RCLCPP_INFO(node->get_logger(), "[INFO] Target marker %s",
+                  node->show_target_marker_ ? "ON" : "OFF");
+      break;
 
     case GLFW_KEY_V:
       node->cam_.azimuth = 90.0;
@@ -1241,6 +1267,87 @@ void MuJoCoInterfaceNode::keyCallback(GLFWwindow *window, int key, int scancode,
     case GLFW_KEY_ESCAPE:
       glfwSetWindowShouldClose(window, GLFW_TRUE);
       break;
+  }
+}
+
+// --- 笛卡尔目标标记: 半透明球 + RGB轴箭头 ---
+void MuJoCoInterfaceNode::drawTargetMarker() {
+  if (!show_target_marker_) return;
+
+  // target_pose 在 base_link 坐标系下, 需变换到 MuJoCo 世界系
+  double local_pos[3];
+  double local_mat[9];
+  {
+    std::lock_guard<std::mutex> lock(target_pose_mutex_);
+    if (!has_target_pose_) return;
+    local_pos[0] = target_pose_.pose.position.x;
+    local_pos[1] = target_pose_.pose.position.y;
+    local_pos[2] = target_pose_.pose.position.z;
+    auto &q = target_pose_.pose.orientation;
+    quatToMat(q.w, q.x, q.y, q.z, local_mat);
+  }
+
+  // 从 MuJoCo data 读取 base_link body 的世界位姿 (需持锁)
+  double base_p[3], base_m[9];
+  {
+    std::lock_guard<std::mutex> lock(sim_mutex_);
+    int base_id = mj_name2id(model_, mjOBJ_BODY, "base_link");
+    if (base_id < 0) base_id = 0;
+    std::memcpy(base_p, data_->xpos + 3 * base_id, 3 * sizeof(double));
+    std::memcpy(base_m, data_->xmat + 9 * base_id, 9 * sizeof(double));
+  }
+
+  // pos_world = base_p + base_m * local_pos
+  double pos[3];
+  for (int i = 0; i < 3; i++) {
+    pos[i] = base_p[i] + base_m[i * 3 + 0] * local_pos[0] + base_m[i * 3 + 1] * local_pos[1] +
+             base_m[i * 3 + 2] * local_pos[2];
+  }
+
+  // mat_world = base_m * local_mat
+  double mat[9];
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      mat[i * 3 + j] = base_m[i * 3 + 0] * local_mat[0 * 3 + j] +
+                       base_m[i * 3 + 1] * local_mat[1 * 3 + j] +
+                       base_m[i * 3 + 2] * local_mat[2 * 3 + j];
+    }
+  }
+
+  if (scene_.ngeom + 4 >= scene_.maxgeom) return;
+
+  // 球体: 半透明红
+  const float sphere_rgba[4] = {1.0f, 0.2f, 0.2f, 0.4f};
+  const mjtNum sphere_size[3] = {0.015, 0.015, 0.015};
+  mjv_initGeom(&scene_.geoms[scene_.ngeom], mjGEOM_SPHERE, sphere_size, pos, nullptr, sphere_rgba);
+  scene_.geoms[scene_.ngeom].category = mjCAT_DECOR;
+  scene_.geoms[scene_.ngeom].objtype = mjOBJ_UNKNOWN;
+  scene_.geoms[scene_.ngeom].objid = -1;
+  scene_.ngeom++;
+
+  // XYZ 轴箭头 (50mm)
+  constexpr double kAxisLen = 0.05;
+  constexpr mjtNum kArrowWidth = 0.003;
+  const float axis_rgba[3][4] = {
+      {1.0f, 0.0f, 0.0f, 0.8f},
+      {0.0f, 1.0f, 0.0f, 0.8f},
+      {0.0f, 0.0f, 1.0f, 0.8f},
+  };
+  for (int ax = 0; ax < 3; ax++) {
+    // 旋转矩阵第 ax 列 = 世界坐标下的局部轴方向 (行主序: col j = mat[0*3+j], mat[1*3+j],
+    // mat[2*3+j])
+    const mjtNum to[3] = {
+        pos[0] + mat[0 * 3 + ax] * kAxisLen,
+        pos[1] + mat[1 * 3 + ax] * kAxisLen,
+        pos[2] + mat[2 * 3 + ax] * kAxisLen,
+    };
+    mjv_initGeom(&scene_.geoms[scene_.ngeom], mjGEOM_ARROW, nullptr, nullptr, nullptr,
+                 axis_rgba[ax]);
+    scene_.geoms[scene_.ngeom].category = mjCAT_DECOR;
+    scene_.geoms[scene_.ngeom].objtype = mjOBJ_UNKNOWN;
+    scene_.geoms[scene_.ngeom].objid = -1;
+    mjv_connector(&scene_.geoms[scene_.ngeom], mjGEOM_ARROW, kArrowWidth, pos, to);
+    scene_.ngeom++;
   }
 }
 
@@ -1274,7 +1381,7 @@ void MuJoCoInterfaceNode::healthCheck() {
   last_cmd_count = current_cmds;
 }
 
-// ========== main函数 ==========
+// ========== main ==========
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
@@ -1283,7 +1390,7 @@ int main(int argc, char **argv) {
     auto node = std::make_shared<MuJoCoInterfaceNode>();
     rclcpp::spin(node);
   } catch (const std::exception &e) {
-    RCLCPP_FATAL(rclcpp::get_logger("mujoco_interface"), "节点启动失败: %s", e.what());
+    RCLCPP_FATAL(rclcpp::get_logger("mujoco_interface"), "Node startup failed: %s", e.what());
     return 1;
   }
 

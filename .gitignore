@@ -1,5 +1,10 @@
 .mujoco_temp.urdf
 .tmp
+
 # 忽略 vendored GUI 库
 arv_v1_moveit/third_party/imgui_backends/
 arv_v1_moveit/third_party/implot/
+
+# 不公开的文档和项目指令
+docs/
+CLAUDE.md

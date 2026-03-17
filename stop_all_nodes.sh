@@ -13,10 +13,33 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # ==================== 猫猫画面 ====================
+# 暖色日落渐变: 粉(255,100,150) → 橙(255,180,50) → 金(255,220,100)
+sunset_rgb() {
+    local row=$1 total=$2
+    local max=$((total - 1))
+    (( max < 1 )) && max=1
+    local r=255
+    local g=$(( 100 + 120 * row / max ))
+    local b=$(( 150 - 100 * row / max + 50 * row / max ))
+    # 简化: 粉→橙→金
+    if (( row * 2 < total )); then
+        local t=$(( row * 2 ))
+        r=255; g=$(( 100 + 80 * t / total )); b=$(( 150 - 100 * t / total ))
+    else
+        local t=$(( (row * 2 - total) ))
+        r=255; g=$(( 180 + 40 * t / total )); b=$(( 50 + 50 * t / total ))
+    fi
+    printf "%d;%d;%d" $r $g $b
+}
+
 show_mascot() {
     clear
-    echo -e "${CYAN}"
-    cat << 'MASCOT'
+    printf "\033[?25l"
+
+    local -a mlines=()
+    while IFS= read -r line; do
+        mlines+=("$line")
+    done << 'MASCOT'
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣄⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⡀⣄⢄⣠⡄⢠⠎⠀⠀⠈⠳⣄⠀⠀⢀⣀⡐⠲⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⠠⣶⢰⡧⠈⠟⠈⠉⠈⢠⠏⠀⠀⠀⠀⠀⠈⠳⡀⠀⠀⠉⠳⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
@@ -40,10 +63,46 @@ show_mascot() {
 ⠀⠀⠀⠀⠈⠓⠦⠤⢤⣄⣀⣀⣀⣀⣀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⣰⡭⠼⠛⠉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀  よくねむれますように。~ Good Night
 MASCOT
-    echo -e "${NC}"
-    echo -e "  ${CYAN}:: ARV_V1 SYSTEM SHUTDOWN ::${NC}"
-    echo "  ──────────────────────────────────────────"
+    local total=${#mlines[@]}
+
+    # 从底部往上逐行浮现 (暖色日落)
+    for (( i=total-1; i>=0; i-- )); do
+        local rgb
+        rgb=$(sunset_rgb $i $total)
+        printf "\033[%d;1H\033[2;38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+        sleep 0.015
+    done
+    sleep 0.06
+
+    # 亮起
+    for (( i=0; i<total; i++ )); do
+        local rgb
+        rgb=$(sunset_rgb $i $total)
+        printf "\033[%d;1H\033[1;38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+    done
+    sleep 0.15
+
+    # 暖色脉冲 3 帧 (亮→暗→亮)
+    for dim in 2 1 0; do
+        local bold=$((1 - dim % 2))
+        for (( i=0; i<total; i++ )); do
+            local rgb
+            rgb=$(sunset_rgb $i $total)
+            printf "\033[%d;1H\033[${bold};38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+        done
+        sleep 0.12
+    done
+
+    # 定格
+    for (( i=0; i<total; i++ )); do
+        local rgb
+        rgb=$(sunset_rgb $i $total)
+        printf "\033[%d;1H\033[38;2;${rgb}m%s\033[0m" $((i + 1)) "${mlines[$i]}"
+    done
+
     echo ""
+    echo -e "  \033[38;2;255;180;100m:: ARV_V1 SYSTEM SHUTDOWN ::\033[0m"
+    echo "  ──────────────────────────────────────────"
     echo ""
 }
 
@@ -51,17 +110,20 @@ MASCOT
 cursor_hide() { tput civis; }
 cursor_show() { tput cnorm; }
 
-# 进度更新（固定位置刷新）
+# 步骤计数器
+STEP_CURRENT=0
+STEP_TOTAL=1
+
+# 进度: 逐行 spinner
 update_status() {
     local text="$1"
-    local percent="$2"
-    local bar_len=40
-    local filled=$((percent * bar_len / 100))
-    local empty=$((bar_len - filled))
-    local bar_str=$(printf "%${filled}s" | tr ' ' '█')
-    local empty_str=$(printf "%${empty}s" | tr ' ' '░')
-    echo -e "\033[2A\033[K  ${BOLD}STATUS:${NC} $text"
-    echo -e "\033[K  ${RED}[${bar_str}${empty_str}]${NC} ${percent}%"
+    STEP_CURRENT=$((STEP_CURRENT + 1))
+    local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+    for i in $(seq 0 3); do
+        printf "\r  ${CYAN}${frames[$((i % ${#frames[@]}))]}${NC} $text"
+        sleep 0.08
+    done
+    printf "\r  ${RED}✗${NC} $text\n"
 }
 
 # ==================== 主流程 ====================
@@ -87,7 +149,7 @@ total=${#nodes[@]}
 stopped=0
 
 # 先处理 ros2 launch
-update_status "停止 ros2 launch 进程..." 5
+update_status "停止 ros2 launch 进程"
 pids=$(pgrep -f "ros2 launch" | grep -v grep)
 if [ -n "$pids" ]; then
     echo $pids | xargs -r kill 2>/dev/null
@@ -102,8 +164,7 @@ fi
 # 逐个停止节点
 for i in "${!nodes[@]}"; do
     node="${nodes[$i]}"
-    percent=$(( (i + 1) * 90 / total + 10 ))
-    update_status "停止: $node" "$percent"
+    update_status "停止: $node"
 
     pids=$(pgrep -f "$node")
     if [ -n "$pids" ]; then
@@ -117,16 +178,12 @@ for i in "${!nodes[@]}"; do
     fi
 done
 
-update_status "清理完成！" 100
-sleep 0.5
-
 # 最终报告
 echo ""
-echo ""
 if [ $stopped -gt 0 ]; then
-    echo -e "  ${GREEN}${BOLD}[完成]${NC} 已停止 $stopped 个节点"
+    echo -e "  ${GREEN}${BOLD}✓ 已停止 $stopped 个节点${NC}"
 else
-    echo -e "  ${YELLOW}${BOLD}[完成]${NC} 未发现运行中的节点"
+    echo -e "  ${YELLOW}${BOLD}✓ 未发现运行中的节点${NC}"
 fi
 echo ""
 cursor_show

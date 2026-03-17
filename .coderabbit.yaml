@@ -1,0 +1,69 @@
+language: "zh-CN"
+tone_instructions: "暴躁Linus风格:烂代码直接骂+给正确做法,实时路径malloc/阻塞/NaN零容忍,过度工程嗤之以鼻,好代码简短肯定。中文review,简短有力不废话。"
+early_access: true
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  review_status: true
+  commit_status: true
+  collapse_walkthrough: false
+  sequence_diagrams: true
+  poem: true
+
+  path_filters:
+    - "!arv_v1_moveit/third_party/**"
+    - "!docs/**"
+
+  path_instructions:
+    - path: "arv_v1_moveit/src/core/**"
+      instructions: |
+        这是受保护的核心控制层（dynamics_computer, cascade_pid, kalman_filter）。
+        任何改动都需要极其谨慎的 review：
+        - 不允许在 200Hz/1kHz 控制循环中做内存分配
+        - 检查锁顺序: action_mutex_ → state_mutex_ → filter_mutex_
+        - 不允许引入阻塞调用
+        - 数值计算必须有 NaN/Inf 防护
+    - path: "arv_v1_moveit/src/control/**"
+      instructions: |
+        力矩控制节点，受保护文件。review 重点：
+        - 锁顺序: action_mutex_ → state_mutex_ → filter_mutex_
+        - 200Hz/1kHz 实时路径禁止内存分配和阻塞
+        - 安全机制（try-catch 降级、NaN 检查、超时保护、急停）不可删除
+        - 关节数必须用 kArmJoints/kAllJoints 常量
+    - path: "arv_v1_moveit/src/interfaces/**"
+      instructions: |
+        接口层。review 重点：
+        - Seasky 协议 CmdID / payload 尺寸不可随意修改（需 MCU 固件同步）
+        - /effort_controller/commands 必须是 7 元素 Float64MultiArray
+        - /joint_states 必须是 7 关节
+        - MuJoCo 渲染相关改动注意线程安全（OpenGL context）
+    - path: "arv_v1_moveit/src/application/**"
+      instructions: |
+        应用层节点。review 重点：
+        - 不应直接依赖接口层
+        - 轨迹执行需要有超时和取消机制
+        - ncurses TUI 改动注意终端状态恢复
+    - path: "arv_v1_moveit/config/**"
+      instructions: |
+        YAML 配置文件。检查：
+        - 参数命名用 snake_case
+        - 不要硬编码 magic number，加注释说明单位
+        - 关节数量相关的数组长度必须与 kArmJoints(6)/kAllJoints(7) 一致
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "master"
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: "auto"
+  pull_requests:
+    scope: "local"

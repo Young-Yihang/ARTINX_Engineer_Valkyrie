@@ -1,9 +1,5 @@
-/**
- * @file torque_controller_node.cpp
- * @brief Torque controller: full dynamics feedforward + cascade PID feedback
- *
- * Control law: τ = M(q)q̈ + C(q,q̇) + G(q) + CascadePID(e_pos, e_vel)
- */
+/// @file torque_controller_node.cpp
+/// @brief Torque controller: τ = M(q)q̈ + C(q,q̇) + G(q) + CascadePID
 
 #include <urdf/model.h>
 
@@ -17,8 +13,8 @@
 #include <kdl_parser/kdl_parser.hpp>
 #include <mutex>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/float64_multi_array.hpp>  // 力矩数组消息
-#include <std_msgs/msg/u_int8.hpp>               // 控制模式
+#include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/u_int8.hpp>
 #include <string>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
@@ -33,18 +29,16 @@
 namespace ControlMode {
 constexpr uint8_t RELAX = 0;      // 全零力矩
 constexpr uint8_t FREEDRIVE = 1;  // 仅重力补偿
-constexpr uint8_t OVERDRIVE = 2;  // 全力输出: G(q)+PD+轨迹
-constexpr uint8_t EXECUTE = 3;    // 轨迹执行中 (action server 内部)
+constexpr uint8_t ARMED = 2;      // 就绪: G(q)+PD 保持, 可接受轨迹执行
 }  // namespace ControlMode
 
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GoalHandleFJT = rclcpp_action::ServerGoalHandle<FollowJointTrajectory>;
 
-class TorqueControllerActionServer : public rclcpp::Node  // 节点类生成
-{
+class TorqueControllerActionServer : public rclcpp::Node {
   static constexpr int kArmJoints = 6;  // 6-DOF arm
   static constexpr int kAllJoints = 7;  // 6-DOF arm + 1 gripper
-public:                                 // 构造函数log
+public:
   TorqueControllerActionServer()
       : Node("torque_controller_action_server"),
         is_executing_(false),
@@ -53,14 +47,14 @@ public:                                 // 构造函数log
         q_target_(6),
         state_received_(false),
         has_target_(false),
-        control_frequency_(200.0),
+        control_frequency_(1000.0),
         joint_filters_{
-            KalmanFilter1D(1.0 / 200.0),  // Joint 1
-            KalmanFilter1D(1.0 / 200.0),  // Joint 2
-            KalmanFilter1D(1.0 / 200.0),  // Joint 3
-            KalmanFilter1D(1.0 / 200.0),  // Joint 4
-            KalmanFilter1D(1.0 / 200.0),  // Joint 5
-            KalmanFilter1D(1.0 / 200.0)   // Joint 6
+            KalmanFilter1D(1.0 / 1000.0),  // Joint 1
+            KalmanFilter1D(1.0 / 1000.0),  // Joint 2
+            KalmanFilter1D(1.0 / 1000.0),  // Joint 3
+            KalmanFilter1D(1.0 / 1000.0),  // Joint 4
+            KalmanFilter1D(1.0 / 1000.0),  // Joint 5
+            KalmanFilter1D(1.0 / 1000.0)   // Joint 6
         },
         q_dot_filtered_(6),
         kalman_filter_enabled_(false)
@@ -69,20 +63,18 @@ public:                                 // 构造函数log
     RCLCPP_INFO(this->get_logger(),
                 "[START] Torque controller node starting (Cascade P+PI Control)");
 
-    // 卡尔曼滤波器参数
-    this->declare_parameter("kalman.enabled", false);  // 默认禁用
+    this->declare_parameter("kalman.enabled", false);
+
     kalman_filter_enabled_ = this->get_parameter("kalman.enabled").as_bool();
 
     RCLCPP_INFO(this->get_logger(), "[INFO] Kalman filter state: %s",
                 kalman_filter_enabled_ ? "[OK] Enabled" : "[DISABLED]");
 
-    // 声明卡尔曼滤波器参数
-    this->declare_parameter("kalman.Q_pos", 1e-5);    // 过程噪声：位置
-    this->declare_parameter("kalman.Q_vel", 1e-4);    // 过程噪声：速度
-    this->declare_parameter("kalman.R_pos", 1e-3);    // 测量噪声：位置
-    this->declare_parameter("kalman.R_vel", 2.5e-2);  // 测量噪声：速度
+    this->declare_parameter("kalman.Q_pos", 1e-5);
+    this->declare_parameter("kalman.Q_vel", 1e-4);
+    this->declare_parameter("kalman.R_pos", 1e-3);
+    this->declare_parameter("kalman.R_vel", 2.5e-2);
 
-    // 读取参数并设置滤波器
     double Q_pos = this->get_parameter("kalman.Q_pos").as_double();
     double Q_vel = this->get_parameter("kalman.Q_vel").as_double();
     double R_pos = this->get_parameter("kalman.R_pos").as_double();
@@ -96,8 +88,6 @@ public:                                 // 构造函数log
     RCLCPP_INFO(this->get_logger(), "[OK] Kalman filter initialized:");
     RCLCPP_INFO(this->get_logger(), "   Q_pos=%.1e, Q_vel=%.1e", Q_pos, Q_vel);
     RCLCPP_INFO(this->get_logger(), "   R_pos=%.1e, R_vel=%.1e", R_pos, R_vel);
-
-    // Kalman print removed for cleaner output
 
     // --- Load Safety Parameters (BEFORE initializeDynamics) ---
     this->declare_parameter("safety.max_torque_default", 20.0);
@@ -139,7 +129,6 @@ public:                                 // 构造函数log
                 "[SAFETY] Timeout: %.0f ms, Velocity sanity: %.1f rad/s, Gripper limit: %.1f N",
                 joint_state_timeout_sec_ * 1000.0, max_velocity_sanity_, gripper_max_torque_);
 
-    // --- 载荷重力补偿参数 ---
     this->declare_parameter("payload.enabled", false);
     this->declare_parameter("payload.mass", 0.447);
     this->declare_parameter("payload.gripper_force_threshold", 0.5);
@@ -149,10 +138,9 @@ public:                                 // 构造函数log
     payload_force_threshold_ = this->get_parameter("payload.gripper_force_threshold").as_double();
     payload_pos_threshold_ = this->get_parameter("payload.gripper_pos_threshold").as_double();
     RCLCPP_INFO(this->get_logger(), "[PAYLOAD] %s (mass=%.3f kg, force_thr=%.1f N, pos_thr=%.3f m)",
-                payload_compensation_enabled_ ? "ENABLED" : "DISABLED",
-                payload_mass_, payload_force_threshold_, payload_pos_threshold_);
+                payload_compensation_enabled_ ? "ENABLED" : "DISABLED", payload_mass_,
+                payload_force_threshold_, payload_pos_threshold_);
 
-    // --- 初始化动力学求解器 ---
     RCLCPP_INFO(this->get_logger(), "[INFO] Starting dynamics solver initialization...");
     if (!initializeDynamics()) {
       RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to initialize dynamics solver");
@@ -168,22 +156,18 @@ public:                                 // 构造函数log
     for (int i = 1; i <= 6; i++) {
       std::string prefix = "cascade_pid.joint_" + std::to_string(i);
 
-      // 位置环参数（P + 条件积分 anti-windup）
       this->declare_parameter(prefix + ".pos_Kp", 10.0);
       this->declare_parameter(prefix + ".pos_Ki", 0.0);
       this->declare_parameter(prefix + ".pos_Kd", 0.0);
       this->declare_parameter(prefix + ".max_integral_pos", 2.0);
 
-      // 速度环参数（PI）
       this->declare_parameter(prefix + ".vel_Kp", 50.0);
       this->declare_parameter(prefix + ".vel_Ki", 5.0);
       this->declare_parameter(prefix + ".vel_Kd", 0.0);
 
-      // 速度限制
       this->declare_parameter(prefix + ".vel_limit", 2.0);
     }
 
-    // 读取参数并设置控制器
     for (int i = 0; i < 6; i++) {
       std::string prefix = "cascade_pid.joint_" + std::to_string(i + 1);
 
@@ -205,6 +189,21 @@ public:                                 // 构造函数log
         this->get_logger(),
         "[OK] Cascade PI+PI initialized (Outer: Position-PI w/ anti-windup, Inner: Velocity-PI)");
 
+    // --- 摩擦前馈参数 ---
+    this->declare_parameter("friction.coulomb", std::vector<double>(kArmJoints, 0.0));
+    this->declare_parameter("friction.viscous", std::vector<double>(kArmJoints, 0.0));
+    this->declare_parameter("friction.fal_alpha", 0.5);
+    this->declare_parameter("friction.fal_delta", 0.05);
+    friction_coulomb_ = this->get_parameter("friction.coulomb").as_double_array();
+    friction_viscous_ = this->get_parameter("friction.viscous").as_double_array();
+    fal_alpha_ = this->get_parameter("friction.fal_alpha").as_double();
+    fal_delta_ = this->get_parameter("friction.fal_delta").as_double();
+    RCLCPP_INFO(this->get_logger(),
+                "[OK] Friction feedforward: fc=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f] fal(α=%.2f,δ=%.3f)",
+                friction_coulomb_[0], friction_coulomb_[1], friction_coulomb_[2],
+                friction_coulomb_[3], friction_coulomb_[4], friction_coulomb_[5], fal_alpha_,
+                fal_delta_);
+
     // --- 注册参数变化回调（必须在所有参数声明之后）---
     param_callback_handle_ = this->add_on_set_parameters_callback(
         std::bind(&TorqueControllerActionServer::parametersCallback, this, std::placeholders::_1));
@@ -212,18 +211,12 @@ public:                                 // 构造函数log
     RCLCPP_INFO(this->get_logger(),
                 "[CONFIG] Dynamic parameter tuning enabled (use 'ros2 param set' to modify)");
 
-    // --- 订阅关节状态 ---
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-        "/joint_states",                                              // 话题名称
-        10,                                                           // 队列大小
-        std::bind(&TorqueControllerActionServer::jointStateCallback,  // 把成员回调函数绑定
-                  this, std::placeholders::_1));
+        "/joint_states", 10,
+        std::bind(&TorqueControllerActionServer::jointStateCallback, this, std::placeholders::_1));
 
-    // --- 创建 Action Server ---
-    // MoveIt 会发送到: /ARM_controller/follow_joint_trajectory
     action_server_ = rclcpp_action::create_server<FollowJointTrajectory>(
-        this,
-        "ARM_controller/follow_joint_trajectory",  // 完整的 action 名称
+        this, "ARM_controller/follow_joint_trajectory",
         std::bind(&TorqueControllerActionServer::handleGoal, this, std::placeholders::_1,
                   std::placeholders::_2),
         std::bind(&TorqueControllerActionServer::handleCancel, this, std::placeholders::_1),
@@ -232,41 +225,32 @@ public:                                 // 构造函数log
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Action server created: /ARM_controller/follow_joint_trajectory");
 
-    // --- 创建力矩/力发布者 ---
-    // 7-element array: [0-5] arm joint torques (Nm), [6] gripper force (N, prismatic)
     torque_pub_ =
         this->create_publisher<std_msgs::msg::Float64MultiArray>("/effort_controller/commands", 10);
 
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Effort publisher created: /effort_controller/commands (6×Nm + 1×N)");
 
-    // --- 创建夹爪控制服务 ---
     gripper_service_ = this->create_service<arv_v1_interfaces::srv::GripperControl>(
         "/gripper_control", std::bind(&TorqueControllerActionServer::gripperControlCallback, this,
                                       std::placeholders::_1, std::placeholders::_2));
     RCLCPP_INFO(this->get_logger(), "[OK] Gripper control service created: /gripper_control");
 
-    // --- 创建轨迹转发发布者 ---
-    // 用于将接收到的轨迹转发给 trajectory_manager_node 进行保存
     trajectory_forward_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
         "/ARM_controller/joint_trajectory", 10);
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Trajectory forward publisher created: /ARM_controller/joint_trajectory");
 
-    // --- 订阅控制模式 (由 mission_executor 统一管理) ---
     control_mode_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
         "/control_mode", 10,
         std::bind(&TorqueControllerActionServer::controlModeCallback, this, std::placeholders::_1));
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Control mode subscriber created: /control_mode (default: RELAX)");
 
-    // --- 订阅关节位置目标 (由 cartesian_controller IK 伺服输出) ---
     joint_target_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/joint_position_target", rclcpp::SensorDataQoS(),
-        std::bind(&TorqueControllerActionServer::jointTargetCallback, this,
-                  std::placeholders::_1));
-    RCLCPP_INFO(this->get_logger(),
-                "[OK] Joint target subscriber created: /joint_position_target");
+        std::bind(&TorqueControllerActionServer::jointTargetCallback, this, std::placeholders::_1));
+    RCLCPP_INFO(this->get_logger(), "[OK] Joint target subscriber created: /joint_position_target");
 
     RCLCPP_INFO(this->get_logger(), "[INFO] Control frequency: %.1f Hz", control_frequency_);
 
@@ -291,7 +275,7 @@ private:
   trajectory_msgs::msg::JointTrajectory current_trajectory_;
   rclcpp::Time trajectory_start_time_;
   std::shared_ptr<GoalHandleFJT> current_goal_handle_;
-  std::atomic<bool> is_executing_;  // 原子操作，避免竞态
+  std::atomic<bool> is_executing_;  // 避免竞态 (controlLoop读, handleAccepted写)
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   KDL::JntArray q_actual_, q_dot_actual_, q_target_;
@@ -311,8 +295,7 @@ private:
   size_t control_loop_count_ = 0;
   rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_;
-  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
-      trajectory_forward_pub_;  // 转发轨迹供trajectory_manager捕获
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_forward_pub_;
   double control_frequency_;
 
   // 安全参数
@@ -324,14 +307,14 @@ private:
   double max_velocity_sanity_ = 20.0;
   double max_position_error_ = 0.8;
 
-  // 降级策略：异常时复用上一次有效力矩，避免零力矩导致手臂自由落体
+  // 降级: 复用上次有效力矩，避免自由落体
   std::array<double, 7> last_valid_torque_{};
 
   // 控制模式 (由 mission_executor 通过 /control_mode topic 管理)
   std::atomic<uint8_t> control_mode_{ControlMode::RELAX};  // 默认 RELAX: 上电安全
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr control_mode_sub_;
 
-  // 关节位置目标 (由 cartesian_controller IK 伺服输出, OVERDRIVE HOLD 时更新 q_target_)
+  // 关节位置目标 (由 cartesian_controller IK 伺服输出, ARMED 模式非执行时更新 q_target_)
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr joint_target_sub_;
 
   // 夹爪控制 (prismatic joint, 单位: N)
@@ -341,20 +324,45 @@ private:
   rclcpp::Service<arv_v1_interfaces::srv::GripperControl>::SharedPtr gripper_service_;
 
   // --- 载荷重力补偿: τ_payload = J(q)^T × [0,0,-mg,0,0,0] ---
-  KDL::Chain kdl_chain_tcp_;                              // base_link→tcp (含 joint_tcp 偏移 0.179m)
+  KDL::Chain kdl_chain_tcp_;  // base_link→tcp (含 joint_tcp 偏移 0.179m)
   std::unique_ptr<KDL::ChainJntToJacSolver> jac_solver_;  // 雅可比求解器 (预分配)
   KDL::Jacobian jacobian_{kArmJoints};                    // 预分配 6×6 雅可比
   Eigen::Matrix<double, 6, 1> payload_wrench_;            // 预分配力螺旋
   KDL::JntArray tau_payload_{kArmJoints};                 // 预分配载荷力矩输出
   double payload_mass_ = 0.0;
-  double payload_force_threshold_ = 0.5;   // N, 夹力阈值
-  double payload_pos_threshold_ = 0.01;    // m, 夹爪位置阈值 (10mm)
+  double payload_force_threshold_ = 0.5;  // N, 夹力阈值
+  double payload_pos_threshold_ = 0.01;   // m, 夹爪位置阈值 (10mm)
   bool payload_compensation_enabled_ = false;
-  double gripper_position_ = 0.0;  // 夹爪位置 (state_mutex_ 保护, jointStateCallback写/controlLoop读)
+  double gripper_position_ =
+      0.0;  // 夹爪位置 (state_mutex_ 保护, jointStateCallback写/controlLoop读)
 
-  bool computePayloadCompensation(const KDL::JntArray &q, double gripper_pos, double gripper_force);
+  void computePayloadCompensation(const KDL::JntArray &q, double gripper_pos, double gripper_force,
+                                  KDL::JntArray &tau_out);
 
-  // Action 回调函数
+  // --- 摩擦前馈: τ_friction = fc·fal(q̇,α,δ) + fv·q̇ ---
+  // fal 平滑库仑摩擦 sign() 跳变，避免零速极限环
+  std::vector<double> friction_coulomb_{std::vector<double>(kArmJoints, 0.0)};
+  std::vector<double> friction_viscous_{std::vector<double>(kArmJoints, 0.0)};
+  double fal_alpha_ = 0.5;   // 非线性指数 (0<α<1)
+  double fal_delta_ = 0.05;  // 线性区宽度 (rad/s)
+
+  static double fal(double e, double alpha, double delta) {
+    if (delta < 1e-10) delta = 1e-10;
+    if (std::abs(e) <= delta)
+      return e / std::pow(delta, 1.0 - alpha);
+    else
+      return std::pow(std::abs(e), alpha) * std::copysign(1.0, e);
+  }
+
+  double computeFrictionTorque(int joint_idx, double velocity) {
+    return friction_coulomb_[joint_idx] * fal(velocity, fal_alpha_, fal_delta_) +
+           friction_viscous_[joint_idx] * velocity;
+  }
+
+  /// NaN check + per-joint saturation + publish + fallback backup.
+  /// Returns false if NaN detected (emergencyStop triggered).
+  bool safeTorquePublish(const KDL::JntArray &tau_arm, double gripper_force);
+
   rclcpp_action::GoalResponse handleGoal(const rclcpp_action::GoalUUID &uuid,
                                          std::shared_ptr<const FollowJointTrajectory::Goal> goal);
 
@@ -362,9 +370,8 @@ private:
 
   void handleAccepted(const std::shared_ptr<GoalHandleFJT> goal_handle);
 
-  void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);  // 关节状态回调
+  void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
 
-  // 安全函数
   void emergencyStop(const std::string &reason) {
     RCLCPP_ERROR(this->get_logger(), "[EMERGENCY STOP] %s", reason.c_str());
 
@@ -382,7 +389,7 @@ private:
     }
   }
 
-  // 执行失败后完整清理: 清空轨迹、中止目标、复位积分器和滤波器、发送重力补偿
+  // Full recovery: clear trajectory, abort goal, reset PID+Kalman, send G(q)
   // 注意: 必须在持有 action_mutex_ 时调用
   void executionRecoveryCeremony(const std::string &reason) {
     RCLCPP_ERROR(this->get_logger(), "[RECOVERY] %s", reason.c_str());
@@ -413,56 +420,37 @@ private:
       }
     }
 
-    // [FIX] 恢复后将 q_target_ 更新为当前实际位置，防止 HOLD 模式用失败轨迹
-    // 终点作为参考，避免大位置误差导致 PD 力矩饱和振荡
-    // 发送重力补偿保持位置，并同步更新 q_target_
+    // [FIX] recovery → snap q_target_ to actual, publish G(q) once
     {
       std::lock_guard<std::mutex> state_lock(state_mutex_);
       if (state_received_) {
-        // 更新保持目标为当前实际位置
         q_target_ = q_actual_;
         has_target_ = true;
-
-        KDL::JntArray tau_gravity(6);
+        KDL::JntArray tau_gravity(kArmJoints);
         dynamic_computer_->computeGravityTorque(q_actual_, tau_gravity);
-
-        std_msgs::msg::Float64MultiArray torque_msg;
-        torque_msg.data.resize(kAllJoints);
-        for (int i = 0; i < kArmJoints; i++) {
-          double limit =
-              (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
-          torque_msg.data[i] = std::clamp(tau_gravity(i), -limit, limit);
-        }
-        // 夹爪: 紧急停止时设为0
-        torque_msg.data[kArmJoints] = 0.0;
-        torque_pub_->publish(torque_msg);
+        safeTorquePublish(tau_gravity, 0.0);
       }
     }
 
     RCLCPP_INFO(this->get_logger(), "[RECOVERY] Complete - Ready for new goals");
   }
 
-  bool initializeDynamics();  // 动力学初始化
+  bool initializeDynamics();
 
   bool interpolateTrajectory(const trajectory_msgs::msg::JointTrajectory &trajectory, double t_now,
                              KDL::JntArray &q_d, KDL::JntArray &qd_d, KDL::JntArray &qdd_d);
 
-  void computeFeedbackTorque(const KDL::JntArray &q_d,        // 期望位置
-                             const KDL::JntArray &qd_d,       // 期望速度
-                             const KDL::JntArray &q_actual,   // 实际位置
-                             const KDL::JntArray &qd_actual,  // 实际速度
-                             KDL::JntArray &tau_fb);          // 输出：反馈力矩
+  void computeFeedbackTorque(const KDL::JntArray &q_d, const KDL::JntArray &qd_d,
+                             const KDL::JntArray &q_actual, const KDL::JntArray &qd_actual,
+                             KDL::JntArray &tau_fb);
 
-  void controlLoop();  // 核心控制循环
+  void controlLoop();
 
-  // --- 新增：参数动态调节 ---
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
-  // 参数变化回调函数
   rcl_interfaces::msg::SetParametersResult parametersCallback(
       const std::vector<rclcpp::Parameter> &parameters);
 
-  // 夹爪控制服务回调
   void gripperControlCallback(
       const std::shared_ptr<arv_v1_interfaces::srv::GripperControl::Request> request,
       std::shared_ptr<arv_v1_interfaces::srv::GripperControl::Response> response) {
@@ -474,27 +462,26 @@ private:
     RCLCPP_INFO(this->get_logger(), "[GRIPPER] Torque command: %.3f Nm", clamped);
   }
 
-  // 控制模式切换回调
   void controlModeCallback(const std_msgs::msg::UInt8::SharedPtr msg) {
     uint8_t new_mode = msg->data;
     uint8_t old_mode = control_mode_.load(std::memory_order_acquire);
     if (new_mode == old_mode) return;
-    if (new_mode > ControlMode::EXECUTE) {
+    if (new_mode > ControlMode::ARMED) {
       RCLCPP_ERROR(get_logger(), "[MODE] Invalid mode value: %u, ignoring", new_mode);
       return;
     }
 
     // [FIX] 各锁独立获取，不嵌套，消除死锁可能
     // 1. action 域：abort 当前轨迹
-    if (is_executing_.load(std::memory_order_acquire) && new_mode != ControlMode::EXECUTE) {
+    if (is_executing_.load(std::memory_order_acquire) && new_mode != ControlMode::ARMED) {
       std::lock_guard<std::mutex> action_lock(action_mutex_);
       if (is_executing_.load(std::memory_order_acquire)) {  // double-check under lock
         executionRecoveryCeremony("Control mode changed during execution");
       }
     }
 
-    // 2. state 域：切 OVERDRIVE 时锁定当前位置为目标
-    if (new_mode == ControlMode::OVERDRIVE) {
+    // 2. state 域：切 ARMED 时锁定当前位置为目标
+    if (new_mode == ControlMode::ARMED) {
       std::lock_guard<std::mutex> state_lock(state_mutex_);
       if (state_received_) {
         q_target_ = q_actual_;
@@ -507,17 +494,15 @@ private:
 
     control_mode_.store(new_mode, std::memory_order_release);
 
-    static const char *mode_names[] = {"RELAX", "FREEDRIVE", "OVERDRIVE", "EXECUTE"};
+    static const char *mode_names[] = {"RELAX", "FREEDRIVE", "ARMED"};
     RCLCPP_WARN(get_logger(), "[MODE] %s -> %s", mode_names[old_mode], mode_names[new_mode]);
   }
 
-  // --- 关节位置目标回调 (cartesian_controller IK 伺服输出) ---
-  // 仅在 OVERDRIVE 非执行状态下更新 q_target_，与 HOLD PD 跟踪配合
   void jointTargetCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
     if (static_cast<int>(msg->data.size()) < kArmJoints) return;
 
-    // 只在 OVERDRIVE 模式 + 非轨迹执行时接受
-    if (control_mode_.load(std::memory_order_acquire) != ControlMode::OVERDRIVE) return;
+    // 只在 ARMED 模式 + 非轨迹执行时接受
+    if (control_mode_.load(std::memory_order_acquire) != ControlMode::ARMED) return;
     if (is_executing_.load(std::memory_order_acquire)) return;
 
     // NaN/Inf 全量校验
@@ -540,13 +525,13 @@ rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
   RCLCPP_INFO(this->get_logger(), "[INFO] New trajectory received (%zu points)",
               goal->trajectory.points.size());
 
-  // 模式检查: 只有 OVERDRIVE 模式下才允许执行轨迹
+  // 模式检查: 只有 ARMED 模式下才允许执行轨迹
   uint8_t mode = control_mode_.load(std::memory_order_acquire);
-  if (mode != ControlMode::OVERDRIVE) {
-    static const char *mode_names[] = {"RELAX", "FREEDRIVE", "OVERDRIVE", "EXECUTE"};
+  if (mode != ControlMode::ARMED) {
+    static const char *mode_names[] = {"RELAX", "FREEDRIVE", "ARMED"};
     RCLCPP_WARN(this->get_logger(),
-                "[REJECT] Cannot execute trajectory in %s mode, switch to OVERDRIVE first",
-                mode <= ControlMode::EXECUTE ? mode_names[mode] : "UNKNOWN");
+                "[REJECT] Cannot execute trajectory in %s mode, switch to ARMED first",
+                mode <= ControlMode::ARMED ? mode_names[mode] : "UNKNOWN");
     return rclcpp_action::GoalResponse::REJECT;
   }
 
@@ -582,7 +567,6 @@ void TorqueControllerActionServer::handleAccepted(
     const std::shared_ptr<GoalHandleFJT> goal_handle) {
   RCLCPP_INFO(this->get_logger(), "[INFO] Goal accepted, ready to execute");
 
-  // 检查是否收到关节状态（不需要锁，只读取）
   bool has_state;
   {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
@@ -619,7 +603,6 @@ void TorqueControllerActionServer::handleAccepted(
       current_goal_handle_->abort(old_result);
     }
 
-    // 缓存轨迹
     const auto goal = goal_handle->get_goal();
     current_trajectory_ = goal->trajectory;
     current_goal_handle_ = goal_handle;
@@ -631,7 +614,6 @@ void TorqueControllerActionServer::handleAccepted(
     RCLCPP_DEBUG(this->get_logger(),
                  "[FORWARD] Trajectory published to /ARM_controller/joint_trajectory");
 
-    // 打印轨迹信息
     const auto &first_point = current_trajectory_.points[0];
     const auto &last_point = current_trajectory_.points.back();
     double total_duration =
@@ -669,7 +651,6 @@ void TorqueControllerActionServer::handleAccepted(
                   max_pos_jump);
     }
 
-    // --- 新增：保存规划终点位置 ---
     if (last_point.positions.size() >= kArmJoints) {
       for (size_t i = 0; i < kArmJoints; i++) {
         q_target_(i) = last_point.positions[i];
@@ -691,7 +672,6 @@ void TorqueControllerActionServer::jointStateCallback(
   // --- 修复死锁 #1: 使用unique_lock手动控制锁生命周期 ---
   std::unique_lock<std::mutex> state_lock(state_mutex_);
 
-  // 验证数据
   if (msg->position.size() < kAllJoints || msg->velocity.size() < kAllJoints) {
     RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                           "[ERROR] Invalid joint state size! Expected at least %d", kAllJoints);
@@ -791,9 +771,8 @@ void TorqueControllerActionServer::jointStateCallback(
     RCLCPP_INFO(this->get_logger(), "[STATE] state_received=true, ready for control");
   }
 
-  // 打印首次Kalman增益 (在所有锁释放后,避免嵌套锁)
+  // 避免嵌套锁: state_mutex_ 仍持有，filter_mutex_ 独立获取
   if (is_first_state && kalman_filter_enabled_) {
-    // 需要 filter_mutex_ 来安全访问 joint_filters_[0]
     std::lock_guard<std::mutex> filter_lock(filter_mutex_);
     RCLCPP_INFO(this->get_logger(), "📝  First Kalman gain (Joint 1):");
     auto K = joint_filters_[0].getKalmanGain();
@@ -822,7 +801,6 @@ void TorqueControllerActionServer::jointStateCallback(
 bool TorqueControllerActionServer::initializeDynamics() {
   RCLCPP_INFO(this->get_logger(), "[INFO] Starting dynamics solver initialization...");
 
-  // 1. 读取 URDF 文件（使用 ament_index 动态查找）
   std::string urdf_path;
   try {
     std::string pkg_path = ament_index_cpp::get_package_share_directory("arv_v1_model");
@@ -842,7 +820,6 @@ bool TorqueControllerActionServer::initializeDynamics() {
                           std::istreambuf_iterator<char>());
   urdf_file.close();
 
-  // 2. 解析 URDF
   urdf::Model urdf_model;
   if (!urdf_model.initString(urdf_string)) {
     RCLCPP_ERROR(this->get_logger(), "[ERROR] URDF parsing failed");
@@ -878,25 +855,20 @@ bool TorqueControllerActionServer::initializeDynamics() {
               max_torque_per_joint_[0], max_torque_per_joint_[1], max_torque_per_joint_[2],
               max_torque_per_joint_[3], max_torque_per_joint_[4], max_torque_per_joint_[5]);
 
-  // 3. 提取 KDL 树
   KDL::Tree kdl_tree;
   if (!kdl_parser::treeFromUrdfModel(urdf_model, kdl_tree)) {
     RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to build KDL tree from URDF");
     return false;
   }
 
-  // 4. 获取运动链（从 base_link 到 link6）
   if (!kdl_tree.getChain("base_link", "link6", kdl_chain_)) {
     RCLCPP_ERROR(this->get_logger(), "[ERROR] Failed to extract kinematic chain");
     return false;
   }
 
-  // 5. 创建动力学计算工具
-  KDL::Vector gravity(0.0, 0.0, -9.81);  // 重力向量
+  KDL::Vector gravity(0.0, 0.0, -9.81);
   dynamic_computer_ = std::make_unique<DynamicsComputer>(kdl_chain_, gravity);
 
-  // 设置错误日志回调，将 DynamicsComputer 的错误转发到 ROS2 日志系统
-  // 捕获 this 指针以安全访问节点的 logger
   dynamic_computer_->setErrorLogger(
       [this](const std::string &msg) { RCLCPP_ERROR(this->get_logger(), "%s", msg.c_str()); });
 
@@ -904,7 +876,7 @@ bool TorqueControllerActionServer::initializeDynamics() {
   RCLCPP_INFO(this->get_logger(), "   - Gravity: [%.2f, %.2f, %.2f] m/s²", gravity.x(), gravity.y(),
               gravity.z());
 
-  // 6. 载荷补偿: 提取 TCP 链 (base_link→tcp, 含 fixed joint_tcp 偏移)
+  // 载荷补偿: 提取 TCP 链 (base_link→tcp, 含 fixed joint_tcp 偏移)
   if (payload_compensation_enabled_) {
     if (!kdl_tree.getChain("base_link", "tcp", kdl_chain_tcp_)) {
       RCLCPP_WARN(this->get_logger(),
@@ -913,7 +885,8 @@ bool TorqueControllerActionServer::initializeDynamics() {
     } else {
       jac_solver_ = std::make_unique<KDL::ChainJntToJacSolver>(kdl_chain_tcp_);
       payload_wrench_.setZero();
-      RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Jacobian solver initialized (%d segments, %d joints)",
+      RCLCPP_INFO(this->get_logger(),
+                  "[PAYLOAD] Jacobian solver initialized (%d segments, %d joints)",
                   kdl_chain_tcp_.getNrOfSegments(), kdl_chain_tcp_.getNrOfJoints());
     }
   }
@@ -924,18 +897,15 @@ bool TorqueControllerActionServer::initializeDynamics() {
 bool TorqueControllerActionServer::interpolateTrajectory(
     const trajectory_msgs::msg::JointTrajectory &trajectory, double t_now, KDL::JntArray &q_d,
     KDL::JntArray &qd_d, KDL::JntArray &qdd_d) {
-  // 1. 检查轨迹是否存在
   if (trajectory.points.empty()) {
     RCLCPP_ERROR(this->get_logger(), "[ERROR] Trajectory is empty, cannot interpolate");
     return false;
   }
 
-  // 2. 如果时间在第一个点之前，返回第一个点
   const auto &first_point = trajectory.points[0];
   double t_first = first_point.time_from_start.sec + first_point.time_from_start.nanosec * 1e-9;
 
   if (t_now <= t_first) {
-    // 返回第一个点的值
     for (size_t i = 0; i < kArmJoints; i++) {
       if (i < first_point.positions.size()) {
         q_d(i) = first_point.positions[i];
@@ -948,12 +918,10 @@ bool TorqueControllerActionServer::interpolateTrajectory(
     return true;
   }
 
-  // 3. 如果时间在最后一个点之后，返回最后一个点
   const auto &last_point = trajectory.points.back();
   double t_last = last_point.time_from_start.sec + last_point.time_from_start.nanosec * 1e-9;
 
   if (t_now >= t_last) {
-    // 返回最后一个点的值（速度和加速度应该为 0）
     for (size_t i = 0; i < kArmJoints; i++) {
       if (i < last_point.positions.size()) {
         q_d(i) = last_point.positions[i];
@@ -966,7 +934,6 @@ bool TorqueControllerActionServer::interpolateTrajectory(
     return true;
   }
 
-  // 4. 在轨迹中查找包围当前时间的两个点
   size_t idx_before = 0;
   size_t idx_after = 0;
 
@@ -983,25 +950,21 @@ bool TorqueControllerActionServer::interpolateTrajectory(
     }
   }
 
-  // 5. 获取两个点
   const auto &point_before = trajectory.points[idx_before];
   const auto &point_after = trajectory.points[idx_after];
 
   double t_before = point_before.time_from_start.sec + point_before.time_from_start.nanosec * 1e-9;
   double t_after = point_after.time_from_start.sec + point_after.time_from_start.nanosec * 1e-9;
 
-  // 6. 计算插值比例 α — [FIX] 除零判断移到除法之前
+  // [FIX] 除零判断移到除法之前
   double dt_seg = t_after - t_before;
   double alpha = (dt_seg < 1e-9) ? 0.0 : (t_now - t_before) / dt_seg;
 
-  // 7. 线性插值
   for (size_t i = 0; i < kArmJoints; i++) {
-    // 位置插值
     double pos_before = (i < point_before.positions.size()) ? point_before.positions[i] : 0.0;
     double pos_after = (i < point_after.positions.size()) ? point_after.positions[i] : 0.0;
     q_d(i) = pos_before + alpha * (pos_after - pos_before);
 
-    // 速度插值
     if (i < point_before.velocities.size() && i < point_after.velocities.size()) {
       qd_d(i) = point_before.velocities[i] +
                 alpha * (point_after.velocities[i] - point_before.velocities[i]);
@@ -1009,7 +972,6 @@ bool TorqueControllerActionServer::interpolateTrajectory(
       qd_d(i) = 0.0;
     }
 
-    // 加速度插值
     if (i < point_before.accelerations.size() && i < point_after.accelerations.size()) {
       qdd_d(i) = point_before.accelerations[i] +
                  alpha * (point_after.accelerations[i] - point_before.accelerations[i]);
@@ -1042,52 +1004,37 @@ void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_
   std::vector<double> pos_ref(kArmJoints), pos_fdb(kArmJoints), vel_fdb(kArmJoints),
       torque_out(kArmJoints);
 
-  // 准备输入数据
   for (size_t i = 0; i < kArmJoints; i++) {
-    pos_ref[i] = q_d(i);        // 期望位置
-    pos_fdb[i] = q_actual(i);   // 实际位置（编码器，高精度）
-    vel_fdb[i] = qd_actual(i);  // 实际速度（卡尔曼滤波后，低噪声）
+    pos_ref[i] = q_d(i);
+    pos_fdb[i] = q_actual(i);
+    vel_fdb[i] = qd_actual(i);
   }
 
-  double dt = 1.0 / control_frequency_;  // 200Hz -> 0.005s
+  double dt = 1.0 / control_frequency_;  // 1kHz -> 0.001s
   cascade_pid_->compute(pos_ref, pos_fdb, vel_fdb, dt, torque_out);
 
-  // 输出力矩并进行安全限幅
   for (size_t i = 0; i < kArmJoints; i++) {
     tau_fb(i) = torque_out[i];
-
-    // --- SAFETY: Torque saturation (hardware protection) ---
-    double joint_limit =
-        (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
-    if (tau_fb(i) > joint_limit) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                           "[SAFETY] Joint %zu feedback torque saturated: %.2f -> %.2f Nm", i + 1,
-                           tau_fb(i), joint_limit);
-      tau_fb(i) = joint_limit;
-    } else if (tau_fb(i) < -joint_limit) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                           "[SAFETY] Joint %zu feedback torque saturated: %.2f -> -%.2f Nm", i + 1,
-                           tau_fb(i), joint_limit);
-      tau_fb(i) = -joint_limit;
-    }
   }
 }
 
 // --- 载荷重力补偿: τ_payload = J(q)^T × [0,0,-mg,0,0,0] ---
-bool TorqueControllerActionServer::computePayloadCompensation(
-    const KDL::JntArray &q, double gripper_pos, double gripper_force) {
-  for (int i = 0; i < kArmJoints; i++) tau_payload_(i) = 0.0;
+void TorqueControllerActionServer::computePayloadCompensation(const KDL::JntArray &q,
+                                                              double gripper_pos,
+                                                              double gripper_force,
+                                                              KDL::JntArray &tau_out) {
+  for (int i = 0; i < kArmJoints; i++) tau_out(i) = 0.0;
 
-  if (!payload_compensation_enabled_ || !jac_solver_) return false;
+  if (!payload_compensation_enabled_ || !jac_solver_) return;
 
   // 抓取检测: 有夹力 + 夹爪未完全闭合 (被物体阻挡)
-  if (gripper_force <= payload_force_threshold_ || gripper_pos <= payload_pos_threshold_) return false;
+  if (gripper_force <= payload_force_threshold_ || gripper_pos <= payload_pos_threshold_) return;
 
   int ret = jac_solver_->JntToJac(q, jacobian_);
   if (ret < 0) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                          "[PAYLOAD] Jacobian failed (ret=%d)", ret);
-    return false;
+    return;
   }
 
   payload_wrench_.setZero();
@@ -1096,7 +1043,34 @@ bool TorqueControllerActionServer::computePayloadCompensation(
   Eigen::Matrix<double, Eigen::Dynamic, 1> tau_eigen = jacobian_.data.transpose() * payload_wrench_;
 
   for (int i = 0; i < kArmJoints; i++) {
-    tau_payload_(i) = std::isfinite(tau_eigen(i)) ? tau_eigen(i) : 0.0;
+    tau_out(i) = std::isfinite(tau_eigen(i)) ? tau_eigen(i) : 0.0;
+  }
+}
+
+bool TorqueControllerActionServer::safeTorquePublish(const KDL::JntArray &tau_arm,
+                                                     double gripper_force) {
+  std_msgs::msg::Float64MultiArray msg;
+  msg.data.resize(kAllJoints);
+  for (int i = 0; i < kArmJoints; i++) {
+    if (!std::isfinite(tau_arm(i))) {
+      RCLCPP_ERROR(this->get_logger(), "[SAFETY] Non-finite torque on joint %d: %.2f", i + 1,
+                   tau_arm(i));
+      emergencyStop("Non-finite torque detected");
+      return false;
+    }
+    double limit = (i < static_cast<int>(max_torque_per_joint_.size())) ? max_torque_per_joint_[i]
+                                                                        : max_torque_default_;
+    msg.data[i] = std::clamp(tau_arm(i), -limit, limit);
+    if (std::abs(tau_arm(i)) > limit) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                           "[SAFETY] Joint %d saturated: %.2f -> %.2f", i + 1, tau_arm(i),
+                           msg.data[i]);
+    }
+  }
+  msg.data[kArmJoints] = std::clamp(gripper_force, -gripper_max_torque_, gripper_max_torque_);
+  torque_pub_->publish(msg);
+  for (int i = 0; i < kAllJoints; i++) {
+    last_valid_torque_[i] = msg.data[i];
   }
   return true;
 }
@@ -1109,7 +1083,7 @@ void TorqueControllerActionServer::controlLoop() {
     double period = (now - last_control_loop_time_).seconds();
     if (period > max_control_period_sec_) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                           "[SAFETY] Control loop slow: %.1f ms (expected 5ms @ 200Hz)",
+                           "[SAFETY] Control loop slow: %.1f ms (expected 1ms @ 1kHz)",
                            period * 1000.0);
     }
   }
@@ -1118,24 +1092,21 @@ void TorqueControllerActionServer::controlLoop() {
   // --- Health monitoring ---
   control_loop_count_++;
 
-  // Print health status every 5 seconds (1000 loops at 200Hz)
-  if (control_loop_count_ % 1000 == 0) {
+  // Print health status every 5 seconds (5000 loops at 1kHz)
+  if (control_loop_count_ % 5000 == 0) {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
     double time_since_state =
         state_received_ ? (this->now() - last_joint_state_time_).seconds() : -1.0;
 
-    static const char *mode_names[] = {"RELAX", "FREEDRIVE", "OVERDRIVE", "EXECUTE"};
+    static const char *mode_names[] = {"RELAX", "FREEDRIVE", "ARMED"};
     uint8_t m = control_mode_.load(std::memory_order_acquire);
-    RCLCPP_INFO(this->get_logger(),
-                "[HEALTH] Loop #%zu | Mode: %s | State age: %.1f ms | Kalman: %s",
-                control_loop_count_,
-                is_executing_.load(std::memory_order_acquire)
-                    ? "EXECUTE"
-                    : (m <= ControlMode::EXECUTE ? mode_names[m] : "UNKNOWN"),
-                time_since_state * 1000.0, kalman_filter_enabled_ ? "ON" : "OFF");
+    const char *mode_str = (m <= ControlMode::ARMED) ? mode_names[m] : "UNKNOWN";
+    RCLCPP_INFO(
+        this->get_logger(), "[HEALTH] Loop #%zu | Mode: %s%s | State age: %.1f ms | Kalman: %s",
+        control_loop_count_, mode_str, is_executing_.load(std::memory_order_acquire) ? "+EXEC" : "",
+        time_since_state * 1000.0, kalman_filter_enabled_ ? "ON" : "OFF");
   }
 
-  // 检查是否正在执行轨迹（原子读取，无需锁）
   bool executing = is_executing_.load(std::memory_order_acquire);
 
   if (!executing) {
@@ -1177,155 +1148,75 @@ void TorqueControllerActionServer::controlLoop() {
       gripper_force_copy = gripper_torque_cmd_;
     }
 
-    // FREEDRIVE 模式: 仅重力补偿，无 PD
-    if (mode == ControlMode::FREEDRIVE) {
-      KDL::JntArray tau_gravity(kArmJoints);
-      dynamic_computer_->computeGravityTorque(q_copy, tau_gravity);
-      computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy);
-
-      std_msgs::msg::Float64MultiArray freedrive_msg;
-      freedrive_msg.data.resize(kAllJoints);
-      for (int i = 0; i < kArmJoints; i++) {
-        double limit = (i < static_cast<int>(max_torque_per_joint_.size()))
-                         ? max_torque_per_joint_[i]
-                         : max_torque_default_;
-        freedrive_msg.data[i] = std::clamp(tau_gravity(i) + tau_payload_(i), -limit, limit);
-      }
-      freedrive_msg.data[kArmJoints] = gripper_force_copy;
-      torque_pub_->publish(freedrive_msg);
-      return;
-    }
-
-    // HOLD 模式: 重力补偿 + PD (现有逻辑)
-
     // --- SAFETY: Check joint state timeout ---
     double time_since_last_state = (this->now() - last_state_time_copy).seconds();
     if (time_since_last_state > joint_state_timeout_sec_) {
-      RCLCPP_ERROR_THROTTLE(
-          this->get_logger(), *this->get_clock(), 1000,
-          "[SAFETY] Joint state timeout: %.3fs since last update (limit: %.0f ms)",
-          time_since_last_state, joint_state_timeout_sec_ * 1000.0);
-
-      // Timeout: 使用重力补偿维持位置，不直接return
-
-      KDL::JntArray tau_gravity(kArmJoints);
-      bool can_compute_gravity = false;
-
-      // 尝试用最后的位置数据计算重力补偿
+      RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                            "[SAFETY] Joint state timeout: %.3fs (limit: %.0f ms)",
+                            time_since_last_state, joint_state_timeout_sec_ * 1000.0);
+      KDL::JntArray tau_timeout(kArmJoints);
       try {
-        dynamic_computer_->computeGravityTorque(q_copy, tau_gravity);
-        can_compute_gravity = true;
+        dynamic_computer_->computeGravityTorque(q_copy, tau_timeout);
+        computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy, tau_payload_);
+        for (int i = 0; i < kArmJoints; i++) tau_timeout(i) += tau_payload_(i);
       } catch (const std::exception &e) {
-        RCLCPP_ERROR(this->get_logger(), "[SAFETY] Cannot compute gravity: %s, sending zero torque",
-                     e.what());
+        RCLCPP_ERROR(this->get_logger(), "[SAFETY] Cannot compute gravity: %s", e.what());
       }
-
-      if (can_compute_gravity) {
-        computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy);
-      }
-
-      std_msgs::msg::Float64MultiArray safe_msg;
-      safe_msg.data.resize(kAllJoints);
-      if (can_compute_gravity) {
-        // 使用重力补偿维持位置
-        for (int i = 0; i < kArmJoints; i++) {
-          safe_msg.data[i] = tau_gravity(i) + tau_payload_(i);
-          // 安全限幅
-          double joint_limit =
-              (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
-          safe_msg.data[i] = std::max(-joint_limit, std::min(joint_limit, safe_msg.data[i]));
-        }
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                             "[SAFETY] Timeout: Publishing gravity compensation only");
-      } else {
-        // 无法计算，发送零力矩
-        for (int i = 0; i < kAllJoints; i++) {
-          safe_msg.data[i] = 0.0;
-        }
-      }
-      safe_msg.data[kArmJoints] = gripper_force_copy;
-      torque_pub_->publish(safe_msg);
-
-      // [FIX] 不再调用 emergencyStop（它会再发一帧零力矩），避免双帧交替干扰
-      // timeout 时仅重置 PID 积分器，q_target_ 保持不变（已有 gravity comp 维持）
+      safeTorquePublish(tau_timeout, gripper_force_copy);
       if (cascade_pid_) cascade_pid_->resetAll();
       return;
     }
 
-    // 计算重力补偿
-    KDL::JntArray tau_gravity(kArmJoints);
-    KDL::JntArray tau_pd(kArmJoints);
+    // --- 控制律计算: G(q) + friction + payload [+ PD] ---
+    KDL::JntArray tau_arm(kArmJoints);
     try {
+      KDL::JntArray tau_gravity(kArmJoints);
       dynamic_computer_->computeGravityTorque(q_copy, tau_gravity);
+      computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy, tau_payload_);
 
-      // --- PD 控制目标位置 ---
-      if (has_target_copy) {
-        computeFeedbackTorque(q_target_copy, KDL::JntArray(kArmJoints), q_copy, qd_copy, tau_pd);
-      } else {
-        computeFeedbackTorque(q_copy, KDL::JntArray(kArmJoints), q_copy, qd_copy, tau_pd);
+      for (int i = 0; i < kArmJoints; i++) {
+        tau_arm(i) = tau_gravity(i) + computeFrictionTorque(i, qd_copy(i)) + tau_payload_(i);
       }
+
+      // FREEDRIVE: G + friction + payload，无 PD
+      if (mode == ControlMode::FREEDRIVE) {
+        safeTorquePublish(tau_arm, gripper_force_copy);
+        return;
+      }
+
+      // ARMED (hold): 追加 PD
+      KDL::JntArray tau_pd(kArmJoints);
+      KDL::JntArray qd_zero(kArmJoints);  // 期望速度 = 0
+      if (has_target_copy) {
+        computeFeedbackTorque(q_target_copy, qd_zero, q_copy, qd_copy, tau_pd);
+      } else {
+        computeFeedbackTorque(q_copy, qd_zero, q_copy, qd_copy, tau_pd);
+      }
+      for (int i = 0; i < kArmJoints; i++) tau_arm(i) += tau_pd(i);
     } catch (const std::exception &e) {
-      RCLCPP_ERROR(this->get_logger(), "[SAFETY] Dynamics exception in HOLD: %s", e.what());
-      // [FIX] 复用上一次有效力矩，而非零力矩，避免手臂在重力下自由落体
+      RCLCPP_ERROR(this->get_logger(), "[SAFETY] Dynamics exception: %s", e.what());
       std_msgs::msg::Float64MultiArray fallback_msg;
       fallback_msg.data.assign(last_valid_torque_.begin(), last_valid_torque_.end());
       torque_pub_->publish(fallback_msg);
       return;
     }
 
-    // 载荷重力补偿
-    computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy);
-
-    // 发布力矩：重力补偿 + PD + 载荷补偿
-    std_msgs::msg::Float64MultiArray torque_msg;
-    torque_msg.data.resize(kAllJoints);
-    for (int i = 0; i < kArmJoints; i++) {
-      torque_msg.data[i] = tau_gravity(i) + tau_pd(i) + tau_payload_(i);
-
-      // --- SAFETY: NaN/Inf check before publishing ---
-      if (!std::isfinite(torque_msg.data[i])) {
-        RCLCPP_ERROR(
-            this->get_logger(),
-            "[SAFETY] Non-finite torque detected on joint %d in idle mode (gravity=%.2f, pd=%.2f)",
-            i + 1, tau_gravity(i), tau_pd(i));
-        emergencyStop("Non-finite torque in idle mode");
-        return;
-      }
-
-      // --- SAFETY: Final torque saturation ---
-      double joint_limit =
-          (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
-      if (torque_msg.data[i] > joint_limit) {
-        torque_msg.data[i] = joint_limit;
-      } else if (torque_msg.data[i] < -joint_limit) {
-        torque_msg.data[i] = -joint_limit;
-      }
-    }
-    torque_msg.data[kArmJoints] = gripper_force_copy;
-    torque_pub_->publish(torque_msg);
-
-    // 保存有效力矩供降级使用
-    for (int i = 0; i < kAllJoints; i++) {
-      last_valid_torque_[i] = torque_msg.data[i];
-    }
-
+    safeTorquePublish(tau_arm, gripper_force_copy);
     return;
   }
 
-  // --- 执行轨迹阶段 ---
-  // 读取 action 状态和轨迹信息（线程安全）
-  trajectory_msgs::msg::JointTrajectory current_traj_copy;
+  // --- ARMED + executing: 轨迹跟踪 ---
+  trajectory_msgs::msg::JointTrajectory traj_copy;
   rclcpp::Time traj_start_copy;
   std::shared_ptr<GoalHandleFJT> goal_handle_copy;
   {
     std::lock_guard<std::mutex> action_lock(action_mutex_);
-    current_traj_copy = current_trajectory_;
+    traj_copy = current_trajectory_;
     traj_start_copy = trajectory_start_time_;
     goal_handle_copy = current_goal_handle_;
   }
 
-  // [FIX] 空轨迹防护：executionRecoveryCeremony 可能清空 trajectory
-  if (current_traj_copy.points.empty()) {
+  if (traj_copy.points.empty()) {
     std::lock_guard<std::mutex> action_lock(action_mutex_);
     if (is_executing_.load(std::memory_order_acquire)) {
       executionRecoveryCeremony("Empty trajectory detected");
@@ -1333,82 +1224,18 @@ void TorqueControllerActionServer::controlLoop() {
     return;
   }
 
-  // 现在时间获取
   double t_now = (this->now() - traj_start_copy).seconds();
+  const auto &last_pt = traj_copy.points.back();
+  double total_dur = last_pt.time_from_start.sec + last_pt.time_from_start.nanosec * 1e-9;
 
-  // 获取轨迹TIME
-  const auto &last_point = current_traj_copy.points.back();
-  double total_duration =
-      last_point.time_from_start.sec + last_point.time_from_start.nanosec * 1e-9;
-
-  if (t_now >= total_duration)  // 检查是否完成
-  {
-    RCLCPP_INFO(this->get_logger(), "[OK] Trajectory execution completed!");
-    KDL::JntArray q_actual_copy(kArmJoints), qd_filtered_copy(kArmJoints);
-    double gripper_pos_exec = 0.0;
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      q_actual_copy = q_actual_;
-      qd_filtered_copy = q_dot_filtered_;
-      gripper_pos_exec = gripper_position_;
-    }
-    double gripper_force_exec;
-    {
-      std::lock_guard<std::mutex> glock(gripper_mutex_);
-      gripper_force_exec = gripper_torque_cmd_;
-    }
-
-    // 计算重力补偿 + 载荷补偿
-    KDL::JntArray tau_gravity(kArmJoints);
-    dynamic_computer_->computeGravityTorque(q_actual_copy, tau_gravity);
-    computePayloadCompensation(q_actual_copy, gripper_pos_exec, gripper_force_exec);
-
-    KDL::JntArray tau_pd(kArmJoints);
-    if (has_target_) {
-      // 期望位置 = 规划终点，期望速度 = 0
-      computeFeedbackTorque(q_target_, KDL::JntArray(kArmJoints), q_actual_copy, qd_filtered_copy,
-                            tau_pd);
-    } else {
-      // 如果没有目标，PD 输出为 0
-      for (int i = 0; i < kArmJoints; i++) {
-        tau_pd(i) = 0.0;
-      }
-    }
-
-    // 发布力矩：重力补偿 + PD + 载荷补偿
-    std_msgs::msg::Float64MultiArray hold_torque;
-    hold_torque.data.resize(kAllJoints);
-    for (int i = 0; i < kArmJoints; i++) {
-      hold_torque.data[i] = tau_gravity(i) + tau_pd(i) + tau_payload_(i);
-
-      // --- SAFETY: NaN/Inf check and saturation ---
-      if (!std::isfinite(hold_torque.data[i])) {
-        RCLCPP_ERROR(this->get_logger(),
-                     "[SAFETY] Non-finite torque at trajectory completion on joint %d", i + 1);
-        emergencyStop("Non-finite torque at trajectory completion");
-        return;
-      }
-      double joint_limit =
-          (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
-      hold_torque.data[i] = std::max(-joint_limit, std::min(joint_limit, hold_torque.data[i]));
-    }
-    hold_torque.data[kArmJoints] = gripper_force_exec;
-    torque_pub_->publish(hold_torque);
-
-    RCLCPP_INFO(this->get_logger(),
-                "[OK] Trajectory execution completed, switching to hold mode (target: q_target)");
-    RCLCPP_INFO(this->get_logger(), "   τ_total=[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
-                hold_torque.data[0], hold_torque.data[1], hold_torque.data[2], hold_torque.data[3],
-                hold_torque.data[4], hold_torque.data[5]);
-
-    // 返回成功结果并清理状态（线程安全）
+  // --- 轨迹完成: succeed + flip → 下一 tick 自然进入 ARMED hold ---
+  if (t_now >= total_dur) {
+    RCLCPP_INFO(this->get_logger(), "[OK] Trajectory completed (%.3fs)", total_dur);
     if (goal_handle_copy) {
       auto result = std::make_shared<FollowJointTrajectory::Result>();
       result->error_code = FollowJointTrajectory::Result::SUCCESSFUL;
       goal_handle_copy->succeed(result);
     }
-
-    // 清理状态（但保留 q_target_ 和 has_target_）
     {
       std::lock_guard<std::mutex> action_lock(action_mutex_);
       is_executing_.store(false, std::memory_order_release);
@@ -1417,12 +1244,10 @@ void TorqueControllerActionServer::controlLoop() {
     return;
   }
 
-  // 插值（时间不连续）
+  // --- 轨迹插值 ---
   KDL::JntArray q_d(kArmJoints), qd_d(kArmJoints), qdd_d(kArmJoints);
-  if (!interpolateTrajectory(current_traj_copy, t_now, q_d, qd_d, qdd_d)) {
-    RCLCPP_ERROR(this->get_logger(), "[ERROR] Trajectory interpolation failed at t=%.3fs", t_now);
-
-    // ✅ Fix: Trigger recovery ceremony to clean up state
+  if (!interpolateTrajectory(traj_copy, t_now, q_d, qd_d, qdd_d)) {
+    RCLCPP_ERROR(this->get_logger(), "[ERROR] Interpolation failed at t=%.3fs", t_now);
     std::lock_guard<std::mutex> action_lock(action_mutex_);
     if (current_goal_handle_ && is_executing_.load(std::memory_order_acquire)) {
       executionRecoveryCeremony("Interpolation failure");
@@ -1430,102 +1255,66 @@ void TorqueControllerActionServer::controlLoop() {
     return;
   }
 
-  // 获取实际状态（线程安全）
-  KDL::JntArray q_actual(kArmJoints), qd_filtered(kArmJoints);
-  double gripper_pos_traj = 0.0;
+  // --- 状态拷贝 ---
+  KDL::JntArray q_act(kArmJoints), qd_filt(kArmJoints);
+  double grip_pos = 0.0;
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    q_actual = q_actual_;
-    qd_filtered = q_dot_filtered_;
-    gripper_pos_traj = gripper_position_;
+    q_act = q_actual_;
+    qd_filt = q_dot_filtered_;
+    grip_pos = gripper_position_;
   }
-  double gripper_force_traj;
+  double grip_force;
   {
     std::lock_guard<std::mutex> glock(gripper_mutex_);
-    gripper_force_traj = gripper_torque_cmd_;
+    grip_force = gripper_torque_cmd_;
   }
 
-  KDL::JntArray tau_ff(kArmJoints);  // PD的话需要输入期望和实际，前馈只需要期望
-  KDL::JntArray tau_fb(kArmJoints);
+  // --- TRACK: M(q_d)*q̈_d + C(q_d,q̇_d) + G(q) + friction + PD + payload ---
+  KDL::JntArray tau_arm(kArmJoints);
   try {
-    dynamic_computer_->computeFeedforwardTorque(q_d, qd_d, qdd_d, tau_ff);
-    computeFeedbackTorque(q_d, qd_d, q_actual, qd_filtered, tau_fb);
+    KDL::JntSpaceInertiaMatrix M(kArmJoints);
+    KDL::JntArray C(kArmJoints), G(kArmJoints), tau_fb(kArmJoints);
+    dynamic_computer_->getMassMatrix(q_d, M);
+    dynamic_computer_->getCoriolisForces(q_d, qd_d, C);
+    dynamic_computer_->getGravityForces(q_act, G);
+    computeFeedbackTorque(q_d, qd_d, q_act, qd_filt, tau_fb);
+    computePayloadCompensation(q_act, grip_pos, grip_force, tau_payload_);
+
+    for (int i = 0; i < kArmJoints; i++) {
+      double tau_inertia = 0.0;
+      for (int j = 0; j < kArmJoints; j++) tau_inertia += M(i, j) * qdd_d(j);
+      tau_arm(i) = tau_inertia + C(i) + G(i) + computeFrictionTorque(i, qd_filt(i)) + tau_fb(i) +
+                   tau_payload_(i);
+    }
   } catch (const std::exception &e) {
     RCLCPP_ERROR(this->get_logger(), "[SAFETY] Dynamics exception: %s", e.what());
     emergencyStop("Dynamics computation exception");
     return;
   }
 
-  // 载荷重力补偿
-  computePayloadCompensation(q_actual, gripper_pos_traj, gripper_force_traj);
+  if (!safeTorquePublish(tau_arm, grip_force)) return;
 
-  KDL::JntArray tau_total(kArmJoints);
-  for (int i = 0; i < kArmJoints; i++) {
-    tau_total(i) = tau_ff(i) + tau_fb(i) + tau_payload_(i);
-  }  // 前馈+反馈+载荷
-
-  // 发送力矩到 ros2_control effort_controller
-  std_msgs::msg::Float64MultiArray torque_msg;
-  torque_msg.data.resize(kAllJoints);
-  for (int i = 0; i < kArmJoints; i++) {
-    // --- SAFETY: NaN/Inf check before publishing ---
-    if (!std::isfinite(tau_total(i))) {
-      RCLCPP_ERROR(
-          this->get_logger(),
-          "[SAFETY] Non-finite torque detected on joint %d during trajectory (ff=%.2f, fb=%.2f)",
-          i + 1, tau_ff(i), tau_fb(i));
-      emergencyStop("Non-finite torque during trajectory execution");
-      return;
-    }
-
-    // --- SAFETY: Final torque saturation ---
-    double joint_limit =
-        (i < max_torque_per_joint_.size()) ? max_torque_per_joint_[i] : max_torque_default_;
-    torque_msg.data[i] = std::max(-joint_limit, std::min(joint_limit, tau_total(i)));
-
-    if (std::abs(tau_total(i)) > joint_limit) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                           "[SAFETY] Joint %d total torque saturated: %.2f -> %.2f Nm", i + 1,
-                           tau_total(i), torque_msg.data[i]);
-    }
-  }
-  torque_msg.data[kArmJoints] = gripper_force_traj;
-  torque_pub_->publish(torque_msg);
-
-  // 保存有效力矩供降级使用
-  for (int i = 0; i < kAllJoints; i++) {
-    last_valid_torque_[i] = torque_msg.data[i];
-  }
-
+  // --- Action feedback ---
   auto feedback = std::make_shared<FollowJointTrajectory::Feedback>();
-  feedback->header.stamp = this->now();  // 获取反馈指针
-
+  feedback->header.stamp = this->now();
   feedback->actual.positions.resize(kArmJoints);
   feedback->actual.velocities.resize(kArmJoints);
-  for (int i = 0; i < kArmJoints; i++) {
-    feedback->actual.positions[i] = q_actual(i);
-    feedback->actual.velocities[i] = qd_filtered(i);  // 反馈使用滤波后的速度
-  }
-
   feedback->desired.positions.resize(kArmJoints);
   feedback->desired.velocities.resize(kArmJoints);
-  for (int i = 0; i < kArmJoints; i++) {
-    feedback->desired.positions[i] = q_d(i);
-    feedback->desired.velocities[i] = qd_d(i);  // 更新q-期望
-  }
-
   feedback->error.positions.resize(kArmJoints);
   feedback->error.velocities.resize(kArmJoints);
   for (int i = 0; i < kArmJoints; i++) {
-    feedback->error.positions[i] = q_d(i) - q_actual(i);
-    feedback->error.velocities[i] = qd_d(i) - qd_filtered(i);  // 速度误差基于滤波后的速度
+    feedback->actual.positions[i] = q_act(i);
+    feedback->actual.velocities[i] = qd_filt(i);
+    feedback->desired.positions[i] = q_d(i);
+    feedback->desired.velocities[i] = qd_d(i);
+    feedback->error.positions[i] = q_d(i) - q_act(i);
+    feedback->error.velocities[i] = qd_d(i) - qd_filt(i);
   }
-
-  // [FIX] 使用本地拷贝而非成员变量，避免并发 reset 导致空指针
   if (goal_handle_copy) goal_handle_copy->publish_feedback(feedback);
 }
 
-// --- 参数变化回调函数实现 ---
 rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parametersCallback(
     const std::vector<rclcpp::Parameter> &parameters) {
   rcl_interfaces::msg::SetParametersResult result;
@@ -1535,14 +1324,11 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
   for (const auto &param : parameters) {
     const std::string &name = param.get_name();
 
-    // --- 卡尔曼滤波器参数动态更新 ---
     if (name == "kalman.enabled") {
-      // 更新卡尔曼滤波开关
       kalman_filter_enabled_ = param.as_bool();
       RCLCPP_INFO(this->get_logger(), "[INFO] Kalman filter %s",
                   kalman_filter_enabled_ ? "[OK] Enabled" : "[DISABLED]");
     } else if (name == "kalman.Q_pos" || name == "kalman.Q_vel") {
-      // 安全检查：确保所有相关参数都已声明
       if (this->has_parameter("kalman.Q_pos") && this->has_parameter("kalman.Q_vel")) {
         double Q_pos = this->get_parameter("kalman.Q_pos").as_double();
         double Q_vel = this->get_parameter("kalman.Q_vel").as_double();
@@ -1559,7 +1345,6 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
                     Q_pos, Q_vel);
       }
     } else if (name == "kalman.R_pos" || name == "kalman.R_vel") {
-      // 安全检查：确保所有相关参数都已声明
       if (this->has_parameter("kalman.R_pos") && this->has_parameter("kalman.R_vel")) {
         double R_pos = this->get_parameter("kalman.R_pos").as_double();
         double R_vel = this->get_parameter("kalman.R_vel").as_double();
@@ -1575,26 +1360,22 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
         RCLCPP_INFO(this->get_logger(),
                     "[CONFIG] Measurement noise updated: R_pos=%.1e, R_vel=%.1e", R_pos, R_vel);
       }
-    }
-    // --- 级联 P+PI 参数动态更新 ---
-    else if (name.find("cascade_pid.joint_") == 0) {
-      // 解析参数名: cascade_pid.joint_1.pos_Kp
-      size_t first_dot = name.find('.', 13);  // 找到 "joint_X" 后的点
+    } else if (name.find("cascade_pid.joint_") == 0) {
+      size_t first_dot = name.find('.', 13);
       if (first_dot == std::string::npos) continue;
 
       size_t second_dot = name.find('.', first_dot + 1);
       if (second_dot == std::string::npos) continue;
 
-      std::string joint_num_str = name.substr(13, first_dot - 13);  // 提取 "1"
-      std::string loop_type = name.substr(first_dot + 1, 3);        // 提取 "pos" 或 "vel"
-      std::string gain_type = name.substr(second_dot + 1);  // 提取 "Kp"/"Ki"/"Kd" 或 "limit"
+      std::string joint_num_str = name.substr(13, first_dot - 13);
+      std::string loop_type = name.substr(first_dot + 1, 3);
+      std::string gain_type = name.substr(second_dot + 1);
 
-      int joint_idx = std::stoi(joint_num_str) - 1;  // 0-based索引
+      int joint_idx = std::stoi(joint_num_str) - 1;
 
       if (joint_idx >= 0 && joint_idx < 6) {
         double new_value = param.as_double();
 
-        // 读取该关节的所有参数
         std::string prefix = "cascade_pid.joint_" + std::to_string(joint_idx + 1);
 
         PidGains pos_gains(this->get_parameter(prefix + ".pos_Kp").as_double(),
@@ -1608,16 +1389,12 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
         double vel_limit = this->get_parameter(prefix + ".vel_limit").as_double();
         double max_integral_pos = this->get_parameter(prefix + ".max_integral_pos").as_double();
 
-        // 更新级联PID
         cascade_pid_->setJointParams(joint_idx, pos_gains, vel_gains, vel_limit, max_integral_pos);
 
         RCLCPP_INFO(this->get_logger(), "[CONFIG] Cascade PID Joint %d updated: %s.%s = %.2f",
                     joint_idx + 1, loop_type.c_str(), gain_type.c_str(), new_value);
       }
-    }
-    // kalman.print_interval parameter removed
-    // --- 载荷补偿参数动态更新 ---
-    else if (name == "payload.enabled") {
+    } else if (name == "payload.enabled") {
       payload_compensation_enabled_ = param.as_bool();
       RCLCPP_INFO(this->get_logger(), "[PAYLOAD] %s",
                   payload_compensation_enabled_ ? "ENABLED" : "DISABLED");
@@ -1626,10 +1403,27 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
       RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Mass: %.3f kg", payload_mass_);
     } else if (name == "payload.gripper_force_threshold") {
       payload_force_threshold_ = param.as_double();
-      RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Force threshold: %.2f N", payload_force_threshold_);
+      RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Force threshold: %.2f N",
+                  payload_force_threshold_);
     } else if (name == "payload.gripper_pos_threshold") {
       payload_pos_threshold_ = param.as_double();
       RCLCPP_INFO(this->get_logger(), "[PAYLOAD] Pos threshold: %.3f m", payload_pos_threshold_);
+    } else if (name == "friction.coulomb") {
+      friction_coulomb_ = param.as_double_array();
+      RCLCPP_INFO(this->get_logger(), "[FRICTION] Coulomb updated: [%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
+                  friction_coulomb_[0], friction_coulomb_[1], friction_coulomb_[2],
+                  friction_coulomb_[3], friction_coulomb_[4], friction_coulomb_[5]);
+    } else if (name == "friction.viscous") {
+      friction_viscous_ = param.as_double_array();
+      RCLCPP_INFO(this->get_logger(), "[FRICTION] Viscous updated: [%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
+                  friction_viscous_[0], friction_viscous_[1], friction_viscous_[2],
+                  friction_viscous_[3], friction_viscous_[4], friction_viscous_[5]);
+    } else if (name == "friction.fal_alpha") {
+      fal_alpha_ = param.as_double();
+      RCLCPP_INFO(this->get_logger(), "[FRICTION] fal alpha: %.2f", fal_alpha_);
+    } else if (name == "friction.fal_delta") {
+      fal_delta_ = param.as_double();
+      RCLCPP_INFO(this->get_logger(), "[FRICTION] fal delta: %.3f", fal_delta_);
     }
   }
 

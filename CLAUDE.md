@@ -211,17 +211,54 @@ ros2 param set /torque_controller_action_server kalman.Q_vel 1e-5
 
 ## Development Guidelines
 
+### Code Formatting (clang-format)
+
+All `.cpp` / `.hpp` files under `arv_v1_moveit/src/` MUST be formatted with `clang-format` before committing. The config lives at the workspace root:
+
+**Config**: `src/.clang-format` (BasedOnStyle: Google)
+
+| Setting | Value |
+|---------|-------|
+| BasedOnStyle | Google |
+| IndentWidth | 2 |
+| UseTab | Never |
+| ColumnLimit | 100 |
+| AccessModifierOffset | -2 |
+| AllowShortFunctionsOnASingleLine | Inline |
+| AllowShortBlocksOnASingleLine | false |
+| BreakBeforeBraces | Attach |
+| SpaceBeforeParens | ControlStatements |
+| MaxEmptyLinesToKeep | 2 |
+| AlignTrailingComments | true |
+
+#### Quick Commands
+```bash
+# Format a single file
+clang-format -i arv_v1_moveit/src/path/to/file.cpp
+
+# Format all project files (excluding third_party)
+find arv_v1_moveit/src -name '*.cpp' -o -name '*.hpp' | xargs clang-format -i
+
+# Dry-run check (CI / pre-commit)
+find arv_v1_moveit/src -name '*.cpp' -o -name '*.hpp' | xargs clang-format --dry-run -Werror
+```
+
+#### Scope
+- **Format**: `arv_v1_moveit/src/**/*.{cpp,hpp}`
+- **DO NOT format**: `arv_v1_moveit/third_party/` (vendored imgui/implot)
+
+#### Rules
+- Run `clang-format -i` on every new/modified `.cpp`/`.hpp` before committing
+- DO NOT manually fight the formatter — if output looks wrong, adjust `.clang-format` config instead
+- Include ordering is enforced by clang-format (`SortIncludes: true` per Google style)
+
 ### Comment Standards
 
 #### File Header
-New files SHOULD have a Doxygen file header. Existing headers MUST NOT be deleted or replaced with single-line comments.
+Use single-line `///` Doxygen format (max 2 lines). Multi-line `/** */` headers are **prohibited** for new files.
 ```cpp
-/**
- * @file filename.cpp
- * @brief One-line English description
- *
- * Optional: control law formula, protocol spec, design rationale
- */
+/// @file filename.cpp
+/// @brief One-line English description.
 ```
 
 #### Section Separators
@@ -229,10 +266,17 @@ Use `// --- Section Name ---` for logical sections within a file.
 DO NOT change existing separator styles (e.g. `---` → `=====`) during unrelated changes.
 
 #### Language
-- Doxygen tags (`@file`, `@brief`, `@param`, `@return`): **English**
+- Doxygen tags (`@file`, `@brief`): **English**
 - Bracketed markers (`[FIX]`, `[SAFETY]`, `[TODO]`, `[OK]`, `[ERROR]`): **English**
-- Implementation comments: Chinese or English, but stay consistent within a single function
+- Inline comments: English preferred; Chinese OK for design rationale / derivation
 - DO NOT translate or rewrite existing comments during unrelated changes
+
+#### Density — Less is More
+- **DO NOT** comment self-explanatory code (variable init, standard API calls, parameter declarations)
+- **DO NOT** use numbered step comments (`// 1. xxx`, `// 2. xxx`) — use one summary at function head
+- Algorithm functions: one formula/intent comment at top, NOT per-line narration
+- Comment **only**: non-obvious logic, safety rationale, magic number derivation, concurrency contracts, external protocol specs
+- Prefer shorter inline comment over multi-line block: `// 限幅防IK跳变` not 4-line explanation
 
 ### Concurrency Rules
 
