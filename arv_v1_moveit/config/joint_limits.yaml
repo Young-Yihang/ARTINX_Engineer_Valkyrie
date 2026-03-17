@@ -8,52 +8,50 @@ default_acceleration_scaling_factor: 1.0
 # Specific joint properties can be changed with the keys [max_position, min_position, max_velocity, max_acceleration]
 # Joint limits can be turned off with [has_velocity_limits, has_acceleration_limits]
 joint_limits:
-  joint_1:
+  joint_1:  # 物理 ±70°
     has_position_limits: true
-    min_position: -3.2
-    max_position: 3.2
+    min_position: -1.13
+    max_position: 1.13
     has_velocity_limits: true
-    max_velocity: 10.470000000000001
+    max_velocity: 10.47
     has_acceleration_limits: true
     max_acceleration: 10.0
-  joint_2:
+  joint_2:  # 物理 30°~170°
     has_position_limits: true
-    min_position: -3.2
-    max_position: 3.2
+    min_position: 0.44
+    max_position: 2.88
     has_velocity_limits: true
-    max_velocity: 10.470000000000001
+    max_velocity: 10.47
     has_acceleration_limits: true
     max_acceleration: 10.0
-  joint_3:
+  joint_3:  # 物理 -90°~180°
     has_position_limits: true
-    min_position: -3.2
-    max_position: 3.2
+    min_position: -1.48
+    max_position: 3.05
     has_velocity_limits: true
-    max_velocity: 10.470000000000001
+    max_velocity: 10.47
     has_acceleration_limits: true
     max_acceleration: 10.0
-  joint_4:
+  joint_4:  # 物理 ±180°
     has_position_limits: true
-    min_position: -3.2
-    max_position: 3.2
+    min_position: -3.05
+    max_position: 3.05
     has_velocity_limits: true
-    max_velocity: 13.800000000000001
+    max_velocity: 13.8
     has_acceleration_limits: true
     max_acceleration: 10.0
-  joint_5:
+  joint_5:  # 物理 ±90°
     has_position_limits: true
-    min_position: -3.2
-    max_position: 3.2
+    min_position: -1.48
+    max_position: 1.48
     has_velocity_limits: true
-    max_velocity: 10.470000000000001
+    max_velocity: 10.47
     has_acceleration_limits: true
     max_acceleration: 10.0
-  joint_6:
-    has_position_limits: true
-    min_position: -3.2
-    max_position: 3.2
+  joint_6:  # continuous, 无限旋转
+    has_position_limits: false
     has_velocity_limits: true
-    max_velocity: 10.470000000000001
+    max_velocity: 10.47
     has_acceleration_limits: true
     max_acceleration: 10.0
   joint_gripper1:

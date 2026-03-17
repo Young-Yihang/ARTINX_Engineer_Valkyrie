@@ -39,6 +39,7 @@ def launch_setup(context, *args, **kwargs):
         parameters=[
             moveit_config.to_dict(),
             {"trajectory_execution.allowed_execution_duration_scaling": 2.0},
+            {"default_robot_padding": -0.005},  # 碰撞体内缩 5mm，容忍微小位置偏差
             {"publish_planning_scene": True},
             {"publish_geometry_updates": True},
             {"publish_state_updates": True},

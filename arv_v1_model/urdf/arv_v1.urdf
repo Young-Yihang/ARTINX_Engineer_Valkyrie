@@ -35,12 +35,9 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <origin xyz="0 0 -0.03" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://arv_v1_model/meshes/base_link.STL" />
+        <cylinder length="0.06" radius="0.06" />
       </geometry>
     </collision>
   </link>
@@ -75,12 +72,9 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <origin xyz="0 0 0.06" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://arv_v1_model/meshes/link1.STL" />
+        <cylinder length="0.12" radius="0.04" />
       </geometry>
     </collision>
   </link>
@@ -97,8 +91,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-3.2"
-      upper="3.2"
+      lower="-1.13"
+      upper="1.13"
       effort="40"
       velocity="20" />
     <dynamics
@@ -136,12 +130,9 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="-0.03215 -0.131 0"
-        rpy="0 0 0" />
+      <origin xyz="0.19 0 0" rpy="0 1.5708 0" />
       <geometry>
-        <mesh
-          filename="package://arv_v1_model/meshes/link2.STL" />
+        <cylinder length="0.36" radius="0.025" />
       </geometry>
     </collision>
   </link>
@@ -158,8 +149,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-3.2"
-      upper="3.2"
+      lower="0.44"
+      upper="2.88"
       effort="40"
       velocity="20" />
     <dynamics
@@ -197,12 +188,9 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <origin xyz="0 -0.03 0" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://arv_v1_model/meshes/link3.STL" />
+        <cylinder length="0.06" radius="0.03" />
       </geometry>
     </collision>
   </link>
@@ -219,8 +207,8 @@
     <axis
       xyz="0 0 -1" />
     <limit
-      lower="-3.2"
-      upper="3.2"
+      lower="-1.48"
+      upper="3.05"
       effort="40"
       velocity="20" />
     <dynamics
@@ -258,12 +246,9 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <origin xyz="0 0 0.22" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://arv_v1_model/meshes/link4.STL" />
+        <cylinder length="0.43" radius="0.02" />
       </geometry>
     </collision>
   </link>
@@ -280,8 +265,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-3.2"
-      upper="3.2"
+      lower="-3.05"
+      upper="3.05"
       effort="1.2"
       velocity="40" />
     <dynamics
@@ -319,12 +304,9 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <origin xyz="0.01 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://arv_v1_model/meshes/link5.STL" />
+        <cylinder length="0.03" radius="0.015" />
       </geometry>
     </collision>
   </link>
@@ -341,8 +323,8 @@
     <axis
       xyz="0 0 -1" />
     <limit
-      lower="-3.2"
-      upper="3.2"
+      lower="-1.48"
+      upper="1.48"
       effort="7"
       velocity="20" />
     <dynamics
@@ -380,18 +362,15 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <origin xyz="0 0 0.085" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://arv_v1_model/meshes/link6.STL" />
+        <cylinder length="0.17" radius="0.015" />
       </geometry>
     </collision>
   </link>
   <joint
     name="joint_6"
-    type="revolute">
+    type="continuous">
     <origin
       xyz="0 0 0"
       rpy="1.57079632679552 0 0" />
@@ -402,8 +381,6 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-3.2"
-      upper="3.2"
       effort="1"
       velocity="20" />
     <dynamics
@@ -448,12 +425,9 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <origin xyz="0 -0.05 0.09" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://arv_v1_model/meshes/link_gripper1.STL" />
+        <box size="0.012 0.012 0.06" />
       </geometry>
     </collision>
   </link>
@@ -509,12 +483,9 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <origin xyz="0 0.05 0.09" rpy="0 0 0" />
       <geometry>
-        <mesh
-          filename="package://arv_v1_model/meshes/link_gripper2.STL" />
+        <box size="0.012 0.012 0.06" />
       </geometry>
     </collision>
   </link>

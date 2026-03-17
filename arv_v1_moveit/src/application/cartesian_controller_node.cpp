@@ -203,16 +203,25 @@ void CartesianControllerNode::poseTargetCallback(
 
   // 限幅防 IK 多解跳变: 基于上一帧target而非q_actual
   static constexpr double max_joint_step[] = {0.1, 0.1, 0.1, 0.2, 0.1, 0.2};  // rad/frame @10Hz
+  // URDF joint limits (J6 continuous, 不限位)
+  static constexpr double joint_lower[] = {-1.13, 0.44, -1.48, -3.05, -1.48, -1e9};
+  static constexpr double joint_upper[] = {1.13, 2.88, 3.05, 3.05, 1.48, 1e9};
   std_msgs::msg::Float64MultiArray target_msg;
   target_msg.data.resize(kArmJoints);
   for (int i = 0; i < kArmJoints; i++) {
-    double delta = q_result(i) - q_seed(i);
+    double val = q_result(i);
+    double delta = val - q_seed(i);
     if (std::abs(delta) > max_joint_step[i]) {
-      target_msg.data[i] = q_seed(i) + std::copysign(max_joint_step[i], delta);
-    } else {
-      target_msg.data[i] = q_result(i);
+      val = q_seed(i) + std::copysign(max_joint_step[i], delta);
     }
-    q_last_target_(i) = target_msg.data[i];
+    // J6 (continuous): wrap to [-π, π]
+    if (i == 5) {
+      val = std::remainder(val, 2.0 * M_PI);
+    } else {
+      val = std::clamp(val, joint_lower[i], joint_upper[i]);
+    }
+    target_msg.data[i] = val;
+    q_last_target_(i) = val;
   }
   has_last_target_ = true;
   joint_target_pub_->publish(target_msg);
