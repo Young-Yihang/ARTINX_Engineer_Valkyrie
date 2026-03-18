@@ -203,9 +203,9 @@ void CartesianControllerNode::poseTargetCallback(
 
   // 限幅防 IK 多解跳变: 基于上一帧target而非q_actual
   static constexpr double max_joint_step[] = {0.1, 0.1, 0.1, 0.2, 0.1, 0.2};  // rad/frame @10Hz
-  // URDF joint limits (J6 continuous, 不限位)
-  static constexpr double joint_lower[] = {-1.13, 0.44, -1.48, -3.05, -1.48, -1e9};
-  static constexpr double joint_upper[] = {1.13, 2.88, 3.05, 3.05, 1.48, 1e9};
+  // URDF joint limits — 与 URDF/joint_limits.yaml 同步 (J6 continuous, 不限位)
+  static constexpr double joint_lower[] = {-1.2217, 0.5236, -1.5708, -3.1416, -1.5708, -1e9};
+  static constexpr double joint_upper[] = {1.2217, 2.9671, 3.1416, 3.1416, 1.5708, 1e9};
   std_msgs::msg::Float64MultiArray target_msg;
   target_msg.data.resize(kArmJoints);
   for (int i = 0; i < kArmJoints; i++) {
