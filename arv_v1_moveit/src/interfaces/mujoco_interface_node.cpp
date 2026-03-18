@@ -334,6 +334,31 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
                           std::istreambuf_iterator<char>());
   mjcf_file.close();
 
+  // tcp 是 MoveIt2 虚拟 link (夹爪偏移)，在 MuJoCo 中不应存在实体
+  {
+    std::string tcp_tag = "<body name=\"tcp\"";
+    size_t tcp_pos = mjcf_string.find(tcp_tag);
+    if (tcp_pos != std::string::npos) {
+      // 空 body: <body name="tcp" .../> 或 <body name="tcp" ...>\n      </body>
+      size_t self_close = mjcf_string.find("/>", tcp_pos);
+      size_t open_end = mjcf_string.find(">", tcp_pos);
+      if (self_close != std::string::npos && self_close == open_end) {
+        // 自闭合标签
+        mjcf_string.erase(tcp_pos, self_close + 2 - tcp_pos);
+      } else {
+        // 带闭合的空 body
+        size_t close_tag = mjcf_string.find("</body>", tcp_pos);
+        if (close_tag != std::string::npos) {
+          size_t erase_end = close_tag + 7;  // len("</body>")
+          // 吃掉尾部换行
+          if (erase_end < mjcf_string.size() && mjcf_string[erase_end] == '\n') erase_end++;
+          mjcf_string.erase(tcp_pos, erase_end - tcp_pos);
+        }
+      }
+      RCLCPP_INFO(this->get_logger(), "[OK] Removed virtual 'tcp' body from MuJoCo model");
+    }
+  }
+
   std::string actuator_mjcf =
       "\n  <actuator>\n"
       "    <motor name=\"actuator_1\" joint=\"joint_1\" gear=\"1\" ctrllimited=\"true\" "
@@ -471,16 +496,24 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     mjcf_string = robot_part + obs_part;
   }
 
-  // 夹爪↔目标 硬接触 pair: 覆盖默认 solref/solimp, 不影响目标↔框架
+  // 夹爪↔可抓取物体 硬接触 pair: 覆盖默认 solref/solimp, 不影响矿石↔框架
   {
     std::vector<std::string> vcol_names;
     size_t p = 0;
-    while ((p = mjcf_string.find("name=\"", p)) != std::string::npos) {
-      size_t ns = p + 6;
-      size_t ne = mjcf_string.find("\"", ns);
-      std::string name = mjcf_string.substr(ns, ne - ns);
-      if (name.find("_vcol_") != std::string::npos) vcol_names.push_back(name);
-      p = ne + 1;
+    while ((p = mjcf_string.find("<geom ", p)) != std::string::npos) {
+      size_t tag_end = mjcf_string.find("/>", p);
+      if (tag_end == std::string::npos) { p++; continue; }
+      std::string tag = mjcf_string.substr(p, tag_end - p);
+      // 只匹配 graspable vcol (contype="8")
+      if (tag.find("contype=\"8\"") != std::string::npos) {
+        size_t ns = tag.find("name=\"");
+        if (ns != std::string::npos) {
+          ns += 6;
+          size_t ne = tag.find("\"", ns);
+          vcol_names.push_back(tag.substr(ns, ne - ns));
+        }
+      }
+      p = tag_end + 2;
     }
     if (!vcol_names.empty()) {
       std::ostringstream contact_ss;
@@ -869,7 +902,7 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
           // static:    ct=2       ca=1       → 碰臂
           // 非弹性碰撞: solref 5ms+过阻尼, solimp 99%吸收
           if (graspable) {
-            gs << " name=\"" << id << "_vcol_" << si << "\"" << " mass=\"0\" rgba=\"" << rgba
+            gs << " mass=\"0\" rgba=\"" << rgba
                << "\" contype=\"8\" conaffinity=\"3\" friction=\"0.01 0.005 0.0001\""
                << " solref=\"0.005 2\" solimp=\"0.99 0.99 0.0001 0.5 2\"/>\n";
           } else {
