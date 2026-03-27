@@ -370,12 +370,31 @@ private:
 
       // 解析夹爪动作序列 (可选字段, 向后兼容)
       if (config["meta"] && config["meta"]["gripper_actions"]) {
+        double prev_time = -1.0;
         for (const auto& ga : config["meta"]["gripper_actions"]) {
-          response->gripper_action_times.push_back(ga["time"].as<double>());
-          response->gripper_action_commands.push_back(ga["action"].as<std::string>());
+          double t = ga["time"].as<double>();
+          std::string cmd = ga["action"].as<std::string>();
+          if (t < 0.0) {
+            RCLCPP_WARN(this->get_logger(), "[LoadTrajectory] Skipping negative time: %.3f", t);
+            continue;
+          }
+          if (t < prev_time) {
+            RCLCPP_WARN(this->get_logger(),
+                        "[LoadTrajectory] Gripper actions not monotonic at %.3f", t);
+          }
+          if (cmd != "open" && cmd != "close" && cmd != "stop") {
+            RCLCPP_WARN(this->get_logger(), "[LoadTrajectory] Unknown gripper action: '%s'",
+                        cmd.c_str());
+            continue;
+          }
+          response->gripper_action_times.push_back(t);
+          response->gripper_action_commands.push_back(cmd);
+          prev_time = t;
         }
-        RCLCPP_INFO(this->get_logger(), "[LoadTrajectory] Found %zu gripper actions",
-                    response->gripper_action_times.size());
+        if (!response->gripper_action_times.empty()) {
+          RCLCPP_INFO(this->get_logger(), "[LoadTrajectory] Found %zu gripper actions",
+                      response->gripper_action_times.size());
+        }
       }
 
       RCLCPP_INFO(this->get_logger(), "[LoadTrajectory] Loaded %zu points, duration: %.2fs",
