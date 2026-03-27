@@ -368,6 +368,16 @@ private:
 
       response->duration = duration;
 
+      // 解析夹爪动作序列 (可选字段, 向后兼容)
+      if (config["meta"] && config["meta"]["gripper_actions"]) {
+        for (const auto& ga : config["meta"]["gripper_actions"]) {
+          response->gripper_action_times.push_back(ga["time"].as<double>());
+          response->gripper_action_commands.push_back(ga["action"].as<std::string>());
+        }
+        RCLCPP_INFO(this->get_logger(), "[LoadTrajectory] Found %zu gripper actions",
+                    response->gripper_action_times.size());
+      }
+
       RCLCPP_INFO(this->get_logger(), "[LoadTrajectory] Loaded %zu points, duration: %.2fs",
                   trajectory.points.size(), duration);
 

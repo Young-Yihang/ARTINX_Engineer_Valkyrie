@@ -502,7 +502,10 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     size_t p = 0;
     while ((p = mjcf_string.find("<geom ", p)) != std::string::npos) {
       size_t tag_end = mjcf_string.find("/>", p);
-      if (tag_end == std::string::npos) { p++; continue; }
+      if (tag_end == std::string::npos) {
+        p++;
+        continue;
+      }
       std::string tag = mjcf_string.substr(p, tag_end - p);
       // 只匹配 graspable vcol (contype="8")
       if (tag.find("contype=\"8\"") != std::string::npos) {
@@ -1324,10 +1327,28 @@ void MuJoCoInterfaceNode::drawTargetMarker() {
   double base_p[3], base_m[9];
   {
     std::lock_guard<std::mutex> lock(sim_mutex_);
+    // MuJoCo 转 URDF 时消除 world→base_link fixed joint,
+    // base_link 不存在于 MJCF 中, 偏移被合并到 link1 的 pos 属性.
+    // base_link 姿态 = 纯平移 (无旋转), 直接用 URDF 中的 world_fixed offset.
     int base_id = mj_name2id(model_, mjOBJ_BODY, "base_link");
-    if (base_id < 0) base_id = 0;
-    std::memcpy(base_p, data_->xpos + 3 * base_id, 3 * sizeof(double));
-    std::memcpy(base_m, data_->xmat + 9 * base_id, 9 * sizeof(double));
+    if (base_id >= 0) {
+      std::memcpy(base_p, data_->xpos + 3 * base_id, 3 * sizeof(double));
+      std::memcpy(base_m, data_->xmat + 9 * base_id, 9 * sizeof(double));
+    } else {
+      // URDF: <origin xyz="-0.1 0 0.15" rpy="0 0 0"/> (world_fixed joint)
+      int link1_id = mj_name2id(model_, mjOBJ_BODY, "link1");
+      if (link1_id >= 0) {
+        // link1 body pos 就是 base_link 在世界系的位置 (joint_1 不改变位置)
+        std::memcpy(base_p, data_->xpos + 3 * link1_id, 3 * sizeof(double));
+      } else {
+        base_p[0] = -0.1;
+        base_p[1] = 0.0;
+        base_p[2] = 0.15;
+      }
+      // base_link 无旋转 → 单位矩阵
+      std::memset(base_m, 0, 9 * sizeof(double));
+      base_m[0] = base_m[4] = base_m[8] = 1.0;
+    }
   }
 
   // pos_world = base_p + base_m * local_pos

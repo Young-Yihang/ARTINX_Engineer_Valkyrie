@@ -1,7 +1,8 @@
 /// @file mission_executor_node.cpp
 /// @brief ncurses TUI for mission control — hotkey-driven, non-blocking.
 
-#include <ncurses.h>
+#define _XOPEN_SOURCE_EXTENDED 1  // 启用宽字符 ncurses API
+#include <ncursesw/ncurses.h>
 #include <signal.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <yaml-cpp/yaml.h>
@@ -18,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <rclcpp/rclcpp.hpp>
 #include <sstream>
@@ -567,33 +569,28 @@ private:
       return;
     }
     log("Exec traj: " + name + "...", COLOR_PAIR_HEADER);
-    auto req = std::make_shared<LoadTrajectory::Request>();
-    req->name = name;
-    req->execute = true;
-    // [FIX] try-catch 防 async_send_request 异常导致 executing_ 卡死
-    try {
-      auto fut = load_client_->async_send_request(req);
-      async_.post([this, fut = std::move(fut), name]() mutable {
-        try {
-          // [FIX] 加超时，防服务节点崩溃时永久阻塞
-          if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
-            auto res = fut.get();
-            if (res->success)
-              logOk("Done: " + name);
-            else
-              logErr("Fail: " + name + " - " + res->message);
+    async_.post([this, name]() {
+      try {
+        auto req = std::make_shared<LoadTrajectory::Request>();
+        req->name = name;
+        req->execute = true;
+        auto fut = load_client_->async_send_request(req);
+        if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+          auto res = fut.get();
+          if (res->success) {
+            scheduleGripperActions(res->gripper_action_times, res->gripper_action_commands);
+            logOk("Done: " + name);
           } else {
-            logErr("Timeout: " + name);
+            logErr("Fail: " + name + " - " + res->message);
           }
-        } catch (const std::exception& e) {
-          logErr("Error: " + std::string(e.what()));
+        } else {
+          logErr("Timeout: " + name);
         }
-        executing_ = false;
-      });
-    } catch (const std::exception& e) {
-      logErr("Request failed: " + std::string(e.what()));
+      } catch (const std::exception& e) {
+        logErr("Error: " + std::string(e.what()));
+      }
       executing_ = false;
-    }
+    });
   }
 
   // --- 状态机操作 ---
@@ -640,34 +637,32 @@ private:
     }
     log("Exec [" + st.id + "] : " + st.trajectory + "...", COLOR_PAIR_HEADER);
 
-    auto req = std::make_shared<LoadTrajectory::Request>();
-    req->name = st.trajectory;
-    req->execute = true;
-    try {
-      auto fut = load_client_->async_send_request(req);
-      async_.post([this, fut = std::move(fut), id = st.id]() mutable {
-        try {
-          if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
-            auto res = fut.get();
-            if (res->success) {
-              logOk("Success: " + id + " (" + std::to_string(res->duration) + "s)");
-              std::lock_guard<std::mutex> lk(status_mu_);
-              if (current_idx_ + 1 < states_.size()) current_idx_++;
-            } else {
-              logErr("Fail: " + id + " - " + res->message);
-            }
+    async_.post([this, traj_name = st.trajectory, id = st.id]() {
+      try {
+        auto req = std::make_shared<LoadTrajectory::Request>();
+        req->name = traj_name;
+        req->execute = true;
+        auto fut = load_client_->async_send_request(req);
+        if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+          auto res = fut.get();
+          if (res->success) {
+            // 按时间戳调度夹爪动作 (与轨迹并行执行)
+            scheduleGripperActions(res->gripper_action_times, res->gripper_action_commands);
+            // 等待轨迹完成 (duration 内夹爪已调度完毕, 等剩余时间)
+            logOk("Success: " + id + " (" + std::to_string(res->duration) + "s)");
+            std::lock_guard<std::mutex> lk(status_mu_);
+            if (current_idx_ + 1 < states_.size()) current_idx_++;
           } else {
-            logErr("Timeout: " + id);
+            logErr("Fail: " + id + " - " + res->message);
           }
-        } catch (const std::exception& e) {
-          logErr("Error: " + std::string(e.what()));
+        } else {
+          logErr("Timeout: " + id);
         }
-        executing_ = false;
-      });
-    } catch (const std::exception& e) {
-      logErr("Request failed: " + std::string(e.what()));
+      } catch (const std::exception& e) {
+        logErr("Error: " + std::string(e.what()));
+      }
       executing_ = false;
-    }
+    });
   }
 
   void resetToIdle() {
@@ -742,33 +737,30 @@ private:
       return;
     }
     log("Executing: " + name + "...");
-    auto req = std::make_shared<LoadTrajectory::Request>();
-    req->name = name;
-    req->execute = true;
-    try {
-      auto fut = load_client_->async_send_request(req);
-      async_.post([this, fut = std::move(fut), name]() mutable {
-        try {
-          if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
-            auto res = fut.get();
-            if (res->success)
-              logOk("Done: " + name);
-            else
-              logErr("Fail: " + res->message);
+    async_.post([this, name]() {
+      try {
+        auto req = std::make_shared<LoadTrajectory::Request>();
+        req->name = name;
+        req->execute = true;
+        auto fut = load_client_->async_send_request(req);
+        if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+          auto res = fut.get();
+          if (res->success) {
+            scheduleGripperActions(res->gripper_action_times, res->gripper_action_commands);
+            logOk("Done: " + name);
           } else {
-            logErr("Timeout: " + name);
+            logErr("Fail: " + res->message);
           }
-        } catch (const std::exception& e) {
-          logErr(std::string("Exception: ") + e.what());
-        } catch (...) {
-          logErr("Unknown exception");
+        } else {
+          logErr("Timeout: " + name);
         }
-        executing_ = false;
-      });
-    } catch (const std::exception& e) {
-      logErr("Request failed: " + std::string(e.what()));
+      } catch (const std::exception& e) {
+        logErr(std::string("Exception: ") + e.what());
+      } catch (...) {
+        logErr("Unknown exception");
+      }
       executing_ = false;
-    }
+    });
   }
 
   void handleSaveName(const std::string& name) {
@@ -896,6 +888,52 @@ private:
     }
   }
 
+  // --- 夹爪动作解析 & 同步发送 (用于自动化流程) ---
+
+  static std::optional<double> parseGripperAction(const std::string& action) {
+    if (action == "open") return -70.0;
+    if (action == "close") return 70.0;
+    if (action == "stop") return 0.0;
+    return std::nullopt;
+  }
+
+  // 阻塞发送夹爪命令, 仅在 async_ 工作线程中调用
+  bool sendGripperSync(double torque, std::chrono::seconds timeout = std::chrono::seconds(5)) {
+    gripper_last_sent_ = torque;
+    auto req = std::make_shared<GripperControl::Request>();
+    req->torque = torque;
+    try {
+      auto fut = gripper_client_->async_send_request(req);
+      if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (res->success) {
+          logOk("Gripper: " + std::to_string(torque) + " N");
+          return true;
+        }
+        logErr("Gripper fail: " + res->message);
+        return false;
+      }
+      logErr("Gripper sync timeout");
+      return false;
+    } catch (const std::exception& e) {
+      logErr("Gripper sync error: " + std::string(e.what()));
+      return false;
+    }
+  }
+
+  // 按时间戳调度夹爪动作序列 (在 async_ 工作线程中阻塞执行)
+  void scheduleGripperActions(const std::vector<double>& times,
+                              const std::vector<std::string>& commands) {
+    if (times.empty()) return;
+    auto start = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < times.size(); i++) {
+      auto target = start + std::chrono::duration<double>(times[i]);
+      std::this_thread::sleep_until(target);
+      auto torque = parseGripperAction(commands[i]);
+      if (torque) sendGripperSync(*torque);
+    }
+  }
+
   // --- 接管操作：笛卡尔 (Jogging) ---
 
   void handleCartesianTakeover(int ch) {
@@ -924,19 +962,19 @@ private:
     else if (ch == 'f' || ch == 'F')
       dz = -cartesian_step_;
 
-    // 姿态 方向键=Pitch/Yaw  Q/E=Roll
+    // 姿态 方向键=Pitch/Yaw  Q/E=Roll (步长 = 平移 × 2.5)
     else if (ch == KEY_UP)
-      dpitch = cartesian_step_;
+      dpitch = cartesian_step_ * 2.5;
     else if (ch == KEY_DOWN)
-      dpitch = -cartesian_step_;
+      dpitch = -cartesian_step_ * 2.5;
     else if (ch == KEY_LEFT)
-      dyaw = cartesian_step_;
+      dyaw = cartesian_step_ * 2.5;
     else if (ch == KEY_RIGHT)
-      dyaw = -cartesian_step_;
+      dyaw = -cartesian_step_ * 2.5;
     else if (ch == 'q')
-      droll = -cartesian_step_;
+      droll = -cartesian_step_ * 2.5;
     else if (ch == 'e')
-      droll = cartesian_step_;
+      droll = cartesian_step_ * 2.5;
     else
       return;
 
@@ -966,28 +1004,26 @@ private:
     jog_target_pose_.position.x += dx;
     jog_target_pose_.position.y += dy;
     jog_target_pose_.position.z += dz;
-    jog_target_roll_ += droll;
-    jog_target_pitch_ += dpitch;
-    jog_target_yaw_ += dyaw;
 
-    // wrap to [-π, π]
-    jog_target_roll_ = std::remainder(jog_target_roll_, 2.0 * M_PI);
-    jog_target_pitch_ = std::remainder(jog_target_pitch_, 2.0 * M_PI);
-    jog_target_yaw_ = std::remainder(jog_target_yaw_, 2.0 * M_PI);
+    // 末端坐标系旋转: 右乘增量四元数 (body-frame YPR)
+    auto& o = jog_target_pose_.orientation;
+    tf2::Quaternion q_cur(o.x, o.y, o.z, o.w);
+    tf2::Quaternion dq;
+    dq.setRPY(droll, dpitch, dyaw);
+    tf2::Quaternion q_new = q_cur * dq;  // 右乘 = 末端系旋转
+    q_new.normalize();
+    o.x = q_new.x();
+    o.y = q_new.y();
+    o.z = q_new.z();
+    o.w = q_new.w();
 
-    tf2::Quaternion q;
-    q.setRPY(jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
-    q.normalize();
+    // 反算世界系 RPY 用于显示
+    quaternionToRPY(o, jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
 
     geometry_msgs::msg::PoseStamped target;
     target.header.stamp = this->now();
     target.header.frame_id = "base_link";
-    target.pose.position = jog_target_pose_.position;
-    target.pose.orientation.x = q.x();
-    target.pose.orientation.y = q.y();
-    target.pose.orientation.z = q.z();
-    target.pose.orientation.w = q.w();
-
+    target.pose = jog_target_pose_;
     cartesian_target_pub_->publish(target);
 
     char buf[128];
@@ -1107,11 +1143,10 @@ private:
         mvprintw(cur_line, 25, "%s", utf8Pad(traj_str, 16).c_str());
         mvprintw(cur_line, 42, "%s", desc_field.c_str());
         if (i == current_idx_) mvprintw(cur_line, max_x - 8, "<- NOW");
+        clrtoeol();
         cur_line++;
 
-        attroff(A_BOLD | COLOR_PAIR(COLOR_PAIR_WARNING));
-        attroff(COLOR_PAIR(COLOR_PAIR_SUCCESS));
-        attroff(A_DIM);
+        attrset(A_NORMAL);
       }
       cur_line++;
       mvprintw(cur_line++, 2,
@@ -1152,12 +1187,14 @@ private:
       }
       cur_line++;
       attron(A_BOLD);
-      mvprintw(cur_line++, 4, "Step Size: %.3f m / rad", cartesian_step_);
+      mvprintw(cur_line++, 4, "Step Size: %.3f m  |  %.4f rad (x2.5)", cartesian_step_,
+               cartesian_step_ * 2.5);
       attroff(A_BOLD);
       cur_line++;
-      mvprintw(cur_line++, 4, "Translation: [W/S] X axis  [A/D] Y axis  [R/F] Z axis");
-      mvprintw(cur_line++, 4, "Orientation: [Up/Down] Pitch  [Left/Right] Yaw  [Q/E] Roll");
-      mvprintw(cur_line++, 4, "Config     : [+/-] Change Step Size");
+      mvprintw(cur_line++, 4, "Translation (world) : [W/S] X   [A/D] Y   [R/F] Z");
+      mvprintw(cur_line++, 4,
+               "Orientation (body)  : [Up/Down] Pitch  [Left/Right] Yaw  [Q/E] Roll");
+      mvprintw(cur_line++, 4, "Config              : [+/-] Change Step Size");
     } else if (view_ == View::GRIPPER) {
       mvprintw(cur_line++, 2, "Gripper Status");
       cur_line++;

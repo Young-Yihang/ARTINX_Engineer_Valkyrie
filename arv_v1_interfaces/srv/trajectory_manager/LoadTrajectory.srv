@@ -7,3 +7,5 @@ bool execute                             # 是否立即执行
 bool success
 string message
 float64 duration                         # 轨迹时长(秒)
+float64[] gripper_action_times           # 夹爪动作时间戳(秒, 相对轨迹起点)
+string[] gripper_action_commands         # 夹爪动作: "open"/"close"/"stop"
