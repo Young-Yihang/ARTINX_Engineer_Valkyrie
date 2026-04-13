@@ -26,9 +26,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(geometric_shapes REQUIRED)
 find_package(shape_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
-find_package(PkgConfig REQUIRED)
 find_package(OpenGL REQUIRED)
-pkg_check_modules(IMGUI REQUIRED imgui)
 
 # ========== MuJoCo手动配置 ==========
 # 设置MuJoCo安装路径
@@ -95,9 +93,23 @@ target_include_directories(cascade_pid PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-# ========== ImGui后端 + ImPlot 源码编译 ==========
-# ImGui后端目录 (apt包不含后端实现，需要源码编译)
-set(IMGUI_BACKENDS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends/backends)
+# ========== ImGui + 后端 + ImPlot 源码编译 ==========
+# 统一使用 third_party，避免不同设备系统包版本不一致
+set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends)
+set(IMGUI_BACKENDS_DIR ${IMGUI_DIR}/backends)
+set(IMPLOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/implot)
+
+# Dear ImGui core
+add_library(imgui STATIC
+  ${IMGUI_DIR}/imgui.cpp
+  ${IMGUI_DIR}/imgui_draw.cpp
+  ${IMGUI_DIR}/imgui_tables.cpp
+  ${IMGUI_DIR}/imgui_widgets.cpp
+)
+target_include_directories(imgui PUBLIC
+  ${IMGUI_DIR}
+  ${IMGUI_BACKENDS_DIR}
+)
 
 # ImGui后端库 (GLFW + OpenGL3)
 add_library(imgui_backends STATIC
@@ -105,26 +117,25 @@ add_library(imgui_backends STATIC
   ${IMGUI_BACKENDS_DIR}/imgui_impl_opengl3.cpp
 )
 target_include_directories(imgui_backends PUBLIC
+  ${IMGUI_DIR}
   ${IMGUI_BACKENDS_DIR}
-  ${IMGUI_INCLUDE_DIRS}
 )
 target_link_libraries(imgui_backends PUBLIC
-  ${IMGUI_LIBRARIES}
+  imgui
   glfw
   OpenGL::GL
 )
 
-# ImPlot源码编译 (apt没有implot包)
-set(IMPLOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/implot)
+# ImPlot源码编译
 add_library(implot STATIC
   ${IMPLOT_DIR}/implot.cpp
   ${IMPLOT_DIR}/implot_items.cpp
 )
 target_include_directories(implot PUBLIC
   ${IMPLOT_DIR}
-  ${IMGUI_INCLUDE_DIRS}
+  ${IMGUI_DIR}
 )
-target_link_libraries(implot PUBLIC ${IMGUI_LIBRARIES})
+target_link_libraries(implot PUBLIC imgui)
 
 # ============= 3. 创建可执行文件 =============
 
@@ -190,7 +201,7 @@ target_link_libraries(mujoco_interface_node
   ${MUJOCO_LIBRARIES}  # ← 使用手动配置的MuJoCo库
   glfw  # GLFW窗口库
   OpenGL::GL
-  ${IMGUI_LIBRARIES}
+  imgui
   imgui_backends  # ← 新增: ImGui GLFW/OpenGL3后端
   implot
   yaml-cpp  # 读取 scene_obstacles.yaml
@@ -203,7 +214,7 @@ target_include_directories(mujoco_interface_node PUBLIC
   ${rclcpp_INCLUDE_DIRS}
   ${ament_index_cpp_INCLUDE_DIRS}
   ${MUJOCO_INCLUDE_DIRS}  # ← 添加MuJoCo头文件
-  ${IMGUI_INCLUDE_DIRS}
+  ${IMGUI_DIR}
   ${IMGUI_BACKENDS_DIR}   # ← 新增: ImGui后端头文件
 )
 

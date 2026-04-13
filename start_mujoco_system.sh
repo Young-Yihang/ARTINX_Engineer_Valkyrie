@@ -384,7 +384,7 @@ start_sim_mode() {
     start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node" 2
 
     update_status "TrajectoryManager"
-    start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
+    start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node --ros-args -p trajectory_dir:=$WORKSPACE_DIR/src/arv_v1_moveit/config/trajectories" 1
 
     update_status "CartesianController (IK)"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
@@ -419,7 +419,7 @@ start_serial_mode() {
     start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true" 2
 
     update_status "TrajectoryManager"
-    start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
+    start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node --ros-args -p trajectory_dir:=$WORKSPACE_DIR/src/arv_v1_moveit/config/trajectories" 1
 
     update_status "CartesianController (IK)"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
