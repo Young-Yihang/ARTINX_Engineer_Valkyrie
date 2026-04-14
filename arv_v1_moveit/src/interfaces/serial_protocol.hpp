@@ -163,11 +163,11 @@ inline std::vector<uint8_t> buildPacket(uint16_t cmd_id, uint16_t flags,
   append_uint16(pkt, flags);
   pkt.insert(pkt.end(), payload.begin(), payload.end());
 
-  const uint16_t data_len = static_cast<uint16_t>(pkt.size() - 8); // payload + crc
+  const uint16_t data_len = static_cast<uint16_t>(payload.size() + 2); // float_data + CRC16
   pkt[1] = static_cast<uint8_t>(data_len & 0xFF);
   pkt[2] = static_cast<uint8_t>((data_len >> 8) & 0xFF);
   pkt[3] = Get_CRC8_Check_Sum(pkt.data(), 3, 0xFF);
-  const uint16_t crc16 = Get_CRC16_Check_Sum(pkt.data(), pkt.size()-1, 0xFFFF);
+  const uint16_t crc16 = Get_CRC16_Check_Sum(pkt.data(), pkt.size(), 0xFFFF);
   append_uint16(pkt, crc16);
 
   return pkt;
