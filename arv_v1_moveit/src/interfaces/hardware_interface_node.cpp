@@ -24,6 +24,8 @@ public:
     this->declare_parameter("gripper_rate_hz", 50);
     this->declare_parameter("simulation_mode", false);
     this->declare_parameter("force_zero_torque", false);
+    this->declare_parameter("link_diag_enabled", true);
+    this->declare_parameter("link_diag_period_ms", 2000);
 
     std::string port = this->get_parameter("serial_port").as_string();
     int baud = this->get_parameter("baud_rate").as_int();
@@ -54,6 +56,12 @@ public:
       receive_thread_ = std::thread(&HardwareInterfaceNode::receiveLoop, this);
       RCLCPP_INFO(this->get_logger(),
                   "[OK] Hardware mode - USB CDC RX/TX enabled (auto-reconnect every 200ms)");
+
+      const bool diag_enabled = this->get_parameter("link_diag_enabled").as_bool();
+      if (diag_enabled) {
+        link_diag_thread_ = std::thread(&HardwareInterfaceNode::linkDiagLoop, this);
+        RCLCPP_INFO(this->get_logger(), "[OK] Link diag thread enabled");
+      }
     }
 
     const int send_hz = this->get_parameter("send_rate_hz").as_int();
@@ -96,6 +104,10 @@ public:
       receive_thread_.join();
     }
 
+    if (link_diag_thread_.joinable()) {
+      link_diag_thread_.join();
+    }
+
     RCLCPP_INFO(this->get_logger(), "[SHUTDOWN] Hardware interface closed");
   }
 
@@ -111,6 +123,7 @@ private:
   std::shared_ptr<drivers::serial_driver::SerialPort> serial_port_;
   std::mutex serial_mutex_;  // [FIX] 保护 serial_port_ 跨线程操作 (RX/TX/析构)
   std::thread receive_thread_;
+  std::thread link_diag_thread_;
 
   // --- ROS2 ---
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr torque_sub_;
@@ -136,8 +149,55 @@ private:
   std::atomic<std::chrono::steady_clock::time_point> last_rx_activity_;
   std::atomic<uint64_t> rx_packet_count_{0};
   std::atomic<uint64_t> tx_packet_count_{0};
+  std::atomic<uint64_t> tx_attempt_count_{0};
   std::atomic<uint64_t> rx_crc_errors_{0};
   rclcpp::TimerBase::SharedPtr health_timer_;
+  std::atomic<std::chrono::steady_clock::time_point> last_tx_attempt_activity_;
+  std::atomic<std::chrono::steady_clock::time_point> last_tx_success_activity_;
+
+  void linkDiagLoop() {
+    uint64_t last_rx = 0;
+    uint64_t last_tx_ok = 0;
+    uint64_t last_tx_try = 0;
+
+    int period_ms = this->get_parameter("link_diag_period_ms").as_int();
+    if (period_ms < 200) period_ms = 200;
+
+    while (running_) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(period_ms));
+      if (!running_) break;
+
+      const uint64_t rx_now = rx_packet_count_.load();
+      const uint64_t tx_ok_now = tx_packet_count_.load();
+      const uint64_t tx_try_now = tx_attempt_count_.load();
+      const uint64_t crc_now = rx_crc_errors_.load();
+
+      const auto now = std::chrono::steady_clock::now();
+      const auto rx_last = last_rx_activity_.load();
+      const auto tx_try_last = last_tx_attempt_activity_.load();
+      const auto tx_ok_last = last_tx_success_activity_.load();
+
+      const auto rx_idle_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - rx_last).count();
+      const auto tx_try_idle_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - tx_try_last).count();
+      const auto tx_ok_idle_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - tx_ok_last).count();
+
+      const uint64_t d_rx = rx_now - last_rx;
+      const uint64_t d_tx_ok = tx_ok_now - last_tx_ok;
+      const uint64_t d_tx_try = tx_try_now - last_tx_try;
+
+      RCLCPP_INFO(this->get_logger(),
+                  "[LINK] dTX_try=%lu dTX_ok=%lu dRX=%lu | idle(ms): tx_try=%ld tx_ok=%ld rx=%ld "
+                  "| crc=%lu",
+                  d_tx_try, d_tx_ok, d_rx, tx_try_idle_ms, tx_ok_idle_ms, rx_idle_ms, crc_now);
+
+      last_rx = rx_now;
+      last_tx_ok = tx_ok_now;
+      last_tx_try = tx_try_now;
+    }
+  }
 
   bool initSerial(const std::string &port, int baud) {
     try {
@@ -225,23 +285,31 @@ private:
       const size_t need = len - received;
       tmp.assign(need, 0);
 
-      size_t n = 0;
+      // [FIX] 只持锁复制 shared_ptr，锁外执行 receive()
+      // 避免阻塞 IO 长期占用 serial_mutex_ 导致 ROS2 executor（sendLoop）永久冻结
+      std::shared_ptr<drivers::serial_driver::SerialPort> port_snap;
       {
         std::lock_guard<std::mutex> slock(serial_mutex_);
         if (!serial_port_ || !serial_port_->is_open()) {
           return false;
         }
+        port_snap = serial_port_;  // 引用计数保活，即使析构也不会野指针
+      }
+
+      size_t n = 0;
+      try {
+        n = port_snap->receive(tmp);  // 阻塞在锁外，serial_mutex_ 已释放
+      } catch (const std::exception &e) {
+        RCLCPP_ERROR(this->get_logger(), "[ERROR] Serial receive: %s", e.what());
         try {
-          n = serial_port_->receive(tmp);
-        } catch (const std::exception &e) {
-          RCLCPP_ERROR(this->get_logger(), "[ERROR] Serial receive: %s", e.what());
-          try {
+          std::lock_guard<std::mutex> slock(serial_mutex_);
+          if (serial_port_ && serial_port_->is_open()) {
             serial_port_->close();
-          } catch (...) {
-            RCLCPP_DEBUG(this->get_logger(), "Serial port close failed during cleanup");
           }
-          return false;
+        } catch (...) {
+          RCLCPP_DEBUG(this->get_logger(), "Serial port close failed during cleanup");
         }
+        return false;
       }
 
       if (n == 0) {
@@ -297,6 +365,7 @@ private:
   // --- 串口收发 ---
 
   void sendLoop() {
+    last_tx_attempt_activity_.store(std::chrono::steady_clock::now());
     {
       std::lock_guard<std::mutex> slock(serial_mutex_);
       if (!serial_port_ || !serial_port_->is_open()) {
@@ -348,6 +417,8 @@ private:
     }
 
     auto sendRaw = [&](const std::vector<uint8_t> &pkt) {
+      tx_attempt_count_++;
+      last_tx_attempt_activity_.store(std::chrono::steady_clock::now());
       std::lock_guard<std::mutex> slock(serial_mutex_);
       try {
         if (!serial_port_ || !serial_port_->is_open()) return;
@@ -356,6 +427,7 @@ private:
           RCLCPP_WARN(this->get_logger(), "[WARN] Partial send: %zu/%zu", sent, pkt.size());
         } else {
           tx_packet_count_++;
+          last_tx_success_activity_.store(std::chrono::steady_clock::now());
         }
       } catch (const std::exception &e) {
         RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
