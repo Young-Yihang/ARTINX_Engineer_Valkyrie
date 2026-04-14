@@ -123,10 +123,18 @@ public:
         std::bind(&MissionExecutorNode::onTaskCommand, this, std::placeholders::_1));
 
     control_mode_pub_ = create_publisher<std_msgs::msg::UInt8>("/control_mode", 10);
+    arm_state_pub_    = create_publisher<std_msgs::msg::UInt8>("/arm_state", 10);
+    arm_status_timer_ = create_wall_timer(
+        std::chrono::milliseconds(100),  // 10Hz
+        [this]() {
+            auto msg = std_msgs::msg::UInt8();
+            msg.data = deriveArmState();
+            arm_state_pub_->publish(msg);
+        });
 
-    // [FIX] 立即发布 ARMED，防止 torque_controller 默认 RELAX 导致上电掉落。
-    // torque_controller 在 sleep 2 前已启动，此时订阅已建立。
-    publishControlMode(ControlMode::ARMED);
+    // 真机默认 RELAX：操作员确认后通过 RC 切 ARMED。
+    // 注意：仿真(MuJoCo)中需手动改回 ARMED，因为仿真器可配置收到首条指令后再开始。
+    publishControlMode(ControlMode::RELAX);
 
     log("Checking services (non-blocking)...", COLOR_PAIR_DEFAULT);
     if (!load_client_->wait_for_service(2s)) {
@@ -139,7 +147,7 @@ public:
     fetchTrajectories();
 
     // 重发: 覆盖 wait_for_service 期间可能重启的节点
-    publishControlMode(ControlMode::ARMED);
+    publishControlMode(ControlMode::RELAX);
     log("Mission Executor v4.0 ready", COLOR_PAIR_SUCCESS);
   }
 
@@ -256,9 +264,21 @@ private:
   std::mutex pose_mu_;
   bool has_ee_pose_ = false;
 
-  // --- 控制模式 ---
+  // --- 控制模式 & 臂状态 ---
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr control_mode_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr arm_state_pub_;
+  rclcpp::TimerBase::SharedPtr arm_status_timer_;
   uint8_t control_mode_ = ControlMode::ARMED;
+
+  // 从 control_mode_ / executing_ / current_idx_ 派生 ArmState (与 serial_protocol.hpp 同步)
+  uint8_t deriveArmState() const {
+    if (control_mode_ == ControlMode::RELAX)     return 0x05; // RELAX
+    if (control_mode_ == ControlMode::FREEDRIVE) return 0x06; // FREEDRIVE
+    // ARMED
+    if (executing_)      return 0x01; // EXECUTING
+    if (current_idx_ > 0) return 0x02; // HOLDING
+    return 0x00;  // READY
+  }
 
   void publishControlMode(uint8_t mode) {
     control_mode_ = mode;
@@ -496,11 +516,11 @@ private:
 
     char log_buf[64];
     switch (cmd) {
-      case 0x01:  // EMERGENCY_STOP
+      case 0x01:  // EMERGENCY_STOP: 立即零力矩停止，不运动到任何位置
         logWarn("[HW] EMERGENCY_STOP");
-        resetToIdle();
+        emergencyStop();
         break;
-      case 0x02:  // RESET_HOME
+      case 0x02:  // RESET_HOME: 受控回到 home 位置
         logOk("[HW] RESET_HOME");
         resetToIdle();
         break;
@@ -663,6 +683,15 @@ private:
       }
       executing_ = false;
     });
+  }
+
+  // 紧急停止：立即零力矩，不运动到任何位置。
+  // emergencyStop  = STOP NOW，切 RELAX，executing 强制清锁
+  // resetToIdle    = 受控地跑 reset_trajectory 回 home，需要 executing=false 才能执行
+  void emergencyStop() {
+    executing_ = false;  // 强制清锁，即使正在跑轨迹
+    publishControlMode(ControlMode::RELAX);  // 零力矩立即停止
+    logWarn("[ESTOP] Forced RELAX, executing_ cleared.");
   }
 
   void resetToIdle() {

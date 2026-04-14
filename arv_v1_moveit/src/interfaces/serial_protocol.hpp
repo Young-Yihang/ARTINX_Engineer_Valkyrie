@@ -38,8 +38,8 @@ enum class TaskCmd : uint8_t {
 };
 
 // ─────────── 0x0006 ArmStatus: [state][progress][error][gripper] ───────────
-enum class ArmState : uint8_t {
-  IDLE = 0x00,
+enum class ArmState : uint8_t { // 0x00 to 0x04, all in armed.
+  READY = 0x00,  // ARMED + at home + idx=0, waiting for command (active hold, non-zero torque)
   EXECUTING = 0x01,
   HOLDING = 0x02,
   ERROR = 0x03,
@@ -182,8 +182,8 @@ inline std::vector<uint8_t> buildTorquePacket(const TorqueCommand &cmd) {
 }
 
 inline std::vector<uint8_t> buildGripperPacket(GripperAction action) {
-  std::vector<uint8_t> payload = {static_cast<uint8_t>(action)};
-  return buildPacket(CMD_GRIPPER_CONTROL, 0x0000, payload);
+  // action transported in flags field (1 byte, not float-aligned payload)
+  return buildPacket(CMD_GRIPPER_CONTROL, static_cast<uint16_t>(action), {});
 }
 
 inline std::vector<uint8_t> buildArmStatusPacket(const ArmStatusPacket &status) {

@@ -127,6 +127,7 @@ private:
 
   // --- ROS2 ---
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr torque_sub_;
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr arm_state_sub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr task_command_pub_;
   rclcpp::TimerBase::SharedPtr send_timer_;
@@ -144,6 +145,12 @@ private:
 
   int gripper_divider_ = 4;
   int gripper_counter_ = 0;
+
+  // 0x0006 ARM_STATUS TX: 10Hz (1kHz / 100)
+  uint8_t cached_arm_state_ = 0x05;  // 默认 ArmState::RELAX
+  std::mutex arm_state_mutex_;
+  int status_divider_ = 100;
+  int status_counter_ = 0;
 
   // Health monitoring
   std::atomic<std::chrono::steady_clock::time_point> last_rx_activity_;
@@ -340,6 +347,12 @@ private:
 
     joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
     task_command_pub_ = this->create_publisher<std_msgs::msg::Int32>("/task_command", 10);
+    arm_state_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
+        "/arm_state", 10,
+        [this](const std_msgs::msg::UInt8::SharedPtr msg) {
+            std::lock_guard<std::mutex> lk(arm_state_mutex_);
+            cached_arm_state_ = msg->data;
+        });
   }
 
   // --- 回调函数 ---
@@ -459,6 +472,20 @@ private:
           action = SerialProtocol::GripperAction::STOP;
       }
       sendRaw(SerialProtocol::buildGripperPacket(action));
+    }
+
+    // ── 分频发送臂状态包 0x0006: 10Hz ──
+    status_counter_ = (status_counter_ + 1) % status_divider_;
+    if (status_counter_ == 0) {
+      SerialProtocol::ArmStatusPacket status;
+      {
+        std::lock_guard<std::mutex> lk(arm_state_mutex_);
+        status.arm_state = static_cast<SerialProtocol::ArmState>(cached_arm_state_);
+      }
+      status.task_progress = 0;
+      status.error_code    = SerialProtocol::ArmError::NO_ERROR;
+      status.gripper_state = SerialProtocol::GripperState::OPEN;
+      sendRaw(SerialProtocol::buildArmStatusPacket(status));
     }
   }
 
