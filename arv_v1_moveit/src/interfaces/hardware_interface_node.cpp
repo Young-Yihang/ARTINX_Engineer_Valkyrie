@@ -10,6 +10,7 @@
 #include <serial_driver/serial_driver.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/int32.hpp>
+#include <std_msgs/msg/u_int8.hpp>
 #include <thread>
 
 #include "serial_protocol.hpp"
