@@ -3,7 +3,7 @@
 initial_positions:
   joint_1: 0
   joint_2: 2.1746
-  joint_3: 0.937
+  joint_3: -0.937
   joint_4: -1.3226
   joint_5: 1.5028
   joint_6: -1.6796
