@@ -35,7 +35,7 @@
     <group_state name="Escape" group="ARM">
         <joint name="joint_1" value="0"/>
         <joint name="joint_2" value="2.1746"/>
-        <joint name="joint_3" value="0.937"/>
+        <joint name="joint_3" value="-0.937"/>
         <joint name="joint_4" value="-1.326"/>
         <joint name="joint_5" value="1.5028"/>
         <joint name="joint_6" value="-1.6796"/>
@@ -43,7 +43,7 @@
     <group_state name="Start" group="ARM">
         <joint name="joint_1" value="0"/>
         <joint name="joint_2" value="2.6343"/>
-        <joint name="joint_3" value="1.0785"/>
+        <joint name="joint_3" value="-1.0785"/>
         <joint name="joint_4" value="0"/>
         <joint name="joint_5" value="0"/>
         <joint name="joint_6" value="0"/>
