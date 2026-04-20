@@ -239,7 +239,7 @@ private:
 
   // --- 状态机 ---
   std::vector<MissionState> states_;
-  size_t current_idx_ = 0;
+  std::atomic<size_t> current_idx_{0};  // async worker 写 / timer+UI 读
   std::string mission_name_;
   std::string mission_desc_;
   std::string reset_trajectory_;
@@ -254,8 +254,8 @@ private:
   size_t traj_page_ = 0;
 
   // --- 夹爪状态 ---
-  double gripper_torque_cmd_ = 0.0;  // 预设力 (N)
-  double gripper_last_sent_ = 0.0;   // 已发送力 (N)
+  double gripper_torque_cmd_ = 0.0;             // 预设力 (N), 仅 UI 线程访问
+  std::atomic<double> gripper_last_sent_{0.0};  // 已发送力 (N), async 写/UI 读
 
   // --- 笛卡尔状态 ---
   double cartesian_step_ = 0.005;  // 5mm
@@ -581,6 +581,11 @@ private:
     }
   }
 
+  // 设计意图: executing_ 仅表示"load_trajectory 请求在途", 不代表 action 是否跑完.
+  // trajectory_manager 用 async_send_goal 立刻返回, 所以服务响应 ≠ 轨迹执行完成.
+  // 这是刻意的: 比赛场景需要可抢占, 新指令可打断旧 action (通过重发 goal 或切 RELAX).
+  // 安全兜底: control_mode=RELAX 在 torque_controller 层直接置零力矩, 物理上立即停止,
+  //           不需要 mission_executor 持有 action goal handle 做 cancel.
   void executeTrajectoryByKey(const std::string& name) {
     if (control_mode_ != ControlMode::ARMED) {
       logWarn("须先切到 ARMED 模式才能执行: " + name);
@@ -693,6 +698,8 @@ private:
   // 紧急停止：立即零力矩，不运动到任何位置。
   // emergencyStop  = STOP NOW，切 RELAX，executing 强制清锁
   // resetToIdle    = 受控地跑 reset_trajectory 回 home，需要 executing=false 才能执行
+  // 注: 不 cancel action goal 是刻意的 (见 executeTrajectoryByKey 设计意图);
+  //     RELAX 在 torque_controller 层置零力矩即可物理停止, cancel 是多余的复杂度.
   void emergencyStop() {
     executing_ = false;                      // 强制清锁，即使正在跑轨迹
     publishControlMode(ControlMode::RELAX);  // 零力矩立即停止
@@ -1240,15 +1247,14 @@ private:
       mvprintw(cur_line++, 2, "Gripper Status");
       cur_line++;
 
-      const char* state_str = (gripper_last_sent_ > 0.0) ? "GRIP"
-                            : (gripper_last_sent_ < 0.0) ? "RELEASE"
-                                                         : "STOP";
-      int state_color = (gripper_last_sent_ > 0.0) ? COLOR_PAIR_SUCCESS
-                      : (gripper_last_sent_ < 0.0) ? COLOR_PAIR_WARNING
-                                                   : COLOR_PAIR_DEFAULT;
+      const double g_sent = gripper_last_sent_.load();
+      const char* state_str = (g_sent > 0.0) ? "GRIP" : (g_sent < 0.0) ? "RELEASE" : "STOP";
+      int state_color = (g_sent > 0.0) ? COLOR_PAIR_SUCCESS
+                      : (g_sent < 0.0) ? COLOR_PAIR_WARNING
+                                       : COLOR_PAIR_DEFAULT;
       mvprintw(cur_line++, 4, "State : ");
       attron(COLOR_PAIR(state_color) | A_BOLD);
-      printw("%s  (%.0f N)", state_str, gripper_last_sent_);
+      printw("%s  (%.0f N)", state_str, g_sent);
       attroff(COLOR_PAIR(state_color) | A_BOLD);
 
       cur_line++;

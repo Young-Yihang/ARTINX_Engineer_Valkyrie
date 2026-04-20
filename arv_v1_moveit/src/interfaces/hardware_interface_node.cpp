@@ -354,6 +354,12 @@ private:
     task_command_pub_ = this->create_publisher<std_msgs::msg::Int32>("/task_command", 10);
     arm_state_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
         "/arm_state", 10, [this](const std_msgs::msg::UInt8::SharedPtr msg) {
+          // ArmState 合法值 0x00-0x06 (见 serial_protocol.hpp), 越界丢弃防止污染 MCU 状态包
+          if (msg->data > 0x06) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                 "[WARN] Invalid arm_state 0x%02X, ignored", msg->data);
+            return;
+          }
           std::lock_guard<std::mutex> lk(arm_state_mutex_);
           cached_arm_state_ = msg->data;
         });
@@ -382,7 +388,7 @@ private:
   // --- 串口收发 ---
 
   void sendLoop() {
-    last_tx_attempt_activity_.store(std::chrono::steady_clock::now());
+    // tx_attempt 时间戳仅在 sendRaw 真正尝试发包时更新, 避免串口未开时诊断撒谎
     {
       std::lock_guard<std::mutex> slock(serial_mutex_);
       if (!serial_port_ || !serial_port_->is_open()) {
