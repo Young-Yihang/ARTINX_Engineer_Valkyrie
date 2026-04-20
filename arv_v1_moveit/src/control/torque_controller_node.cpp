@@ -989,12 +989,12 @@ void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_
                                                          const KDL::JntArray &q_actual,
                                                          const KDL::JntArray &qd_actual,
                                                          KDL::JntArray &tau_fb) {
-  // 级联 P+PI: 外环P生成速度指令, 内环PI输出力矩
+  // 级联 PD+PI: 外环PD生成速度指令, 内环PI输出力矩
   // qd_actual 应传入卡尔曼滤波后的速度以减少噪声
 
   if (!cascade_pid_) {
     RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                          "[ERROR] Cascade P+PI not initialized!");
+                          "[ERROR] Cascade PD+PI not initialized!");
     for (size_t i = 0; i < kArmJoints; i++) {
       tau_fb(i) = 0.0;
     }
