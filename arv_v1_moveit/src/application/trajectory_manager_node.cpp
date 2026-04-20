@@ -372,6 +372,11 @@ private:
       if (config["meta"] && config["meta"]["gripper_actions"]) {
         double prev_time = -1.0;
         for (const auto& ga : config["meta"]["gripper_actions"]) {
+          if (!ga["time"] || !ga["action"]) {
+            RCLCPP_WARN(this->get_logger(),
+                        "[LoadTrajectory] Skipping gripper action with missing time/action field");
+            continue;
+          }
           double t = ga["time"].as<double>();
           std::string cmd = ga["action"].as<std::string>();
           if (t < 0.0) {
@@ -379,8 +384,10 @@ private:
             continue;
           }
           if (t < prev_time) {
+            // 非单调会导致 sleep_until 立即触发, 跳过而不仅是 warn
             RCLCPP_WARN(this->get_logger(),
-                        "[LoadTrajectory] Gripper actions not monotonic at %.3f", t);
+                        "[LoadTrajectory] Skipping non-monotonic time: %.3f < %.3f", t, prev_time);
+            continue;
           }
           if (cmd != "open" && cmd != "close" && cmd != "stop") {
             RCLCPP_WARN(this->get_logger(), "[LoadTrajectory] Unknown gripper action: '%s'",

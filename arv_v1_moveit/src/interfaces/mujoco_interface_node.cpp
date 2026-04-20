@@ -1336,15 +1336,17 @@ void MuJoCoInterfaceNode::drawTargetMarker() {
       std::memcpy(base_p, data_->xpos + 3 * base_id, 3 * sizeof(double));
       std::memcpy(base_m, data_->xmat + 9 * base_id, 9 * sizeof(double));
     } else {
-      // URDF: <origin xyz="-0.1 0 0.15" rpy="0 0 0"/> (world_fixed joint)
+      // URDF world_fixed: <origin xyz="-0.1 0 0.15" rpy="0 0 0"/>
+      // 若 URDF 改了这里必须同步修正 kWorldBaseOffset
+      static constexpr double kWorldBaseOffset[3] = {-0.1, 0.0, 0.15};
+      RCLCPP_WARN_ONCE(this->get_logger(),
+                       "[draw] base_link body not found, falling back to URDF world_fixed offset");
       int link1_id = mj_name2id(model_, mjOBJ_BODY, "link1");
       if (link1_id >= 0) {
         // link1 body pos 就是 base_link 在世界系的位置 (joint_1 不改变位置)
         std::memcpy(base_p, data_->xpos + 3 * link1_id, 3 * sizeof(double));
       } else {
-        base_p[0] = -0.1;
-        base_p[1] = 0.0;
-        base_p[2] = 0.15;
+        std::memcpy(base_p, kWorldBaseOffset, 3 * sizeof(double));
       }
       // base_link 无旋转 → 单位矩阵
       std::memset(base_m, 0, 9 * sizeof(double));

@@ -94,6 +94,9 @@ public:
   MissionExecutorNode() : Node("mission_executor") {
     initNcurses();
 
+    // LoadTrajectory 服务响应超时 (execute=true 时覆盖整条轨迹执行时间)
+    trajectory_timeout_s_ = declare_parameter<double>("trajectory_execution_timeout", 120.0);
+
     // [FIX] getenv("HOME") 可返回 nullptr，构造 std::string 是 UB
     const char* home_env = getenv("HOME");
     if (!home_env) {
@@ -123,14 +126,13 @@ public:
         std::bind(&MissionExecutorNode::onTaskCommand, this, std::placeholders::_1));
 
     control_mode_pub_ = create_publisher<std_msgs::msg::UInt8>("/control_mode", 10);
-    arm_state_pub_    = create_publisher<std_msgs::msg::UInt8>("/arm_state", 10);
-    arm_status_timer_ = create_wall_timer(
-        std::chrono::milliseconds(100),  // 10Hz
-        [this]() {
-            auto msg = std_msgs::msg::UInt8();
-            msg.data = deriveArmState();
-            arm_state_pub_->publish(msg);
-        });
+    arm_state_pub_ = create_publisher<std_msgs::msg::UInt8>("/arm_state", 10);
+    arm_status_timer_ = create_wall_timer(std::chrono::milliseconds(100),  // 10Hz
+                                          [this]() {
+                                            auto msg = std_msgs::msg::UInt8();
+                                            msg.data = deriveArmState();
+                                            arm_state_pub_->publish(msg);
+                                          });
 
     // 真机默认 RELAX：操作员确认后通过 RC 切 ARMED。
     // 注意：仿真(MuJoCo)中需手动改回 ARMED，因为仿真器可配置收到首条指令后再开始。
@@ -243,6 +245,7 @@ private:
   std::string reset_trajectory_;
   std::string mission_yaml_path_;
   std::atomic<bool> executing_{false};
+  double trajectory_timeout_s_ = 120.0;  // ROS 参数 trajectory_execution_timeout
 
   // --- 轨迹管理 ---
   std::vector<TrajectoryEntry> trajectories_;
@@ -272,12 +275,12 @@ private:
 
   // 从 control_mode_ / executing_ / current_idx_ 派生 ArmState (与 serial_protocol.hpp 同步)
   uint8_t deriveArmState() const {
-    if (control_mode_ == ControlMode::RELAX)     return 0x05; // RELAX
-    if (control_mode_ == ControlMode::FREEDRIVE) return 0x06; // FREEDRIVE
+    if (control_mode_ == ControlMode::RELAX) return 0x05;      // RELAX
+    if (control_mode_ == ControlMode::FREEDRIVE) return 0x06;  // FREEDRIVE
     // ARMED
-    if (executing_)      return 0x01; // EXECUTING
-    if (current_idx_ > 0) return 0x02; // HOLDING
-    return 0x00;  // READY
+    if (executing_) return 0x01;        // EXECUTING
+    if (current_idx_ > 0) return 0x02;  // HOLDING
+    return 0x00;                        // READY
   }
 
   void publishControlMode(uint8_t mode) {
@@ -595,7 +598,8 @@ private:
         req->name = name;
         req->execute = true;
         auto fut = load_client_->async_send_request(req);
-        if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+        if (fut.wait_for(std::chrono::duration<double>(trajectory_timeout_s_)) ==
+            std::future_status::ready) {
           auto res = fut.get();
           if (res->success) {
             scheduleGripperActions(res->gripper_action_times, res->gripper_action_commands);
@@ -663,7 +667,8 @@ private:
         req->name = traj_name;
         req->execute = true;
         auto fut = load_client_->async_send_request(req);
-        if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+        if (fut.wait_for(std::chrono::duration<double>(trajectory_timeout_s_)) ==
+            std::future_status::ready) {
           auto res = fut.get();
           if (res->success) {
             // 按时间戳调度夹爪动作 (与轨迹并行执行)
@@ -689,7 +694,7 @@ private:
   // emergencyStop  = STOP NOW，切 RELAX，executing 强制清锁
   // resetToIdle    = 受控地跑 reset_trajectory 回 home，需要 executing=false 才能执行
   void emergencyStop() {
-    executing_ = false;  // 强制清锁，即使正在跑轨迹
+    executing_ = false;                      // 强制清锁，即使正在跑轨迹
     publishControlMode(ControlMode::RELAX);  // 零力矩立即停止
     logWarn("[ESTOP] Forced RELAX, executing_ cleared.");
   }
@@ -706,7 +711,8 @@ private:
         auto fut = load_client_->async_send_request(req);
         async_.post([this, fut = std::move(fut)]() mutable {
           try {
-            if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+            if (fut.wait_for(std::chrono::duration<double>(trajectory_timeout_s_)) ==
+                std::future_status::ready) {
               auto res = fut.get();
               if (res->success) {
                 logOk("Reset OK.");
@@ -772,7 +778,8 @@ private:
         req->name = name;
         req->execute = true;
         auto fut = load_client_->async_send_request(req);
-        if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+        if (fut.wait_for(std::chrono::duration<double>(trajectory_timeout_s_)) ==
+            std::future_status::ready) {
           auto res = fut.get();
           if (res->success) {
             scheduleGripperActions(res->gripper_action_times, res->gripper_action_commands);
@@ -954,6 +961,11 @@ private:
   void scheduleGripperActions(const std::vector<double>& times,
                               const std::vector<std::string>& commands) {
     if (times.empty()) return;
+    if (times.size() != commands.size()) {
+      logErr("gripper_action arrays size mismatch: " + std::to_string(times.size()) + " vs " +
+             std::to_string(commands.size()));
+      return;
+    }
     auto start = std::chrono::steady_clock::now();
     for (size_t i = 0; i < times.size(); i++) {
       auto target = start + std::chrono::duration<double>(times[i]);

@@ -153,6 +153,10 @@ private:
   int status_divider_ = 100;
   int status_counter_ = 0;
 
+  // 夹爪状态: 基于最近一次发送的 GripperAction 推导 (无 MCU 反馈)
+  // GRIP → CLOSED, RELEASE → OPEN, STOP → 保持
+  std::atomic<SerialProtocol::GripperState> last_gripper_state_{SerialProtocol::GripperState::OPEN};
+
   // Health monitoring
   std::atomic<std::chrono::steady_clock::time_point> last_rx_activity_;
   std::atomic<uint64_t> rx_packet_count_{0};
@@ -349,10 +353,9 @@ private:
     joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
     task_command_pub_ = this->create_publisher<std_msgs::msg::Int32>("/task_command", 10);
     arm_state_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
-        "/arm_state", 10,
-        [this](const std_msgs::msg::UInt8::SharedPtr msg) {
-            std::lock_guard<std::mutex> lk(arm_state_mutex_);
-            cached_arm_state_ = msg->data;
+        "/arm_state", 10, [this](const std_msgs::msg::UInt8::SharedPtr msg) {
+          std::lock_guard<std::mutex> lk(arm_state_mutex_);
+          cached_arm_state_ = msg->data;
         });
   }
 
@@ -472,6 +475,11 @@ private:
         else
           action = SerialProtocol::GripperAction::STOP;
       }
+      // 推导状态: GRIP→CLOSED, RELEASE→OPEN, STOP→保持
+      if (action == SerialProtocol::GripperAction::GRIP)
+        last_gripper_state_.store(SerialProtocol::GripperState::CLOSED);
+      else if (action == SerialProtocol::GripperAction::RELEASE)
+        last_gripper_state_.store(SerialProtocol::GripperState::OPEN);
       sendRaw(SerialProtocol::buildGripperPacket(action));
     }
 
@@ -484,8 +492,8 @@ private:
         status.arm_state = static_cast<SerialProtocol::ArmState>(cached_arm_state_);
       }
       status.task_progress = 0;
-      status.error_code    = SerialProtocol::ArmError::NO_ERROR;
-      status.gripper_state = SerialProtocol::GripperState::OPEN;
+      status.error_code = SerialProtocol::ArmError::NO_ERROR;
+      status.gripper_state = last_gripper_state_.load();
       sendRaw(SerialProtocol::buildArmStatusPacket(status));
     }
   }
