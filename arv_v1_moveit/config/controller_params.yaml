@@ -65,11 +65,11 @@
         vel_limit: 1.6  # 最大 rad/s，要求
 
       joint_5:
-        pos_Kp: 10.0
+        pos_Kp: 15.0
         pos_Ki: 0.0
         pos_Kd: 2.0
         max_integral_pos: 0.5
-        vel_Kp: 2.0
+        vel_Kp: 0.5
         vel_Ki: 0.0
         vel_Kd: 0.0
         vel_limit: 3.0
