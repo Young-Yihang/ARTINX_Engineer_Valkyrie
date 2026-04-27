@@ -35,6 +35,7 @@ private:
   PidGains pos_gains_;
   double pos_error_;
   double pos_error_prev_;
+  double pos_fdb_prev_;       // 反馈微分用
   double pos_integral_;
   double max_integral_pos_;
 
@@ -42,11 +43,14 @@ private:
   PidGains vel_gains_;
   double vel_error_;
   double vel_error_prev_;
+  double vel_fdb_prev_;       // 速度环反馈微分用
   double vel_integral_;
   double max_integral_vel_;
 
   double max_vel_;  // rad/s
   double ref_vel_;  // 外环输出参考速度 (rad/s)
+  double vel_cmd_filtered_;   // vel_cmd 一阶滤波状态
+  static constexpr double kVelCmdFilterAlpha = 0.1; // a = dt/tau, tau=10ms, dt=1ms
 
   inline double clamp(double value, double min_val, double max_val) const {
     return std::max(min_val, std::min(value, max_val));
