@@ -57,8 +57,6 @@ public:
             KalmanFilter1D(1.0 / 1000.0)   // Joint 6
         },
         q_dot_filtered_(6),
-        kalman_filter_enabled_(false)
-
   {
     RCLCPP_INFO(this->get_logger(),
                 "[START] Torque controller node starting (Cascade P+PI Control)");
@@ -184,6 +182,8 @@ public:
 
       cascade_pid_->setJointParams(i, pos_gains, vel_gains, vel_limit, max_integral_pos);
     }
+
+    cascade_pid_->setJointContinuous(5, true);
 
     RCLCPP_INFO(
         this->get_logger(),

@@ -15,11 +15,14 @@ CascadePid::CascadePid(const PidGains &pos_gains, const PidGains &vel_gains, dou
       vel_error_(0.0),
       vel_error_prev_(0.0),
       vel_integral_(0.0),
-      ref_vel_(0.0), vel_cmd_filtered_(0.0), pos_fdb_prev_(0.0), vel_fdb_prev_(0.0) {}
+      ref_vel_(0.0),
+      vel_cmd_filtered_(0.0),
+      pos_fdb_prev_(0.0),
+      vel_fdb_prev_(0.0) {}
 
 double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, double dt) {
   // --- 外环: 位置PID → 期望速度 ---
-  pos_error_ = pos_ref - pos_fdb;
+  pos_error_ = angleDiff(pos_ref, pos_fdb);  // angleDiff内联函数用于处理looper问题
   double pos_p = pos_gains_.kp * pos_error_;
 
   // 条件积分抗饱和: 仅小误差时积分
@@ -32,7 +35,7 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
 
   double pos_d = 0.0;
   if (dt > 1e-6) {
-    pos_d = -pos_gains_.kd * (pos_fdb - pos_fdb_prev_) / dt;
+    pos_d = -pos_gains_.kd * angleDiff(pos_fdb, pos_fdb_prev_) / dt;
   }
 
   ref_vel_ = clamp(pos_p + pos_i + pos_d, -max_vel_, max_vel_);
@@ -40,7 +43,8 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
   pos_fdb_prev_ = pos_fdb;
 
   // vel_cmd 一阶低通滤波（平滑 Kd 高频输出）
-  vel_cmd_filtered_ = (1.0 - kVelCmdFilterAlpha) * vel_cmd_filtered_ + kVelCmdFilterAlpha * ref_vel_;
+  vel_cmd_filtered_ =
+      (1.0 - kVelCmdFilterAlpha) * vel_cmd_filtered_ + kVelCmdFilterAlpha * ref_vel_;
   ref_vel_ = vel_cmd_filtered_;
 
   // --- 内环: 速度PI → 力矩 ---

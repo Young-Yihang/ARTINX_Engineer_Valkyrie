@@ -204,22 +204,40 @@ void CartesianControllerNode::poseTargetCallback(
   // 限幅防 IK 多解跳变: 基于上一帧target而非q_actual
   static constexpr double max_joint_step[] = {0.1, 0.1, 0.1, 0.2, 0.1, 0.2};  // rad/frame @10Hz
   // URDF joint limits — 与 URDF/joint_limits.yaml 同步 (J6 continuous, 不限位)
-  static constexpr double joint_lower[] = {-1.2217, 0.5236, -1.5708, -3.1416, -1.5708, -1e9};
-  static constexpr double joint_upper[] = {1.2217, 2.9671, 3.1416, 3.1416, 1.5708, 1e9};
+  static constexpr double joint_lower[] = {-1.2217, 0.5236, -0.90, -3.1416, -1.5708, -1e9};
+  static constexpr double joint_upper[] = {1.2217, 2.9671, 0.70, 3.1416, 1.5708, 1e9};
   std_msgs::msg::Float64MultiArray target_msg;
   target_msg.data.resize(kArmJoints);
   for (int i = 0; i < kArmJoints; i++) {
     double val = q_result(i);
-    double delta = val - q_seed(i);
-    if (std::abs(delta) > max_joint_step[i]) {
-      val = q_seed(i) + std::copysign(max_joint_step[i], delta);
-    }
-    // J6 (continuous): wrap to [-π, π]
-    if (i == 5) {
+    double seed = q_seed(i);
+
+    if (i == 3) { // roll1存在优弧 & 劣弧取舍问题，但是除了joint4和joint6之外其他的关节无特殊处理。
+      double delta = std::remainder(val - seed, 2.0 * M_PI);
+      double candidate = seed + delta;
+      if (std::abs(candidate) > std::abs(joint_upper[3])) {
+        delta += (delta > 0) ? -2.0 * M_PI : 2.0 * M_PI;
+      }
+      if (std::abs(delta) > max_joint_step[i]) {
+        delta = std::copysign(max_joint_step[i], delta);
+      }
+      val = std::clamp(seed + delta, -std::abs(joint_upper[3]), std::abs(joint_upper[3]));
+
+    } else if (i == 5) { // roll2无限旋转，不需要clamp
+      double delta = val - seed;
+      if (std::abs(delta) > max_joint_step[i]) {
+        val = seed + std::copysign(max_joint_step[i], delta);
+      }
       val = std::remainder(val, 2.0 * M_PI);
+
     } else {
+      double delta = val - seed;
+      if (std::abs(delta) > max_joint_step[i]) {
+        val = seed + std::copysign(max_joint_step[i], delta);
+      }
       val = std::clamp(val, joint_lower[i], joint_upper[i]);
     }
+
     target_msg.data[i] = val;
     q_last_target_(i) = val;
   }
