@@ -376,8 +376,7 @@ start_sim_mode() {
     start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
 
-    update_status "MissionExecutor"
-    # [FIX] MissionExecutor 必须先于 MuJoCo 启动，以便在物理仿真开始前发布 HOLD 模式。
+    update_status "MissionExecutor (headless)"
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
 
     update_status "MuJoCo (仿真)"
@@ -388,6 +387,10 @@ start_sim_mode() {
 
     update_status "CartesianController (IK)"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
+
+    # Mission Panel GUI (独立窗口, 替代旧 ncurses TUI)
+    log_info "启动 Mission Panel GUI..."
+    ros2 run arv_v1_moveit mission_panel.py &
 }
 
 # ========== 模式2: 串口 + 数字孪生 ==========
@@ -408,8 +411,7 @@ start_serial_mode() {
     start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
 
-    update_status "MissionExecutor"
-    # [FIX] MissionExecutor 先启动，确保 HOLD 模式在物理接口启动前到达 torque_controller。
+    update_status "MissionExecutor (headless)"
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
 
     update_status "SerialInterface ($DETECTED_SERIAL_DEVICE)"
@@ -423,6 +425,10 @@ start_serial_mode() {
 
     update_status "CartesianController (IK)"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
+
+    # Mission Panel GUI (独立窗口, 替代旧 ncurses TUI)
+    log_info "启动 Mission Panel GUI..."
+    ros2 run arv_v1_moveit mission_panel.py &
 }
 
 

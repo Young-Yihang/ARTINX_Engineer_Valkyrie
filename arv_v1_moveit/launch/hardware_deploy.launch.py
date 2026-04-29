@@ -117,7 +117,6 @@ def launch_setup(context, *args, **kwargs):
         output="both",
         respawn=True,
         respawn_delay=2.0,
-        parameters=[{"headless": True}],
     )
 
     hardware_interface_node = Node(

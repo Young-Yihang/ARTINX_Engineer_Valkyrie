@@ -56,7 +56,7 @@ public:
             KalmanFilter1D(1.0 / 1000.0),  // Joint 5
             KalmanFilter1D(1.0 / 1000.0)   // Joint 6
         },
-        q_dot_filtered_(6),
+        q_dot_filtered_(6)
   {
     RCLCPP_INFO(this->get_logger(),
                 "[START] Torque controller node starting (Cascade P+PI Control)");
