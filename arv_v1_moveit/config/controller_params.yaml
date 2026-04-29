@@ -1,5 +1,5 @@
 # 控制器参数 | 修改后执行 ./reload_params.sh 热重载
-# 控制律: τ = 动力学前馈(M+C+G) + 摩擦前馈(fc·fal+fv·q̇) + cascade_PD + 载荷补偿
+#控制律: τ = 动力学前馈(M+C+G) + 摩擦前馈(fc·fal+fv·q̇) + cascade PD+PI + 载荷补偿
 
 /torque_controller_action_server:
   ros__parameters:
@@ -25,64 +25,64 @@
     # 原始单环参数(566971e): J1=30/1, J2=50/1, J3=30/1, J4=10/0.3, J5=1/1, J6=1/1
     cascade_pid:
       joint_1:
-        pos_Kp: 30.0
+        pos_Kp: 15.0
         pos_Ki: 0.0
-        pos_Kd: 0.0       # Kd_eq = (0+1)*1 = 1.0 = 原Kd
+        pos_Kd: 0.003       # Kd_eq = (0+1)*1 = 1.0 = 原Kd
         max_integral_pos: 2.0
-        vel_Kp: 3.0        # 透传: 内环天然阻尼=1.0
-        vel_Ki: 0.0
+        vel_Kp: 6.0        # 透传: 内环天然阻尼=1.0
+        vel_Ki: 0.012
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 5.0
 
       joint_2:
-        pos_Kp: 50.0
+        pos_Kp: 16.0
         pos_Ki: 0.0
-        pos_Kd: 0.0
+        pos_Kd: 0.005
         max_integral_pos: 2.0
-        vel_Kp: 2.0
+        vel_Kp: 8.0
         vel_Ki: 0.0
-        vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_Kd: 0.0205
+        vel_limit: 1.5 # rad/s, 限幅防饱和极限环(vel_limit×kvp+G<tau_limit)
 
       joint_3:
         pos_Kp: 30.0
         pos_Ki: 0.0
         pos_Kd: 0.0
         max_integral_pos: 2.0
-        vel_Kp: 2.0
+        vel_Kp: 4.0
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 5.0
 
       joint_4:
         pos_Kp: 10.0
         pos_Ki: 0.0
-        pos_Kd: 0.0       # Kd_eq = 1.0 > 原0.3, J4过阻尼但更稳
+        pos_Kd: 0.0       
         max_integral_pos: 0.3
-        vel_Kp: 1.0
+        vel_Kp: 0.2
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 1.6   # rad/s, 限幅防饱和极限环(vel_limit×kvp+G<tau_limit)
 
       joint_5:
-        pos_Kp: 50.0
+        pos_Kp: 15.0
         pos_Ki: 0.0
         pos_Kd: 0.0
         max_integral_pos: 0.5
-        vel_Kp: 3.0
+        vel_Kp: 0.2
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 3.0
 
       joint_6:
-        pos_Kp: 50.0
+        pos_Kp: 10.0
         pos_Ki: 0.0
         pos_Kd: 0.0
         max_integral_pos: 0.3
-        vel_Kp: 2.0
+        vel_Kp: 0.2
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 3.0
 
     # ========== Safety Parameters ==========
     safety:

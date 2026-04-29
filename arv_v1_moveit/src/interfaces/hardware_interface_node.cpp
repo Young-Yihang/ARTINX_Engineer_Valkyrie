@@ -15,6 +15,15 @@
 
 #include "serial_protocol.hpp"
 
+namespace JointLimits {
+// URDF joint limits for feedback clamp (joint_6 continuous, gripper excluded)
+static constexpr size_t kNumClampedJoints = 5;
+static constexpr size_t kClampIdx[kNumClampedJoints] = {0, 1, 2, 3, 4};
+static constexpr double kLower[kNumClampedJoints] = {-1.2217, 0.49, -0.90, -2.975, -1.5708};
+static constexpr double kUpper[kNumClampedJoints] = { 1.2217, 3.14,    0.70,    3.14,   1.5708};
+static constexpr const char* kName[kNumClampedJoints] = {"J1", "J2", "J3", "J4(Roll1)", "J5"};
+}  // namespace JointLimits
+
 class HardwareInterfaceNode : public rclcpp::Node {
 public:
   HardwareInterfaceNode()
@@ -694,6 +703,22 @@ private:
     for (size_t i = 0; i < SerialProtocol::NUM_ALL_JOINTS; ++i) {
       msg.position[i] = positions[i];
       msg.velocity[i] = velocities[i];
+    }
+
+    // Clamp joint feedback to URDF limits so planner accepts current state (J6 continuous excluded)
+    for (size_t k = 0; k < JointLimits::kNumClampedJoints; ++k) {
+      const size_t idx = JointLimits::kClampIdx[k];
+      if (msg.position[idx] > JointLimits::kUpper[k]) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "%s feedback %.3f > %.3f, clamped",
+                             JointLimits::kName[k], msg.position[idx], JointLimits::kUpper[k]);
+        msg.position[idx] = JointLimits::kUpper[k];
+      } else if (msg.position[idx] < JointLimits::kLower[k]) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "%s feedback %.3f < %.3f, clamped",
+                             JointLimits::kName[k], msg.position[idx], JointLimits::kLower[k]);
+        msg.position[idx] = JointLimits::kLower[k];
+      }
     }
 
     joint_state_pub_->publish(msg);
