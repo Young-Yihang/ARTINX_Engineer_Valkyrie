@@ -308,6 +308,21 @@ detect_mujoco_path() {
     return 1
 }
 
+# ========== 清理残留 DDS 共享内存（防止 FastDDS discovery 死锁）==========
+cleanup_dds() {
+    local stale
+    stale=$(ls /dev/shm/ 2>/dev/null | grep -cE "fast|rtps|ros2" || true)
+    if [ "$stale" -gt 0 ]; then
+        log_warning "发现 $stale 个残留 DDS shm 文件，清理中..."
+        rm -f /dev/shm/fastrtps_* /dev/shm/*rtps* /tmp/fastrtps_* 2>/dev/null || true
+        log_success "DDS shm 已清理"
+    fi
+
+    # 杀掉同名僵尸进程（静默，不影响正常启动）
+    pkill -f "ros2 run arv_v1_moveit" 2>/dev/null || true
+    sleep 0.3
+}
+
 # ========== 设置环境 ==========
 setup_environment() {
     log_info "设置环境变量..."
@@ -329,8 +344,9 @@ build_workspace() {
     log_info "编译项目..."
     cd "$WORKSPACE_DIR"
 
-    colcon build --packages-select arv_v1_interfaces arv_v1_model arv_v1_moveit --cmake-args -DCMAKE_BUILD_TYPE=Release
-    
+    # 注意: 不传 --cmake-args，复用已有 cmake 缓存，避免触发全量重编
+    colcon build --packages-select arv_v1_interfaces arv_v1_model arv_v1_moveit
+
     if [ $? -eq 0 ]; then
         log_success "编译成功！"
         source install/setup.bash
@@ -430,6 +446,7 @@ start_serial_mode() {
 # ========== 主函数 ==========
 main() {
     # 阶段1: 环境设置（猫猫出现前完成，避免输出打乱画面）
+    cleanup_dds
     setup_environment
     build_workspace
 
