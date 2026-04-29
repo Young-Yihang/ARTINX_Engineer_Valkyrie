@@ -95,7 +95,7 @@ target_include_directories(cascade_pid PUBLIC
 
 # ========== ImGui + 后端 + ImPlot 源码编译 ==========
 # 统一使用 third_party，避免不同设备系统包版本不一致
-set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends)
+set(IMGUI_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends)
 set(IMGUI_BACKENDS_DIR ${IMGUI_DIR}/backends)
 set(IMPLOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/implot)
 
@@ -378,6 +378,7 @@ install(TARGETS
   dynamics_computer       # ← 工具类库
   kalman_filter
   cascade_pid
+  imgui
   imgui_backends          # ← 新增: ImGui后端库
   implot
   torque_controller_node

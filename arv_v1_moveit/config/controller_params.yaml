@@ -1,5 +1,5 @@
 # 控制器参数 | 修改后执行 ./reload_params.sh 热重载
-# 控制律: τ = 动力学前馈(M+C+G) + 摩擦前馈(fc·fal+fv·q̇) + cascade_PD + 载荷补偿
+#控制律: τ = 动力学前馈(M+C+G) + 摩擦前馈(fc·fal+fv·q̇) + cascade PD+PI + 载荷补偿
 
 /torque_controller_action_server:
   ros__parameters:
@@ -42,7 +42,7 @@
         vel_Kp: 8.0
         vel_Ki: 0.0
         vel_Kd: 0.0205
-        vel_limit: 3.0
+        vel_limit: 1.5 # rad/s, 限幅防饱和极限环(vel_limit×kvp+G<tau_limit)
 
       joint_3:
         pos_Kp: 30.0
@@ -62,7 +62,7 @@
         vel_Kp: 0.2
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 1.6  # 最大 rad/s，要求
+        vel_limit: 1.6   # rad/s, 限幅防饱和极限环(vel_limit×kvp+G<tau_limit)
 
       joint_5:
         pos_Kp: 15.0
