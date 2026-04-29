@@ -544,7 +544,7 @@ rclcpp_action::GoalResponse TorqueControllerActionServer::handleGoal(
   if (currently_executing) {
     RCLCPP_WARN(this->get_logger(),
                 "[WARN] Detected new trajectory, will preempt current execution");
-    // 不再 REJECT，而是继续接受
+    // 不再 REJECT，而是继续接受，轨迹应当接受抢占式
   }
 
   if (goal->trajectory.points.empty()) {

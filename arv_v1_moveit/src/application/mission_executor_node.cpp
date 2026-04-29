@@ -92,7 +92,10 @@ private:
 class MissionExecutorNode : public rclcpp::Node {
 public:
   MissionExecutorNode() : Node("mission_executor") {
-    initNcurses();
+    headless_ = declare_parameter<bool>("headless", false);
+    if (!headless_) {
+      initNcurses();
+    }
 
     // LoadTrajectory 服务响应超时 (execute=true 时覆盖整条轨迹执行时间)
     trajectory_timeout_s_ = declare_parameter<double>("trajectory_execution_timeout", 120.0);
@@ -150,17 +153,29 @@ public:
 
     // 重发: 覆盖 wait_for_service 期间可能重启的节点
     publishControlMode(ControlMode::RELAX);
+
+    // 定期重发 control_mode，防节点重启后丢失（替代 run() 中手动计数器，headless 也生效）
+    mode_broadcast_timer_ = create_wall_timer(1s, [this]() {
+      auto msg = std_msgs::msg::UInt8();
+      msg.data = control_mode_;
+      control_mode_pub_->publish(msg);
+    });
+
     log("Mission Executor v4.0 ready", COLOR_PAIR_SUCCESS);
   }
 
   ~MissionExecutorNode() {
     // async_ destroyed automatically (RAII) before shutdownNcurses
-    shutdownNcurses();
+    if (!headless_) shutdownNcurses();
   }
 
   void run() {
+    if (headless_) {
+      RCLCPP_INFO(get_logger(), "[HEADLESS] Mission Executor running, processing /task_command.");
+      rclcpp::spin(shared_from_this());
+      return;
+    }
     int ch;
-    int mode_broadcast_counter_ = 0;
     while (rclcpp::ok() && running_) {
       drawUI();
       ch = getch();
@@ -168,13 +183,6 @@ public:
         handleInput(ch);
       }
       rclcpp::spin_some(get_node_base_interface());
-      // ~1s 重发控制模式，防节点重启后丢失
-      if (++mode_broadcast_counter_ >= 10) {
-        mode_broadcast_counter_ = 0;
-        auto msg = std_msgs::msg::UInt8();
-        msg.data = control_mode_;
-        control_mode_pub_->publish(msg);
-      }
     }
   }
 
@@ -224,6 +232,7 @@ private:
 
   AsyncTaskRunner async_;
   bool running_ = true;
+  bool headless_ = false;
   LogBuffer log_buffer_;
 
   // --- UI/UX 核心状态 ---
@@ -271,6 +280,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr control_mode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr arm_state_pub_;
   rclcpp::TimerBase::SharedPtr arm_status_timer_;
+  rclcpp::TimerBase::SharedPtr mode_broadcast_timer_;
   uint8_t control_mode_ = ControlMode::ARMED;
 
   // 从 control_mode_ / executing_ / current_idx_ 派生 ArmState (与 serial_protocol.hpp 同步)
@@ -325,8 +335,11 @@ private:
   void shutdownNcurses() { endwin(); }
 
   void log(const std::string& msg, int color = COLOR_PAIR_DEFAULT) {
+    if (headless_) {
+      RCLCPP_INFO(get_logger(), "%s", msg.c_str());
+      return;
+    }
     log_buffer_.add(msg, color);
-    // 不用 RCLCPP_INFO，防 stdout 与 ncurses 冲突致 UI 撕裂
   }
 
   void logErr(const std::string& msg) { log(msg, COLOR_PAIR_ERROR); }

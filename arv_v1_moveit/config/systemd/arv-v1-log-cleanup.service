@@ -1,0 +1,6 @@
+[Unit]
+Description=ARV_V1 log cleanup
+
+[Service]
+Type=oneshot
+ExecStart=/home/huan/ros2_ws/src/arv_v1_moveit/config/systemd/cleanup_logs.sh

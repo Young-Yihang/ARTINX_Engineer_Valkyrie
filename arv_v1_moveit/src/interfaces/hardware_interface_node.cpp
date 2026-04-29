@@ -131,6 +131,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr arm_state_sub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr task_command_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr link_diag_pub_;
   rclcpp::TimerBase::SharedPtr send_timer_;
 
   // --- 数据缓存 ---
@@ -352,6 +353,8 @@ private:
 
     joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
     task_command_pub_ = this->create_publisher<std_msgs::msg::Int32>("/task_command", 10);
+    link_diag_pub_ =
+        this->create_publisher<std_msgs::msg::Float64MultiArray>("/hardware_link_diag", 10);
     arm_state_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
         "/arm_state", 10, [this](const std_msgs::msg::UInt8::SharedPtr msg) {
           // ArmState 合法值 0x00-0x06 (见 serial_protocol.hpp), 越界丢弃防止污染 MCU 状态包
@@ -739,6 +742,12 @@ private:
     last_rx_count = current_rx;
     last_tx_count = current_tx;
     last_crc_errors = current_crc;
+
+    // Publish: [tx_rate, rx_rate, crc_errors_delta, serial_ok, idle_ms]
+    std_msgs::msg::Float64MultiArray diag_msg;
+    diag_msg.data = {tx_rate, rx_rate, static_cast<double>(new_crc_errors),
+                     serial_ok ? 1.0 : 0.0, static_cast<double>(elapsed_ms)};
+    link_diag_pub_->publish(diag_msg);
   }
 };
 
