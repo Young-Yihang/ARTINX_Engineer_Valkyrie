@@ -265,8 +265,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-3.1416"
-      upper="3.1416"
+      lower="-2.975"
+      upper="3.14"
       effort="1.2"
       velocity="40" />
     <dynamics
