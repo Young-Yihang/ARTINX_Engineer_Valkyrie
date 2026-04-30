@@ -1054,6 +1054,11 @@ void MuJoCoInterfaceNode::publishJointStates() {
 
   // 7 joints (6 arm + 1 gripper), 不含 mimic
   for (int i = 0; i < kAllJoints; i++) {
+    if (!std::isfinite(data_->qpos[i]) || !std::isfinite(data_->qvel[i])) {
+      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 1000,
+                            "[SAFETY] NaN in joint %d, suppressing /joint_states publish", i);
+      return;
+    }
     msg.name.push_back(joint_names_[i]);
     msg.position.push_back(data_->qpos[i]);
     msg.velocity.push_back(data_->qvel[i]);

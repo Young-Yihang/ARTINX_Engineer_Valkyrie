@@ -91,6 +91,7 @@ def launch_setup(context, *args, **kwargs):
             {"trajectory_execution.allowed_execution_duration_scaling": 2.0},
             {"default_robot_padding": -0.005},
             {"jiggle_fraction": 0.05},
+            {"default_planning_request_adapters.fix_start_state": True},
             {"publish_planning_scene": True},
             {"publish_geometry_updates": True},
             {"publish_state_updates": True},

@@ -388,9 +388,11 @@ start_sim_mode() {
     update_status "CartesianController (IK)"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
 
-    # Mission Panel GUI (独立窗口, 替代旧 ncurses TUI)
+    # Python GUI 工具 (独立窗口)
     log_info "启动 Mission Panel GUI..."
     ros2 run arv_v1_moveit mission_panel.py &
+    log_info "启动 Motion Planning Tool..."
+    ros2 run arv_v1_moveit move_to_pose.py &
 }
 
 # ========== 模式2: 串口 + 数字孪生 ==========
@@ -426,9 +428,11 @@ start_serial_mode() {
     update_status "CartesianController (IK)"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
 
-    # Mission Panel GUI (独立窗口, 替代旧 ncurses TUI)
+    # Python GUI 工具 (独立窗口)
     log_info "启动 Mission Panel GUI..."
     ros2 run arv_v1_moveit mission_panel.py &
+    log_info "启动 Motion Planning Tool..."
+    ros2 run arv_v1_moveit move_to_pose.py &
 }
 
 
