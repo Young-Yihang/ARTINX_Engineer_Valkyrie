@@ -153,6 +153,8 @@ declare -A COMMON_NODES=(
     ["trajectory_manager"]="轨迹管理器"
     ["mission_executor"]="任务执行器"
     ["cartesian_controller"]="笛卡尔控制器"
+    ["moveit_planning_tool"]="运动规划工具"
+    ["mission_panel"]="任务面板GUI"
 )
 
 # 阶段1: 节点检查 (模式感知)

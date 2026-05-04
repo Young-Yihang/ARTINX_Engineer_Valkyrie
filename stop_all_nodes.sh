@@ -132,6 +132,8 @@ show_mascot
 
 # 节点列表（按层级顺序: 应用层→控制层→接口层→基础设施）
 nodes=(
+    "mission_panel.py"
+    "move_to_pose.py"
     "mission_executor_node"
     "cartesian_controller_node"
     "trajectory_manager_node"

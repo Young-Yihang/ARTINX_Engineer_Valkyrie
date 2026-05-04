@@ -95,7 +95,7 @@ target_include_directories(cascade_pid PUBLIC
 
 # ========== ImGui + 后端 + ImPlot 源码编译 ==========
 # 统一使用 third_party，避免不同设备系统包版本不一致
-set(IMGUI_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends)
+set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends)
 set(IMGUI_BACKENDS_DIR ${IMGUI_DIR}/backends)
 set(IMPLOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/implot)
 
@@ -404,6 +404,8 @@ install(FILES .setup_assistant DESTINATION share/${PROJECT_NAME})
 
 # 安装 Python 脚本
 install(PROGRAMS
+  scripts/move_to_pose.py
+  scripts/mission_panel.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

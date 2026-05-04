@@ -16,6 +16,15 @@
 
 #include "serial_protocol.hpp"
 
+namespace JointLimits {
+// URDF joint limits for feedback clamp (joint_6 continuous, gripper excluded)
+static constexpr size_t kNumClampedJoints = 5;
+static constexpr size_t kClampIdx[kNumClampedJoints] = {0, 1, 2, 3, 4};
+static constexpr double kLower[kNumClampedJoints] = {-1.2217, 0.49, -0.90, -2.975, -1.5708};
+static constexpr double kUpper[kNumClampedJoints] = { 1.2217, 3.14,    0.70,    3.14,   1.5708};
+static constexpr const char* kName[kNumClampedJoints] = {"J1", "J2", "J3", "J4(Roll1)", "J5"};
+}  // namespace JointLimits
+
 class HardwareInterfaceNode : public rclcpp::Node {
 public:
   HardwareInterfaceNode()
@@ -132,6 +141,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr arm_state_sub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr task_command_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr link_diag_pub_;
   rclcpp::TimerBase::SharedPtr send_timer_;
 
   // --- 数据缓存 ---
@@ -369,6 +379,8 @@ private:
 
     joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
     task_command_pub_ = this->create_publisher<std_msgs::msg::Int32>("/task_command", 10);
+    link_diag_pub_ =
+        this->create_publisher<std_msgs::msg::Float64MultiArray>("/hardware_link_diag", 10);
     arm_state_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
         "/arm_state", 10, [this](const std_msgs::msg::UInt8::SharedPtr msg) {
           // ArmState 合法值 0x00-0x06 (见 serial_protocol.hpp), 越界丢弃防止污染 MCU 状态包
@@ -739,6 +751,22 @@ private:
       msg.velocity[i] = velocities[i];
     }
 
+    // Clamp joint feedback to URDF limits so planner accepts current state (J6 continuous excluded)
+    for (size_t k = 0; k < JointLimits::kNumClampedJoints; ++k) {
+      const size_t idx = JointLimits::kClampIdx[k];
+      if (msg.position[idx] > JointLimits::kUpper[k]) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "%s feedback %.3f > %.3f, clamped",
+                             JointLimits::kName[k], msg.position[idx], JointLimits::kUpper[k]);
+        msg.position[idx] = JointLimits::kUpper[k];
+      } else if (msg.position[idx] < JointLimits::kLower[k]) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "%s feedback %.3f < %.3f, clamped",
+                             JointLimits::kName[k], msg.position[idx], JointLimits::kLower[k]);
+        msg.position[idx] = JointLimits::kLower[k];
+      }
+    }
+
     joint_state_pub_->publish(msg);
   }
 
@@ -785,6 +813,12 @@ private:
     last_rx_count = current_rx;
     last_tx_count = current_tx;
     last_crc_errors = current_crc;
+
+    // Publish: [tx_rate, rx_rate, crc_errors_delta, serial_ok, idle_ms]
+    std_msgs::msg::Float64MultiArray diag_msg;
+    diag_msg.data = {tx_rate, rx_rate, static_cast<double>(new_crc_errors),
+                     serial_ok ? 1.0 : 0.0, static_cast<double>(elapsed_ms)};
+    link_diag_pub_->publish(diag_msg);
   }
 };
 
