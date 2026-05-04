@@ -48,6 +48,9 @@ def launch_setup(context, *args, **kwargs):
             {"publish_transforms_updates": True},
             {"publish_robot_description": True},
             {"publish_robot_description_semantic": True},
+            # 限制 planning scene 发布频率，防止 1kHz 真机 joint state
+            # 导致 FCL DynamicAABBTree::update() 并发竞态崩溃
+            {"planning_scene_monitor_options.publish_planning_scene_hz": 25.0},
         ],
     )
 

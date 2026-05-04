@@ -61,7 +61,8 @@ private:
   }
 
   inline double angleDiff(double a, double b) const {
-      return is_continuous_ ? std::remainder(a - b, 2.0 * M_PI) : (a - b);
+    if (!std::isfinite(a) || !std::isfinite(b)) return 0.0;
+    return is_continuous_ ? std::remainder(a - b, 2.0 * M_PI) : (a - b);
   }
 };
 

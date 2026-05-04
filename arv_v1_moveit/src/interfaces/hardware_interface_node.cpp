@@ -2,6 +2,7 @@
 /// @brief Hardware USB CDC interface — TX torques/gripper, RX joint states via Seasky protocol.
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <filesystem>
 #include <io_context/io_context.hpp>
 #include <mutex>
@@ -176,6 +177,22 @@ private:
   rclcpp::TimerBase::SharedPtr health_timer_;
   std::atomic<std::chrono::steady_clock::time_point> last_tx_attempt_activity_;
   std::atomic<std::chrono::steady_clock::time_point> last_tx_success_activity_;
+
+  // sendLoop timing (lightweight, single-threaded — no atomics needed)
+  struct SendStats {
+    int64_t min_us{INT64_MAX}, max_us{0}, sum_us{0};
+    int64_t lock_sum_us{0};
+    uint64_t count{0}, overruns{0};
+    void record(int64_t total, int64_t lock) {
+      if (total < min_us) min_us = total;
+      if (total > max_us) max_us = total;
+      sum_us += total; lock_sum_us += lock; ++count;
+      if (total > 1500) ++overruns;
+    }
+    int64_t avg_us() const { return count ? sum_us / (int64_t)count : 0; }
+    int64_t lock_avg_us() const { return count ? lock_sum_us / (int64_t)count : 0; }
+    void reset() { min_us=INT64_MAX; max_us=0; sum_us=0; lock_sum_us=0; count=0; overruns=0; }
+  } send_stats_;
 
   void linkDiagLoop() {
     uint64_t last_rx = 0;
@@ -400,6 +417,11 @@ private:
   // --- 串口收发 ---
 
   void sendLoop() {
+    using Clock = std::chrono::steady_clock;
+    using us    = std::chrono::microseconds;
+    const auto t_entry = Clock::now();
+    int64_t serial_lock_us = 0;
+
     // tx_attempt 时间戳仅在 sendRaw 真正尝试发包时更新, 避免串口未开时诊断撒谎
     {
       std::lock_guard<std::mutex> slock(serial_mutex_);
@@ -454,7 +476,9 @@ private:
     auto sendRaw = [&](const std::vector<uint8_t> &pkt) {
       tx_attempt_count_++;
       last_tx_attempt_activity_.store(std::chrono::steady_clock::now());
+      const auto t_lock0 = Clock::now();
       std::lock_guard<std::mutex> slock(serial_mutex_);
+      serial_lock_us += std::chrono::duration_cast<us>(Clock::now() - t_lock0).count();
       try {
         if (!serial_port_ || !serial_port_->is_open()) return;
         const size_t sent = serial_port_->send(pkt);
@@ -513,6 +537,28 @@ private:
       status.error_code = SerialProtocol::ArmError::NO_ERROR;
       status.gripper_state = last_gripper_state_.load();
       sendRaw(SerialProtocol::buildArmStatusPacket(status));
+    }
+
+    // ── sendLoop 时序统计 (每1000次打印一次, 约1s) ──
+    {
+      const int64_t total_us =
+          std::chrono::duration_cast<us>(Clock::now() - t_entry).count();
+      send_stats_.record(total_us, serial_lock_us);
+
+      if (total_us > 1500) {
+        RCLCPP_WARN(this->get_logger(),
+                    "[SEND/TIMING] OVERRUN total=%ldus serial_lock=%ldus",
+                    total_us, serial_lock_us);
+      }
+
+      if (send_stats_.count % 1000 == 0) {
+        RCLCPP_INFO(this->get_logger(),
+                    "[SEND/TIMING/1k] total: min=%ldus avg=%ldus max=%ldus | "
+                    "serial_lock: avg=%ldus | overruns=%lu",
+                    send_stats_.min_us, send_stats_.avg_us(), send_stats_.max_us,
+                    send_stats_.lock_avg_us(), send_stats_.overruns);
+        send_stats_.reset();
+      }
     }
   }
 
@@ -688,6 +734,16 @@ private:
 
   void updateAndPublishJointStates(const float positions[SerialProtocol::NUM_ALL_JOINTS],
                                    const float velocities[SerialProtocol::NUM_ALL_JOINTS]) {
+    // 安全检查：丢弃含 NaN/Inf 的帧，防止 MoveIt FK 产生 NaN 变换导致 FCL 树崩溃
+    for (size_t i = 0; i < SerialProtocol::NUM_ALL_JOINTS; ++i) {
+      if (!std::isfinite(positions[i]) || !std::isfinite(velocities[i])) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                             "[SAFETY] joint_states frame dropped: joint[%zu] pos=%.3f vel=%.3f "
+                             "(NaN/Inf from serial)", i, positions[i], velocities[i]);
+        return;  // 整帧丢弃，保留上一帧有效数据
+      }
+    }
+
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
       std::memcpy(current_positions_, positions, sizeof(float) * SerialProtocol::NUM_ALL_JOINTS);

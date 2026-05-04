@@ -5,6 +5,8 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <atomic>
+#include <chrono>
+#include <climits>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <fstream>
 #include <kdl/chain.hpp>
@@ -17,6 +19,46 @@
 #include <std_msgs/msg/u_int8.hpp>
 #include <string>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
+
+// ---------------------------------------------------------------------------
+// Lightweight per-section loop profiler (no heap, no locks)
+// Usage: record(us) each iteration, dump_and_reset() every N loops.
+// ---------------------------------------------------------------------------
+struct SectionStats {
+  int64_t min_us{INT64_MAX}, max_us{0}, sum_us{0};
+  uint64_t count{0};
+  void record(int64_t us) {
+    if (us < min_us) min_us = us;
+    if (us > max_us) max_us = us;
+    sum_us += us;
+    ++count;
+  }
+  int64_t avg_us() const { return count ? sum_us / static_cast<int64_t>(count) : 0; }
+  void reset() { min_us = INT64_MAX; max_us = 0; sum_us = 0; count = 0; }
+};
+
+struct LoopProfiler {
+  SectionStats total;      // full controlLoop() wall time
+  SectionStats state_lock; // time spent waiting on state_mutex_
+  SectionStats dynamics;   // KDL dynamics computation
+  SectionStats publish;    // safeTorquePublish
+  uint64_t overruns{0};    // loops where total > overrun_threshold_us
+  int64_t overrun_threshold_us{1500};
+
+  // Call at end of each loop iteration.
+  // Returns true when it is time to print statistics (every print_interval calls).
+  bool record_and_check(int64_t t_us, int64_t lock_us, int64_t dyn_us, int64_t pub_us,
+                        uint64_t print_interval = 1000) {
+    total.record(t_us);
+    state_lock.record(lock_us);
+    dynamics.record(dyn_us);
+    publish.record(pub_us);
+    if (t_us > overrun_threshold_us) ++overruns;
+    return (total.count % print_interval) == 0;
+  }
+
+  void reset_all() { total.reset(); state_lock.reset(); dynamics.reset(); publish.reset(); }
+};
 
 #include "arv_v1_interfaces/srv/gripper_control.hpp"
 #include "cascade_pid.hpp"
@@ -56,6 +98,7 @@ public:
             KalmanFilter1D(1.0 / 1000.0),  // Joint 5
             KalmanFilter1D(1.0 / 1000.0)   // Joint 6
         },
+        kalman_filter_enabled_(false),
         q_dot_filtered_(6)
   {
     RCLCPP_INFO(this->get_logger(),
@@ -261,6 +304,10 @@ public:
     RCLCPP_INFO(this->get_logger(), "[INFO] Control loop timer started (%.1f Hz)",
                 control_frequency_);
 
+    // 预热消息内存，避免首次 publish 触发 malloc
+    torque_msg_preallocated_.data.resize(kAllJoints, 0.0);
+    zero_msg_preallocated_.data.resize(kAllJoints, 0.0);
+
     RCLCPP_INFO(this->get_logger(), "[OK] Torque controller fully initialized (mode: RELAX)");
   }
 
@@ -295,6 +342,7 @@ private:
   size_t control_loop_count_ = 0;
   rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_;
+  LoopProfiler loop_prof_;  // timing instrumentation
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_forward_pub_;
   double control_frequency_;
 
@@ -309,6 +357,10 @@ private:
 
   // 降级: 复用上次有效力矩，避免自由落体
   std::array<double, 7> last_valid_torque_{};
+
+  // 预分配发布消息，避免热路径 malloc
+  std_msgs::msg::Float64MultiArray torque_msg_preallocated_;
+  std_msgs::msg::Float64MultiArray zero_msg_preallocated_;
 
   // 控制模式 (由 mission_executor 通过 /control_mode topic 管理)
   std::atomic<uint8_t> control_mode_{ControlMode::RELAX};  // 默认 RELAX: 上电安全
@@ -1049,8 +1101,8 @@ void TorqueControllerActionServer::computePayloadCompensation(const KDL::JntArra
 
 bool TorqueControllerActionServer::safeTorquePublish(const KDL::JntArray &tau_arm,
                                                      double gripper_force) {
-  std_msgs::msg::Float64MultiArray msg;
-  msg.data.resize(kAllJoints);
+  // 复用预分配消息，避免热路径 malloc
+  auto &msg = torque_msg_preallocated_;
   for (int i = 0; i < kArmJoints; i++) {
     if (!std::isfinite(tau_arm(i))) {
       RCLCPP_ERROR(this->get_logger(), "[SAFETY] Non-finite torque on joint %d: %.2f", i + 1,
@@ -1076,10 +1128,14 @@ bool TorqueControllerActionServer::safeTorquePublish(const KDL::JntArray &tau_ar
 }
 
 void TorqueControllerActionServer::controlLoop() {
+  using Clock = std::chrono::steady_clock;
+  using us = std::chrono::microseconds;
+
+  const auto t_entry = Clock::now();
+
   // --- SAFETY: Monitor control loop timing ---
   rclcpp::Time now = this->now();
-  if (control_loop_count_ > 0)  // Skip first iteration
-  {
+  if (control_loop_count_ > 0) {
     double period = (now - last_control_loop_time_).seconds();
     if (period > max_control_period_sec_) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
@@ -1091,6 +1147,41 @@ void TorqueControllerActionServer::controlLoop() {
 
   // --- Health monitoring ---
   control_loop_count_++;
+
+  // Timing section accumulators (filled by each path before recording)
+  int64_t lock_us = 0, dyn_us = 0, pub_us = 0;
+  const char *path_name = "RELAX";  // updated per code path
+
+  // -----------------------------------------------------------------------
+  // Helper lambdas to avoid duplicating timing boilerplate at every return.
+  // Call commit() once right before each early return.
+  // -----------------------------------------------------------------------
+  auto commit = [&]() {
+    int64_t total_us =
+        std::chrono::duration_cast<us>(Clock::now() - t_entry).count();
+
+    bool print_now = loop_prof_.record_and_check(total_us, lock_us, dyn_us, pub_us, 1000);
+
+    if (total_us > loop_prof_.overrun_threshold_us) {
+      RCLCPP_WARN(this->get_logger(),
+                  "[TIMING] OVERRUN path=%-12s total=%4ldus | lock=%3ldus dyn=%3ldus pub=%3ldus",
+                  path_name, total_us, lock_us, dyn_us, pub_us);
+    }
+
+    if (print_now) {
+      RCLCPP_INFO(
+          this->get_logger(),
+          "[TIMING/1k] total: min=%ldus avg=%ldus max=%ldus | "
+          "lock: avg=%ldus max=%ldus | dyn: avg=%ldus max=%ldus | "
+          "pub: avg=%ldus max=%ldus | overruns=%lu",
+          loop_prof_.total.min_us, loop_prof_.total.avg_us(), loop_prof_.total.max_us,
+          loop_prof_.state_lock.avg_us(), loop_prof_.state_lock.max_us,
+          loop_prof_.dynamics.avg_us(), loop_prof_.dynamics.max_us,
+          loop_prof_.publish.avg_us(), loop_prof_.publish.max_us,
+          loop_prof_.overruns);
+      loop_prof_.reset_all();
+    }
+  };
 
   // Print health status every 5 seconds (5000 loops at 1kHz)
   if (control_loop_count_ % 5000 == 0) {
@@ -1114,23 +1205,30 @@ void TorqueControllerActionServer::controlLoop() {
 
     // RELAX 模式: 发全零力矩，不需要 joint_states
     if (mode == ControlMode::RELAX) {
-      std_msgs::msg::Float64MultiArray zero_msg;
-      zero_msg.data.resize(kAllJoints, 0.0);
-      torque_pub_->publish(zero_msg);
+      path_name = "RELAX";
+      {
+        const auto t0 = Clock::now();
+        torque_pub_->publish(zero_msg_preallocated_);
+        pub_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
+      }
+      commit();
       return;
     }
 
     // 以下模式需要 joint_states — 先在锁内拷贝状态，释放后再计算
-    // [FIX] 缩小 state_mutex_ 作用域，避免持锁调用 emergencyStop 导致死锁
     KDL::JntArray q_copy(kArmJoints), qd_copy(kArmJoints);
     KDL::JntArray q_target_copy(kArmJoints);
     rclcpp::Time last_state_time_copy;
     bool has_target_copy = false;
     double gripper_pos_copy = 0.0;
     {
+      const auto t0 = Clock::now();
       std::lock_guard<std::mutex> state_lock(state_mutex_);
+      lock_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
+
       if (!state_received_) {
-        return;  // 还没收到状态，无法计算
+        commit();
+        return;
       }
       q_copy = q_actual_;
       qd_copy = q_dot_filtered_;
@@ -1139,9 +1237,8 @@ void TorqueControllerActionServer::controlLoop() {
       if (has_target_) q_target_copy = q_target_;
       gripper_pos_copy = gripper_position_;
     }
-    // state_mutex_ 已释放，以下所有计算使用局部拷贝
 
-    // 读取夹爪力指令 (载荷补偿 + 透传共用)
+    // 读取夹爪力指令
     double gripper_force_copy;
     {
       std::lock_guard<std::mutex> glock(gripper_mutex_);
@@ -1151,25 +1248,34 @@ void TorqueControllerActionServer::controlLoop() {
     // --- SAFETY: Check joint state timeout ---
     double time_since_last_state = (this->now() - last_state_time_copy).seconds();
     if (time_since_last_state > joint_state_timeout_sec_) {
+      path_name = "TIMEOUT";
       RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                             "[SAFETY] Joint state timeout: %.3fs (limit: %.0f ms)",
                             time_since_last_state, joint_state_timeout_sec_ * 1000.0);
       KDL::JntArray tau_timeout(kArmJoints);
       try {
+        const auto t0 = Clock::now();
         dynamic_computer_->computeGravityTorque(q_copy, tau_timeout);
         computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy, tau_payload_);
+        dyn_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
         for (int i = 0; i < kArmJoints; i++) tau_timeout(i) += tau_payload_(i);
       } catch (const std::exception &e) {
         RCLCPP_ERROR(this->get_logger(), "[SAFETY] Cannot compute gravity: %s", e.what());
       }
-      safeTorquePublish(tau_timeout, gripper_force_copy);
+      {
+        const auto t0 = Clock::now();
+        safeTorquePublish(tau_timeout, gripper_force_copy);
+        pub_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
+      }
       if (cascade_pid_) cascade_pid_->resetAll();
+      commit();
       return;
     }
 
     // --- 控制律计算: G(q) + friction + payload [+ PD] ---
     KDL::JntArray tau_arm(kArmJoints);
     try {
+      const auto t0 = Clock::now();
       KDL::JntArray tau_gravity(kArmJoints);
       dynamic_computer_->computeGravityTorque(q_copy, tau_gravity);
       computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy, tau_payload_);
@@ -1180,37 +1286,53 @@ void TorqueControllerActionServer::controlLoop() {
 
       // FREEDRIVE: G + friction + payload，无 PD
       if (mode == ControlMode::FREEDRIVE) {
+        path_name = "FREEDRIVE";
+        dyn_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
+        const auto tp = Clock::now();
         safeTorquePublish(tau_arm, gripper_force_copy);
+        pub_us = std::chrono::duration_cast<us>(Clock::now() - tp).count();
+        commit();
         return;
       }
 
       // ARMED (hold): 追加 PD
+      path_name = "ARMED_HOLD";
       KDL::JntArray tau_pd(kArmJoints);
-      KDL::JntArray qd_zero(kArmJoints);  // 期望速度 = 0
+      KDL::JntArray qd_zero(kArmJoints);
       if (has_target_copy) {
         computeFeedbackTorque(q_target_copy, qd_zero, q_copy, qd_copy, tau_pd);
       } else {
         computeFeedbackTorque(q_copy, qd_zero, q_copy, qd_copy, tau_pd);
       }
       for (int i = 0; i < kArmJoints; i++) tau_arm(i) += tau_pd(i);
+      dyn_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
     } catch (const std::exception &e) {
       RCLCPP_ERROR(this->get_logger(), "[SAFETY] Dynamics exception: %s", e.what());
       std_msgs::msg::Float64MultiArray fallback_msg;
       fallback_msg.data.assign(last_valid_torque_.begin(), last_valid_torque_.end());
       torque_pub_->publish(fallback_msg);
+      commit();
       return;
     }
 
-    safeTorquePublish(tau_arm, gripper_force_copy);
+    {
+      const auto tp = Clock::now();
+      safeTorquePublish(tau_arm, gripper_force_copy);
+      pub_us = std::chrono::duration_cast<us>(Clock::now() - tp).count();
+    }
+    commit();
     return;
   }
 
   // --- ARMED + executing: 轨迹跟踪 ---
+  path_name = "ARMED_EXEC";
   trajectory_msgs::msg::JointTrajectory traj_copy;
   rclcpp::Time traj_start_copy;
   std::shared_ptr<GoalHandleFJT> goal_handle_copy;
   {
+    const auto t0 = Clock::now();
     std::lock_guard<std::mutex> action_lock(action_mutex_);
+    lock_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
     traj_copy = current_trajectory_;
     traj_start_copy = trajectory_start_time_;
     goal_handle_copy = current_goal_handle_;
@@ -1221,6 +1343,7 @@ void TorqueControllerActionServer::controlLoop() {
     if (is_executing_.load(std::memory_order_acquire)) {
       executionRecoveryCeremony("Empty trajectory detected");
     }
+    commit();
     return;
   }
 
@@ -1228,7 +1351,7 @@ void TorqueControllerActionServer::controlLoop() {
   const auto &last_pt = traj_copy.points.back();
   double total_dur = last_pt.time_from_start.sec + last_pt.time_from_start.nanosec * 1e-9;
 
-  // --- 轨迹完成: succeed + flip → 下一 tick 自然进入 ARMED hold ---
+  // --- 轨迹完成: succeed + flip ---
   if (t_now >= total_dur) {
     RCLCPP_INFO(this->get_logger(), "[OK] Trajectory completed (%.3fs)", total_dur);
     if (goal_handle_copy) {
@@ -1241,6 +1364,7 @@ void TorqueControllerActionServer::controlLoop() {
       is_executing_.store(false, std::memory_order_release);
       current_goal_handle_.reset();
     }
+    commit();
     return;
   }
 
@@ -1252,6 +1376,7 @@ void TorqueControllerActionServer::controlLoop() {
     if (current_goal_handle_ && is_executing_.load(std::memory_order_acquire)) {
       executionRecoveryCeremony("Interpolation failure");
     }
+    commit();
     return;
   }
 
@@ -1259,7 +1384,9 @@ void TorqueControllerActionServer::controlLoop() {
   KDL::JntArray q_act(kArmJoints), qd_filt(kArmJoints);
   double grip_pos = 0.0;
   {
+    const auto t0 = Clock::now();
     std::lock_guard<std::mutex> lock(state_mutex_);
+    lock_us += std::chrono::duration_cast<us>(Clock::now() - t0).count();  // accumulate both locks
     q_act = q_actual_;
     qd_filt = q_dot_filtered_;
     grip_pos = gripper_position_;
@@ -1273,6 +1400,7 @@ void TorqueControllerActionServer::controlLoop() {
   // --- TRACK: M(q_d)*q̈_d + C(q_d,q̇_d) + G(q) + friction + PD + payload ---
   KDL::JntArray tau_arm(kArmJoints);
   try {
+    const auto t0 = Clock::now();
     KDL::JntSpaceInertiaMatrix M(kArmJoints);
     KDL::JntArray C(kArmJoints), G(kArmJoints), tau_fb(kArmJoints);
     dynamic_computer_->getMassMatrix(q_d, M);
@@ -1280,6 +1408,7 @@ void TorqueControllerActionServer::controlLoop() {
     dynamic_computer_->getGravityForces(q_act, G);
     computeFeedbackTorque(q_d, qd_d, q_act, qd_filt, tau_fb);
     computePayloadCompensation(q_act, grip_pos, grip_force, tau_payload_);
+    dyn_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
 
     for (int i = 0; i < kArmJoints; i++) {
       double tau_inertia = 0.0;
@@ -1290,10 +1419,15 @@ void TorqueControllerActionServer::controlLoop() {
   } catch (const std::exception &e) {
     RCLCPP_ERROR(this->get_logger(), "[SAFETY] Dynamics exception: %s", e.what());
     emergencyStop("Dynamics computation exception");
+    commit();
     return;
   }
 
-  if (!safeTorquePublish(tau_arm, grip_force)) return;
+  {
+    const auto tp = Clock::now();
+    if (!safeTorquePublish(tau_arm, grip_force)) { commit(); return; }
+    pub_us = std::chrono::duration_cast<us>(Clock::now() - tp).count();
+  }
 
   // --- Action feedback ---
   auto feedback = std::make_shared<FollowJointTrajectory::Feedback>();
@@ -1313,6 +1447,7 @@ void TorqueControllerActionServer::controlLoop() {
     feedback->error.velocities[i] = qd_d(i) - qd_filt(i);
   }
   if (goal_handle_copy) goal_handle_copy->publish_feedback(feedback);
+  commit();
 }
 
 rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parametersCallback(

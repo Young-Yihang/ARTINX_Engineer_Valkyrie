@@ -5,7 +5,7 @@
   ros__parameters:
     # ========== 卡尔曼滤波器（速度滤波，降低噪声）==========
     kalman:
-      enabled: true
+      enabled: false
       Q_pos: 1.0e-5    # 过程噪声：位置
       Q_vel: 1.0e-4    # 过程噪声：速度
       R_pos: 1.0e-3    # 测量噪声：位置
@@ -29,17 +29,17 @@
         pos_Ki: 0.0
         pos_Kd: 0.003       # Kd_eq = (0+1)*1 = 1.0 = 原Kd
         max_integral_pos: 2.0
-        vel_Kp: 6.0        # 透传: 内环天然阻尼=1.0
+        vel_Kp: 3.0        # 透传: 内环天然阻尼=1.0
         vel_Ki: 0.012
         vel_Kd: 0.0
-        vel_limit: 5.0
+        vel_limit: 2.5
 
       joint_2:
         pos_Kp: 16.0
         pos_Ki: 0.0
         pos_Kd: 0.005
         max_integral_pos: 2.0
-        vel_Kp: 8.0
+        vel_Kp: 5.0
         vel_Ki: 0.0
         vel_Kd: 0.0205
         vel_limit: 1.5 # rad/s, 限幅防饱和极限环(vel_limit×kvp+G<tau_limit)
