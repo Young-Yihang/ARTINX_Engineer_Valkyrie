@@ -117,7 +117,7 @@
     </inertial>
     <visual>
       <origin
-        xyz="-0.03215 -0.131 0"
+        xyz="0 -0.135 0"
         rpy="0 0 0" />
       <geometry>
         <mesh
@@ -140,7 +140,7 @@
     name="joint_2"
     type="revolute">
     <origin
-      xyz="0.03215 0 0.131"
+      xyz="0 0 0.055"
       rpy="1.5707963267949 0 0" />
     <parent
       link="link1" />
@@ -198,7 +198,7 @@
     name="joint_3"
     type="revolute">
     <origin
-      xyz="0.381000000000038 0 0"
+      xyz="0.440 0 0"
       rpy="0 0 0" />
     <parent
       link="link2" />
@@ -314,7 +314,7 @@
     name="joint_5"
     type="revolute">
     <origin
-      xyz="0.00129999999995989 -0.00719999999941014 0.43888820457198"
+      xyz="0 0 0.3505"
       rpy="-1.5707963267949 0 0" />
     <parent
       link="link4" />
