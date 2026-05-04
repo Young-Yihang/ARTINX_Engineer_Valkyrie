@@ -98,6 +98,7 @@ public:
             KalmanFilter1D(1.0 / 1000.0),  // Joint 5
             KalmanFilter1D(1.0 / 1000.0)   // Joint 6
         },
+        kalman_filter_enabled_(false),
         q_dot_filtered_(6)
   {
     RCLCPP_INFO(this->get_logger(),

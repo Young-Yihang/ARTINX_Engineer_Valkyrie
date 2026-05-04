@@ -734,6 +734,16 @@ private:
 
   void updateAndPublishJointStates(const float positions[SerialProtocol::NUM_ALL_JOINTS],
                                    const float velocities[SerialProtocol::NUM_ALL_JOINTS]) {
+    // 安全检查：丢弃含 NaN/Inf 的帧，防止 MoveIt FK 产生 NaN 变换导致 FCL 树崩溃
+    for (size_t i = 0; i < SerialProtocol::NUM_ALL_JOINTS; ++i) {
+      if (!std::isfinite(positions[i]) || !std::isfinite(velocities[i])) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                             "[SAFETY] joint_states frame dropped: joint[%zu] pos=%.3f vel=%.3f "
+                             "(NaN/Inf from serial)", i, positions[i], velocities[i]);
+        return;  // 整帧丢弃，保留上一帧有效数据
+      }
+    }
+
     {
       std::lock_guard<std::mutex> lock(data_mutex_);
       std::memcpy(current_positions_, positions, sizeof(float) * SerialProtocol::NUM_ALL_JOINTS);

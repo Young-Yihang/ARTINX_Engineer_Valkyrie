@@ -53,6 +53,16 @@
     <!--VIRTUAL JOINT: Purpose: this element defines a virtual joint between a robot link and an external frame of reference (considered fixed with respect to the robot)-->
     <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="base_link"/>
     <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
+    <!-- tcp: 纯坐标系框架，无几何体，对所有链接禁用碰撞检测 -->
+    <disable_collisions link1="tcp" link2="base_link" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link1" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link2" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link3" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link4" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link5" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link6" reason="Adjacent"/>
+    <disable_collisions link1="tcp" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link_gripper2" reason="Never"/>
     <disable_collisions link1="base_link" link2="link1" reason="Adjacent"/>
     <disable_collisions link1="base_link" link2="link3" reason="Never"/>
     <disable_collisions link1="link1" link2="link2" reason="Adjacent"/>
@@ -65,11 +75,11 @@
     <disable_collisions link1="link3" link2="link_gripper1" reason="Never"/>
     <disable_collisions link1="link3" link2="link_gripper2" reason="Never"/>
     <disable_collisions link1="link4" link2="link5" reason="Adjacent"/>
-    <disable_collisions link1="link4" link2="link6" reason="Adjacent"/>
+    <disable_collisions link1="link4" link2="link6" reason="Never"/>
     <disable_collisions link1="link5" link2="link6" reason="Adjacent"/>
     <disable_collisions link1="link5" link2="link_gripper1" reason="Never"/>
     <disable_collisions link1="link5" link2="link_gripper2" reason="Never"/>
     <disable_collisions link1="link6" link2="link_gripper1" reason="Adjacent"/>
     <disable_collisions link1="link6" link2="link_gripper2" reason="Adjacent"/>
-    <disable_collisions link1="link_gripper1" link2="link_gripper2" reason="Adjacent"/>
+    <disable_collisions link1="link_gripper1" link2="link_gripper2" reason="Never"/>
 </robot>
