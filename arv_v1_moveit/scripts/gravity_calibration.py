@@ -28,8 +28,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 
-Q2_RANGE = (0.49, 3.14)
-Q3_RANGE = (-0.90, 0.70)
+Q2_RANGE = (0.95, 2.80)
+Q3_RANGE = (-0.80, 0.70)
 
 
 def make_grid():
@@ -84,7 +84,7 @@ class CalibNode(Node):
         self.target_pub.publish(msg)
 
 
-def wait_stable(node, duration=2.0, vel_thresh=0.008):
+def wait_stable(node, duration=2.0, vel_thresh=0.05):
     stable_since = None
     while True:
         rclpy.spin_once(node, timeout_sec=0.02)
@@ -267,3 +267,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
