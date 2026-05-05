@@ -103,10 +103,10 @@
     name="link2">
     <inertial>
       <origin
-        xyz="0.173164697778785 -0.000992870986536 0.0570377412581279"
+        xyz="0.2700 0 0"
         rpy="0 0 0" />
       <mass
-        value="1.13036010199932" />
+        value="3.087" />
       <inertia
         ixx="0.00142587127922893"
         ixy="-2.2216196167755E-05"
@@ -117,7 +117,7 @@
     </inertial>
     <visual>
       <origin
-        xyz="-0.03215 -0.131 0"
+        xyz="0 -0.135 0"
         rpy="0 0 0" />
       <geometry>
         <mesh
@@ -130,9 +130,9 @@
       </material>
     </visual>
     <collision>
-      <origin xyz="0.19 0 0" rpy="0 1.5708 0" />
+      <origin xyz="0.22 0 0" rpy="0 1.5708 0" />
       <geometry>
-        <cylinder length="0.36" radius="0.025" />
+        <cylinder length="0.44" radius="0.025" />
       </geometry>
     </collision>
   </link>
@@ -140,7 +140,7 @@
     name="joint_2"
     type="revolute">
     <origin
-      xyz="0.03215 0 0.131"
+      xyz="0 0 0.055"
       rpy="1.5707963267949 0 0" />
     <parent
       link="link1" />
@@ -161,10 +161,10 @@
     name="link3">
     <inertial>
       <origin
-        xyz="0.058615 0.000344 0.00524746875047932"
+        xyz="0.0494 0 0.005"
         rpy="0 0 0" />
       <mass
-        value="2.211" />
+        value="1.270" />
       <inertia
         ixx="0.001933"
         ixy="3.672E-06"
@@ -198,7 +198,7 @@
     name="joint_3"
     type="revolute">
     <origin
-      xyz="0.381000000000038 0 0"
+      xyz="0.440 0 0"
       rpy="0 0 0" />
     <parent
       link="link2" />
@@ -219,10 +219,10 @@
     name="link4">
     <inertial>
       <origin
-        xyz="0.001100 0.000588 0.155000"
+        xyz="0.001 0 0.3117"
         rpy="0 0 0" />
       <mass
-        value="2.295" />
+        value="0.724" />
       <inertia
         ixx="0.008247"
         ixy="-2.063E-13"
@@ -246,9 +246,9 @@
       </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0.22" rpy="0 0 0" />
+      <origin xyz="0 0 0.175" rpy="0 0 0" />
       <geometry>
-        <cylinder length="0.43" radius="0.02" />
+        <cylinder length="0.35" radius="0.02" />
       </geometry>
     </collision>
   </link>
@@ -314,7 +314,7 @@
     name="joint_5"
     type="revolute">
     <origin
-      xyz="0.00129999999995989 -0.00719999999941014 0.43888820457198"
+      xyz="0 0 0.3505"
       rpy="-1.5707963267949 0 0" />
     <parent
       link="link4" />
@@ -338,7 +338,7 @@
         xyz="-1.71529457304587E-14 0.0093499999991507 0.0563050373172609"
         rpy="0 0 0" />
       <mass
-        value="0.106" />
+        value="0.706" />
       <inertia
         ixx="1.832E-04"
         ixy="5.839E-20"
