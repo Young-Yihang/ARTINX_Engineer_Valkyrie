@@ -63,6 +63,7 @@ struct LoopProfiler {
 #include "arv_v1_interfaces/srv/gripper_control.hpp"
 #include "cascade_pid.hpp"
 #include "dynamics_computer.hpp"
+#include "impedance_controller.hpp"
 #include "kalman_filter.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
@@ -232,6 +233,28 @@ public:
         this->get_logger(),
         "[OK] Cascade PI+PI initialized (Outer: Position-PI w/ anti-windup, Inner: Velocity-PI)");
 
+    // --- 阻抗控制初始化 (J1/J2/J5) ---
+    impedance_controller_ = std::make_unique<MultiJointImpedance>(kArmJoints);
+    {
+      auto load_imp = [&](size_t idx, const std::string& joint_name) {
+        std::string prefix = "impedance." + joint_name;
+        this->declare_parameter(prefix + ".K", 0.0);
+        this->declare_parameter(prefix + ".D", 0.0);
+        this->declare_parameter(prefix + ".tau_limit", 0.0);
+        ImpedanceGains g;
+        g.K = this->get_parameter(prefix + ".K").as_double();
+        g.D = this->get_parameter(prefix + ".D").as_double();
+        g.tau_limit = this->get_parameter(prefix + ".tau_limit").as_double();
+        impedance_controller_->setJointGains(idx, g);
+        RCLCPP_INFO(this->get_logger(), "[IMP] %s: K=%.1f D=%.2f limit=%.1f",
+                    joint_name.c_str(), g.K, g.D, g.tau_limit);
+      };
+      load_imp(0, "joint_1");
+      load_imp(1, "joint_2");
+      load_imp(4, "joint_5");
+    }
+    RCLCPP_INFO(this->get_logger(), "[OK] Impedance controller initialized (J1/J2/J5)");
+
     // --- 摩擦前馈参数 ---
     this->declare_parameter("friction.coulomb", std::vector<double>(kArmJoints, 0.0));
     this->declare_parameter("friction.viscous", std::vector<double>(kArmJoints, 0.0));
@@ -334,6 +357,8 @@ private:
   KDL::Chain kdl_chain_;
   std::unique_ptr<DynamicsComputer> dynamic_computer_;
   std::unique_ptr<MultiJointCascadePid> cascade_pid_;
+  std::unique_ptr<MultiJointImpedance> impedance_controller_;
+  static constexpr bool kUseImpedance_[kArmJoints] = {true, true, false, false, true, false};
 
   std::array<KalmanFilter1D, 6> joint_filters_;
   KDL::JntArray q_dot_filtered_;
@@ -462,6 +487,7 @@ private:
     is_executing_.store(false, std::memory_order_release);
 
     if (cascade_pid_) cascade_pid_->resetAll();
+    if (impedance_controller_) impedance_controller_->resetAll();
 
     // 锁顺序: state_mutex_ → filter_mutex_ (全局统一，避免死锁)
     if (kalman_filter_enabled_) {
@@ -543,6 +569,7 @@ private:
 
     // 3. PID 无需锁保护（仅本回调和 controlLoop timer 交替访问，resetAll 本身线程安全）
     if (cascade_pid_) cascade_pid_->resetAll();
+    if (impedance_controller_) impedance_controller_->resetAll();
 
     control_mode_.store(new_mode, std::memory_order_release);
 
@@ -691,12 +718,14 @@ void TorqueControllerActionServer::handleAccepted(
     if (!position_continuous) {
       // 位置不连续：必须完全清零积分器，避免冲击
       cascade_pid_->resetAll();
+      if (impedance_controller_) impedance_controller_->resetAll();
       RCLCPP_WARN(this->get_logger(),
                   "[PID] Position discontinuity detected (max_jump=%.3f rad), integrators cleared",
                   max_pos_jump);
     } else {
       // 清零积分器，避免速度指令跳变影响
       cascade_pid_->resetAll();
+      if (impedance_controller_) impedance_controller_->resetAll();
       RCLCPP_INFO(this->get_logger(),
                   "[PID] Position continuous (max_jump=%.4f rad), but velocity command changes, "
                   "integrators cleared",
@@ -1035,21 +1064,16 @@ bool TorqueControllerActionServer::interpolateTrajectory(
   return true;
 }
 
-// --- PD 反馈控制 ---
+// --- 反馈控制: 阻抗(J1/J2/J5) + 级联PID(J3/J4/J6) 混合调度 ---
 void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_d,
                                                          const KDL::JntArray &qd_d,
                                                          const KDL::JntArray &q_actual,
                                                          const KDL::JntArray &qd_actual,
                                                          KDL::JntArray &tau_fb) {
-  // 级联 PD+PI: 外环PD生成速度指令, 内环PI输出力矩
-  // qd_actual 应传入卡尔曼滤波后的速度以减少噪声
-
-  if (!cascade_pid_) {
+  if (!cascade_pid_ || !impedance_controller_) {
     RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                          "[ERROR] Cascade PD+PI not initialized!");
-    for (size_t i = 0; i < kArmJoints; i++) {
-      tau_fb(i) = 0.0;
-    }
+                          "[ERROR] Feedback controllers not initialized!");
+    for (size_t i = 0; i < kArmJoints; i++) tau_fb(i) = 0.0;
     return;
   }
 
@@ -1062,11 +1086,17 @@ void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_
     vel_fdb[i] = qd_actual(i);
   }
 
-  double dt = 1.0 / control_frequency_;  // 1kHz -> 0.001s
+  double dt = 1.0 / control_frequency_;
+  // 级联PID 仍对全部关节计算（非阻抗关节使用其输出）
   cascade_pid_->compute(pos_ref, pos_fdb, vel_fdb, dt, torque_out);
 
   for (size_t i = 0; i < kArmJoints; i++) {
-    tau_fb(i) = torque_out[i];
+    if (kUseImpedance_[i]) {
+      tau_fb(i) = impedance_controller_->getJointController(i).compute(
+          pos_ref[i], pos_fdb[i], vel_fdb[i]);
+    } else {
+      tau_fb(i) = torque_out[i];
+    }
   }
 }
 
@@ -1268,6 +1298,7 @@ void TorqueControllerActionServer::controlLoop() {
         pub_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
       }
       if (cascade_pid_) cascade_pid_->resetAll();
+      if (impedance_controller_) impedance_controller_->resetAll();
       commit();
       return;
     }
@@ -1528,6 +1559,22 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
 
         RCLCPP_INFO(this->get_logger(), "[CONFIG] Cascade PID Joint %d updated: %s.%s = %.2f",
                     joint_idx + 1, loop_type.c_str(), gain_type.c_str(), new_value);
+      }
+    } else if (name.find("impedance.joint_") == 0) {
+      // impedance.joint_X.{K,D,tau_limit}
+      size_t dot1 = name.find('.', 10);  // after "impedance."
+      if (dot1 == std::string::npos) continue;
+      std::string joint_name = name.substr(10, dot1 - 10);  // "joint_1" etc.
+      int joint_idx = std::stoi(joint_name.substr(6)) - 1;  // "1"→0
+      if (joint_idx >= 0 && joint_idx < kArmJoints && kUseImpedance_[joint_idx]) {
+        std::string prefix = "impedance." + joint_name;
+        ImpedanceGains g;
+        g.K = this->get_parameter(prefix + ".K").as_double();
+        g.D = this->get_parameter(prefix + ".D").as_double();
+        g.tau_limit = this->get_parameter(prefix + ".tau_limit").as_double();
+        impedance_controller_->setJointGains(joint_idx, g);
+        RCLCPP_INFO(this->get_logger(), "[CONFIG] Impedance %s updated: K=%.1f D=%.2f limit=%.1f",
+                    joint_name.c_str(), g.K, g.D, g.tau_limit);
       }
     } else if (name == "payload.enabled") {
       payload_compensation_enabled_ = param.as_bool();

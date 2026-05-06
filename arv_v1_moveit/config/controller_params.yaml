@@ -84,6 +84,22 @@
         vel_Kd: 0.0
         vel_limit: 3.0
 
+    # ========== 阻抗控制 (J1/J2/J5): tau = K*(qt-q) - D*qdot ==========
+    # 与 STM32 本地阻抗参数同步，D-priority 抗饱和
+    impedance:
+      joint_1:
+        K: 60.0
+        D: 10.5
+        tau_limit: 28.0
+      joint_2:
+        K: 80.0
+        D: 11.0
+        tau_limit: 40.0
+      joint_5:
+        K: 10.0
+        D: 0.63
+        tau_limit: 7.0
+
     # ========== Safety Parameters ==========
     safety:
       # 单关节力矩/力限制, 设-1使用URDF值
