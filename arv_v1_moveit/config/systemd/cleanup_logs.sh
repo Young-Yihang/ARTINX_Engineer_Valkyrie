@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-LOG_DIR="/home/huan/arv_v1_logs"
+LOG_DIR="$HOME/arv_v1_logs"
 RETENTION_HOURS=24
 
 [ -d "$LOG_DIR" ] || exit 0

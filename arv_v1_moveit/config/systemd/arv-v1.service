@@ -6,7 +6,7 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-ExecStart=/home/huan/ros2_ws/src/arv_v1_moveit/config/systemd/arv_v1_start.sh
+ExecStart=%h/ros2_ws/src/arv_v1_moveit/config/systemd/arv_v1_start.sh
 ExecStop=/bin/kill -INT $MAINPID
 TimeoutStopSec=15
 KillMode=mixed
@@ -14,8 +14,8 @@ KillSignal=SIGINT
 Restart=on-failure
 RestartSec=5
 
-StandardOutput=append:/home/huan/arv_v1_logs/systemd.log
-StandardError=append:/home/huan/arv_v1_logs/systemd.log
+StandardOutput=append:%h/arv_v1_logs/systemd.log
+StandardError=append:%h/arv_v1_logs/systemd.log
 
 # Allow RT scheduling for torque_controller
 LimitRTPRIO=99
