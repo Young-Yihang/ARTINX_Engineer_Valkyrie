@@ -16,36 +16,35 @@ CascadePid::CascadePid(const PidGains &pos_gains, const PidGains &vel_gains, dou
       vel_error_prev_(0.0),
       vel_integral_(0.0),
       ref_vel_(0.0),
-      vel_cmd_filtered_(0.0),
       pos_fdb_prev_(0.0),
       vel_fdb_prev_(0.0) {}
 
 double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, double dt) {
   // --- 外环: 位置PID → 期望速度 ---
-  pos_error_ = angleDiff(pos_ref, pos_fdb);  // angleDiff内联函数用于处理looper问题
+  pos_error_ = angleDiff(pos_ref, pos_fdb);
   double pos_p = pos_gains_.kp * pos_error_;
 
   // 条件积分抗饱和: 仅小误差时积分
   const double integral_threshold = 0.1;  // 0.1 rad ≈ 5.7°
   if (std::abs(pos_error_) < integral_threshold) {
     pos_integral_ += pos_error_ * dt;
-    pos_integral_ = clamp(pos_integral_, -max_integral_pos_, max_integral_pos_);
+    pos_integral_ = std::clamp(pos_integral_, -max_integral_pos_, max_integral_pos_);
   }
   double pos_i = pos_gains_.ki * pos_integral_;
 
-  double pos_d = 0.0;
-  if (dt > 1e-6) {
-    pos_d = -pos_gains_.kd * angleDiff(pos_fdb, pos_fdb_prev_) / dt;
+  d_sample_counter_++;
+  if (d_sample_counter_ >= d_sample_period_ms_) {
+    d_sample_counter_ = 0;
+    pos_fdb_lowsample_[1] = pos_fdb_lowsample_[0];
+    pos_fdb_lowsample_[0] = pos_fdb;
+    double d_fdb = angleDiff(pos_fdb_lowsample_[0], pos_fdb_lowsample_[1]);
+    pos_d_held_ = -pos_gains_.kd * d_fdb * d_dt_inv_;
   }
+  double pos_d = pos_d_held_;
 
-  ref_vel_ = clamp(pos_p + pos_i + pos_d, -max_vel_, max_vel_);
+  ref_vel_ = std::clamp(pos_p + pos_i + pos_d, -max_vel_, max_vel_);
   pos_error_prev_ = pos_error_;
   pos_fdb_prev_ = pos_fdb;
-
-  // vel_cmd 一阶低通滤波（平滑 Kd 高频输出）
-  vel_cmd_filtered_ =
-      (1.0 - kVelCmdFilterAlpha) * vel_cmd_filtered_ + kVelCmdFilterAlpha * ref_vel_;
-  ref_vel_ = vel_cmd_filtered_;
 
   // --- 内环: 速度PI → 力矩 ---
   vel_error_ = ref_vel_ - vel_fdb;
@@ -54,7 +53,7 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
   const double vel_integral_threshold = 0.5;  // 0.5 rad/s
   if (std::abs(vel_error_) < vel_integral_threshold) {
     vel_integral_ += vel_error_ * dt;
-    vel_integral_ = clamp(vel_integral_, -max_integral_vel_, max_integral_vel_);
+    vel_integral_ = std::clamp(vel_integral_, -max_integral_vel_, max_integral_vel_);
   }
   double vel_i = vel_gains_.ki * vel_integral_;
 
@@ -78,9 +77,19 @@ void CascadePid::reset() {
   vel_integral_ = 0.0;
 
   ref_vel_ = 0.0;
-  vel_cmd_filtered_ = 0.0;
   pos_fdb_prev_ = 0.0;
   vel_fdb_prev_ = 0.0;
+
+  d_sample_counter_ = 0;
+  pos_fdb_lowsample_[0] = 0.0;
+  pos_fdb_lowsample_[1] = 0.0;
+  pos_d_held_ = 0.0;
+}
+
+void CascadePid::setDerivativeMode(uint32_t sample_period_ms, bool divide_dt) {
+  d_sample_period_ms_ = (sample_period_ms > 0) ? sample_period_ms : 1;
+  d_divide_dt_ = divide_dt;
+  d_dt_inv_ = divide_dt ? (1.0 / (d_sample_period_ms_ * 0.001)) : 1.0;
 }
 
 void CascadePid::setPositionGains(const PidGains &gains) {

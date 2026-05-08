@@ -238,6 +238,7 @@ public:
     }
 
     cascade_pid_->setJointContinuous(5, true);
+    cascade_pid_->getJointController(1).setDerivativeMode(2, true);  // J2: 2ms采样+/dt, 同MCU
 
     RCLCPP_INFO(
         this->get_logger(),
@@ -371,7 +372,7 @@ private:
   std::unique_ptr<DynamicsComputer> dynamic_computer_;
   std::unique_ptr<MultiJointCascadePid> cascade_pid_;
   std::unique_ptr<MultiJointImpedance> impedance_controller_;
-  static constexpr bool kUseImpedance_[kArmJoints] = {true, true, false, false, true, false};
+  static constexpr bool kUseImpedance_[kArmJoints] = {true, false, false, false, true, false};
 
   std::array<KalmanFilter1D, 6> joint_filters_;
   KDL::JntArray q_dot_filtered_;

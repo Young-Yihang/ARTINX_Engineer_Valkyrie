@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 struct PidGains {
@@ -31,6 +32,7 @@ public:
   double getVelocityError() const { return vel_error_; }
 
   void setContinuous(bool c) { is_continuous_ = c; }
+  void setDerivativeMode(uint32_t sample_period_ms, bool divide_dt);
 
 private:
   // --- 位置环(外环) ---
@@ -49,16 +51,18 @@ private:
   double vel_integral_;
   double max_integral_vel_;
 
-  // --- Extra Stage特殊滤波处理 + loop处理
-  double max_vel_;           // rad/s
-  double ref_vel_;           // 外环输出参考速度 (rad/s)
-  double vel_cmd_filtered_;  // vel_cmd 一阶滤波状态
-  bool is_continuous_ = false;
-  static constexpr double kVelCmdFilterAlpha = 0.1;  // a = dt/tau, tau=10ms, dt=1ms
+  // --- D项低采样 (对齐MCU Pid::SetDerivativeMode) ---
+  uint32_t d_sample_period_ms_ = 1;
+  bool d_divide_dt_ = true;
+  double d_dt_inv_ = 1000.0;  // 1.0 / (d_sample_period_ms_ * 0.001), precomputed
+  uint32_t d_sample_counter_ = 0;
+  double pos_fdb_lowsample_[2] = {};
+  double pos_d_held_ = 0.0;
 
-  inline double clamp(double value, double min_val, double max_val) const {
-    return std::max(min_val, std::min(value, max_val));
-  }
+  // --- loop处理
+  double max_vel_;  // rad/s
+  double ref_vel_;  // 外环输出参考速度 (rad/s)
+  bool is_continuous_ = false;
 
   inline double angleDiff(double a, double b) const {
     if (!std::isfinite(a) || !std::isfinite(b)) return 0.0;

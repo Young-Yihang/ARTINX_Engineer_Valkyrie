@@ -35,14 +35,14 @@
         vel_limit: 2.5
 
       joint_2:
-        pos_Kp: 16.0
+        pos_Kp: 16.2
         pos_Ki: 0.0
-        pos_Kd: 0.005
+        pos_Kd: 0.255       # MCU dDivDt=true, 2ms采样周期
         max_integral_pos: 2.0
-        vel_Kp: 5.0
+        vel_Kp: 12.0
         vel_Ki: 0.0
-        vel_Kd: 0.0205
-        vel_limit: 1.5 # rad/s, 限幅防饱和极限环(vel_limit×kvp+G<tau_limit)
+        vel_Kd: 0.0
+        vel_limit: 3.0      # MCU posPid max_output=3.0
 
       joint_3:
         pos_Kp: 30.0
@@ -55,14 +55,14 @@
         vel_limit: 5.0
 
       joint_4:
-        pos_Kp: 10.0
+        pos_Kp: 40.0       # MCU 直接值
         pos_Ki: 0.0
-        pos_Kd: 0.0       
+        pos_Kd: 0.0
         max_integral_pos: 0.3
         vel_Kp: 0.2
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 1.6   # rad/s, 限幅防饱和极限环(vel_limit×kvp+G<tau_limit)
+        vel_limit: 1.6   # MCU posPid max_output=1.6
 
       joint_5:
         pos_Kp: 15.0
@@ -84,14 +84,14 @@
         vel_Kd: 0.0
         vel_limit: 3.0
 
-    # ========== 阻抗控制 (J1/J2/J5): tau = K*(qt-q) - D*qdot ==========
+    # ========== 阻抗控制 (J1/J5): tau = K*(qt-q) - D*qdot ==========
     # 与 STM32 本地阻抗参数同步，D-priority 抗饱和
     impedance:
       joint_1:
         K: 60.0
         D: 10.5
         tau_limit: 28.0
-      joint_2:
+      joint_2:        # unused: J2已改为cascade PID，保留以满足参数声明
         K: 80.0
         D: 11.0
         tau_limit: 40.0
