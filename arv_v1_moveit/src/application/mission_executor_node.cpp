@@ -53,9 +53,8 @@ public:
         std::bind(&MissionExecutorNode::onTaskCommand, this, std::placeholders::_1));
 
     control_mode_sub_ = create_subscription<std_msgs::msg::UInt8>(
-        "/control_mode", 10, [this](const std_msgs::msg::UInt8::SharedPtr msg) {
-          control_mode_ = msg->data;
-        });
+        "/control_mode", 10,
+        [this](const std_msgs::msg::UInt8::SharedPtr msg) { control_mode_ = msg->data; });
 
     control_mode_pub_ = create_publisher<std_msgs::msg::UInt8>("/control_mode", 10);
     arm_state_pub_ = create_publisher<std_msgs::msg::UInt8>("/arm_state", 10);
@@ -274,8 +273,8 @@ private:
   void sendGripperAsync(double torque) {
     auto req = std::make_shared<GripperControl::Request>();
     req->torque = torque;
-    gripper_client_->async_send_request(req,
-        [this, torque](rclcpp::Client<GripperControl>::SharedFuture fut) {
+    gripper_client_->async_send_request(
+        req, [this, torque](rclcpp::Client<GripperControl>::SharedFuture fut) {
           try {
             auto res = fut.get();
             if (res->success)

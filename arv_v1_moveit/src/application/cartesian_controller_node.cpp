@@ -131,8 +131,8 @@ void CartesianControllerNode::poseTargetCallback(
   }
 
   // Extract rotation matrix (row-major) from quaternion
-  tf2::Quaternion quat(msg->pose.orientation.x, msg->pose.orientation.y,
-                       msg->pose.orientation.z, msg->pose.orientation.w);
+  tf2::Quaternion quat(msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z,
+                       msg->pose.orientation.w);
   quat.normalize();
   tf2::Matrix3x3 rot_mat(quat);
   double R[9];
@@ -177,8 +177,7 @@ void CartesianControllerNode::poseTargetCallback(
       double delta = std::remainder(ik_wrapped - seed, 2.0 * M_PI);
       double candidate = seed + delta;
 
-      if ((candidate > AnalyticalIK::kJointUpper[i] ||
-           candidate < AnalyticalIK::kJointLower[i]) &&
+      if ((candidate > AnalyticalIK::kJointUpper[i] || candidate < AnalyticalIK::kJointLower[i]) &&
           (ik_wrapped >= AnalyticalIK::kJointLower[i] &&
            ik_wrapped <= AnalyticalIK::kJointUpper[i])) {
         delta += (delta > 0) ? -2.0 * M_PI : 2.0 * M_PI;

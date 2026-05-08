@@ -38,7 +38,7 @@ enum class TaskCmd : uint8_t {
 };
 
 // ─────────── 0x0006 ArmStatus: [state][progress][error][gripper] ───────────
-enum class ArmState : uint8_t { // 0x00 to 0x04, all in armed.
+enum class ArmState : uint8_t {  // 0x00 to 0x04, all in armed.
   READY = 0x00,  // ARMED + at home + idx=0, waiting for command (active hold, non-zero torque)
   EXECUTING = 0x01,
   HOLDING = 0x02,
@@ -163,7 +163,7 @@ inline std::vector<uint8_t> buildPacket(uint16_t cmd_id, uint16_t flags,
   append_uint16(pkt, flags);
   pkt.insert(pkt.end(), payload.begin(), payload.end());
 
-  const uint16_t data_len = static_cast<uint16_t>(payload.size() + 2); // float_data + CRC16
+  const uint16_t data_len = static_cast<uint16_t>(payload.size() + 2);  // float_data + CRC16
   pkt[1] = static_cast<uint8_t>(data_len & 0xFF);
   pkt[2] = static_cast<uint8_t>((data_len >> 8) & 0xFF);
   pkt[3] = Get_CRC8_Check_Sum(pkt.data(), 3, 0xFF);
