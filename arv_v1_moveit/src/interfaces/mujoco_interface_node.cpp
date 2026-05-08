@@ -89,16 +89,17 @@ public:
 
     if (visualization_only_) {
       joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-          "/joint_states", 10,
+          "/joint_states", rclcpp::SensorDataQoS(),
           std::bind(&MuJoCoInterfaceNode::jointStateCallback, this, std::placeholders::_1));
       RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /joint_states (digital twin)");
     } else {
       effort_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
-          "/effort_controller/commands", 10,
+          "/effort_controller/commands", rclcpp::SensorDataQoS(),
           std::bind(&MuJoCoInterfaceNode::effortCallback, this, std::placeholders::_1));
       RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /effort_controller/commands");
 
-      joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
+      joint_state_pub_ =
+          this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", rclcpp::SensorDataQoS());
       RCLCPP_INFO(this->get_logger(), "[OK] Publishing: /joint_states");
 
       auto period = std::chrono::duration<double, std::milli>(1000.0 / sim_frequency_);

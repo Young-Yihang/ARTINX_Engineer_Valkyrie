@@ -374,10 +374,11 @@ private:
   void initROS2Communication() {
     // 7轴命令: [0-5]=臂力矩, [6]=夹爪力(N), sendLoop 转 flag
     torque_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
-        "/effort_controller/commands", 10,
+        "/effort_controller/commands", rclcpp::SensorDataQoS(),
         std::bind(&HardwareInterfaceNode::torqueCallback, this, std::placeholders::_1));
 
-    joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
+    joint_state_pub_ =
+        this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", rclcpp::SensorDataQoS());
     task_command_pub_ = this->create_publisher<std_msgs::msg::Int32>("/task_command", 10);
     link_diag_pub_ =
         this->create_publisher<std_msgs::msg::Float64MultiArray>("/hardware_link_diag", 10);

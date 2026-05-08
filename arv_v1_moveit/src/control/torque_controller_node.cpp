@@ -278,7 +278,7 @@ public:
                 "[CONFIG] Dynamic parameter tuning enabled (use 'ros2 param set' to modify)");
 
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-        "/joint_states", 10,
+        "/joint_states", rclcpp::SensorDataQoS(),
         std::bind(&TorqueControllerActionServer::jointStateCallback, this, std::placeholders::_1));
 
     action_server_ = rclcpp_action::create_server<FollowJointTrajectory>(
@@ -291,8 +291,8 @@ public:
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Action server created: /ARM_controller/follow_joint_trajectory");
 
-    torque_pub_ =
-        this->create_publisher<std_msgs::msg::Float64MultiArray>("/effort_controller/commands", 10);
+    torque_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
+        "/effort_controller/commands", rclcpp::SensorDataQoS());
 
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Effort publisher created: /effort_controller/commands (6×Nm + 1×N)");
