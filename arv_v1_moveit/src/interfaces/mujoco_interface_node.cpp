@@ -98,8 +98,8 @@ public:
           std::bind(&MuJoCoInterfaceNode::effortCallback, this, std::placeholders::_1));
       RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /effort_controller/commands");
 
-      joint_state_pub_ =
-          this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", rclcpp::SensorDataQoS());
+      joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
+          "/joint_states", rclcpp::SensorDataQoS());
       RCLCPP_INFO(this->get_logger(), "[OK] Publishing: /joint_states");
 
       auto period = std::chrono::duration<double, std::milli>(1000.0 / sim_frequency_);

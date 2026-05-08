@@ -14,6 +14,7 @@
 #include <kdl/jntarray.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 #include <mutex>
+#include <realtime_tools/realtime_publisher.hpp>  // RT non-blocking publish
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/u_int8.hpp>
@@ -34,15 +35,20 @@ struct SectionStats {
     ++count;
   }
   int64_t avg_us() const { return count ? sum_us / static_cast<int64_t>(count) : 0; }
-  void reset() { min_us = INT64_MAX; max_us = 0; sum_us = 0; count = 0; }
+  void reset() {
+    min_us = INT64_MAX;
+    max_us = 0;
+    sum_us = 0;
+    count = 0;
+  }
 };
 
 struct LoopProfiler {
-  SectionStats total;      // full controlLoop() wall time
-  SectionStats state_lock; // time spent waiting on state_mutex_
-  SectionStats dynamics;   // KDL dynamics computation
-  SectionStats publish;    // safeTorquePublish
-  uint64_t overruns{0};    // loops where total > overrun_threshold_us
+  SectionStats total;       // full controlLoop() wall time
+  SectionStats state_lock;  // time spent waiting on state_mutex_
+  SectionStats dynamics;    // KDL dynamics computation
+  SectionStats publish;     // safeTorquePublish
+  uint64_t overruns{0};     // loops where total > overrun_threshold_us
   int64_t overrun_threshold_us{1500};
 
   // Call at end of each loop iteration.
@@ -57,7 +63,12 @@ struct LoopProfiler {
     return (total.count % print_interval) == 0;
   }
 
-  void reset_all() { total.reset(); state_lock.reset(); dynamics.reset(); publish.reset(); }
+  void reset_all() {
+    total.reset();
+    state_lock.reset();
+    dynamics.reset();
+    publish.reset();
+  }
 };
 
 #include "arv_v1_interfaces/srv/gripper_control.hpp"
@@ -100,8 +111,7 @@ public:
             KalmanFilter1D(1.0 / 1000.0)   // Joint 6
         },
         kalman_filter_enabled_(false),
-        q_dot_filtered_(6)
-  {
+        q_dot_filtered_(6) {
     RCLCPP_INFO(this->get_logger(),
                 "[START] Torque controller node starting (Cascade P+PI Control)");
 
@@ -236,7 +246,7 @@ public:
     // --- 阻抗控制初始化 (J1/J2/J5) ---
     impedance_controller_ = std::make_unique<MultiJointImpedance>(kArmJoints);
     {
-      auto load_imp = [&](size_t idx, const std::string& joint_name) {
+      auto load_imp = [&](size_t idx, const std::string &joint_name) {
         std::string prefix = "impedance." + joint_name;
         this->declare_parameter(prefix + ".K", 0.0);
         this->declare_parameter(prefix + ".D", 0.0);
@@ -246,8 +256,8 @@ public:
         g.D = this->get_parameter(prefix + ".D").as_double();
         g.tau_limit = this->get_parameter(prefix + ".tau_limit").as_double();
         impedance_controller_->setJointGains(idx, g);
-        RCLCPP_INFO(this->get_logger(), "[IMP] %s: K=%.1f D=%.2f limit=%.1f",
-                    joint_name.c_str(), g.K, g.D, g.tau_limit);
+        RCLCPP_INFO(this->get_logger(), "[IMP] %s: K=%.1f D=%.2f limit=%.1f", joint_name.c_str(),
+                    g.K, g.D, g.tau_limit);
       };
       load_imp(0, "joint_1");
       load_imp(1, "joint_2");
@@ -293,9 +303,12 @@ public:
 
     torque_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
         "/effort_controller/commands", rclcpp::SensorDataQoS());
+    rt_torque_pub_ =
+        std::make_unique<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(
+            torque_pub_);
 
     RCLCPP_INFO(this->get_logger(),
-                "[OK] Effort publisher created: /effort_controller/commands (6×Nm + 1×N)");
+                "[OK] Effort publisher created: /effort_controller/commands (RT, BestEffort)");
 
     gripper_service_ = this->create_service<arv_v1_interfaces::srv::GripperControl>(
         "/gripper_control", std::bind(&TorqueControllerActionServer::gripperControlCallback, this,
@@ -367,6 +380,8 @@ private:
   size_t control_loop_count_ = 0;
   rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_;
+  std::unique_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>
+      rt_torque_pub_;
   LoopProfiler loop_prof_;  // timing instrumentation
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_forward_pub_;
   double control_frequency_;
@@ -1092,8 +1107,8 @@ void TorqueControllerActionServer::computeFeedbackTorque(const KDL::JntArray &q_
 
   for (size_t i = 0; i < kArmJoints; i++) {
     if (kUseImpedance_[i]) {
-      tau_fb(i) = impedance_controller_->getJointController(i).compute(
-          pos_ref[i], pos_fdb[i], vel_fdb[i]);
+      tau_fb(i) =
+          impedance_controller_->getJointController(i).compute(pos_ref[i], pos_fdb[i], vel_fdb[i]);
     } else {
       tau_fb(i) = torque_out[i];
     }
@@ -1150,7 +1165,7 @@ bool TorqueControllerActionServer::safeTorquePublish(const KDL::JntArray &tau_ar
     }
   }
   msg.data[kArmJoints] = std::clamp(gripper_force, -gripper_max_torque_, gripper_max_torque_);
-  torque_pub_->publish(msg);
+  rt_torque_pub_->try_publish(msg);
   for (int i = 0; i < kAllJoints; i++) {
     last_valid_torque_[i] = msg.data[i];
   }
@@ -1187,8 +1202,7 @@ void TorqueControllerActionServer::controlLoop() {
   // Call commit() once right before each early return.
   // -----------------------------------------------------------------------
   auto commit = [&]() {
-    int64_t total_us =
-        std::chrono::duration_cast<us>(Clock::now() - t_entry).count();
+    int64_t total_us = std::chrono::duration_cast<us>(Clock::now() - t_entry).count();
 
     bool print_now = loop_prof_.record_and_check(total_us, lock_us, dyn_us, pub_us, 1000);
 
@@ -1199,16 +1213,14 @@ void TorqueControllerActionServer::controlLoop() {
     }
 
     if (print_now) {
-      RCLCPP_INFO(
-          this->get_logger(),
-          "[TIMING/1k] total: min=%ldus avg=%ldus max=%ldus | "
-          "lock: avg=%ldus max=%ldus | dyn: avg=%ldus max=%ldus | "
-          "pub: avg=%ldus max=%ldus | overruns=%lu",
-          loop_prof_.total.min_us, loop_prof_.total.avg_us(), loop_prof_.total.max_us,
-          loop_prof_.state_lock.avg_us(), loop_prof_.state_lock.max_us,
-          loop_prof_.dynamics.avg_us(), loop_prof_.dynamics.max_us,
-          loop_prof_.publish.avg_us(), loop_prof_.publish.max_us,
-          loop_prof_.overruns);
+      RCLCPP_INFO(this->get_logger(),
+                  "[TIMING/1k] total: min=%ldus avg=%ldus max=%ldus | "
+                  "lock: avg=%ldus max=%ldus | dyn: avg=%ldus max=%ldus | "
+                  "pub: avg=%ldus max=%ldus | overruns=%lu",
+                  loop_prof_.total.min_us, loop_prof_.total.avg_us(), loop_prof_.total.max_us,
+                  loop_prof_.state_lock.avg_us(), loop_prof_.state_lock.max_us,
+                  loop_prof_.dynamics.avg_us(), loop_prof_.dynamics.max_us,
+                  loop_prof_.publish.avg_us(), loop_prof_.publish.max_us, loop_prof_.overruns);
       loop_prof_.reset_all();
     }
   };
@@ -1238,7 +1250,7 @@ void TorqueControllerActionServer::controlLoop() {
       path_name = "RELAX";
       {
         const auto t0 = Clock::now();
-        torque_pub_->publish(zero_msg_preallocated_);
+        rt_torque_pub_->try_publish(zero_msg_preallocated_);
         pub_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
       }
       commit();
@@ -1341,7 +1353,7 @@ void TorqueControllerActionServer::controlLoop() {
       RCLCPP_ERROR(this->get_logger(), "[SAFETY] Dynamics exception: %s", e.what());
       std_msgs::msg::Float64MultiArray fallback_msg;
       fallback_msg.data.assign(last_valid_torque_.begin(), last_valid_torque_.end());
-      torque_pub_->publish(fallback_msg);
+      rt_torque_pub_->try_publish(fallback_msg);
       commit();
       return;
     }
@@ -1456,7 +1468,10 @@ void TorqueControllerActionServer::controlLoop() {
 
   {
     const auto tp = Clock::now();
-    if (!safeTorquePublish(tau_arm, grip_force)) { commit(); return; }
+    if (!safeTorquePublish(tau_arm, grip_force)) {
+      commit();
+      return;
+    }
     pub_us = std::chrono::duration_cast<us>(Clock::now() - tp).count();
   }
 
@@ -1616,7 +1631,9 @@ int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
   try {
     auto node = std::make_shared<TorqueControllerActionServer>();
-    rclcpp::spin(node);
+    rclcpp::executors::StaticSingleThreadedExecutor exec;
+    exec.add_node(node);
+    exec.spin();
   } catch (const std::exception &e) {
     RCLCPP_FATAL(rclcpp::get_logger("torque_controller"), "Fatal: %s", e.what());
   }
