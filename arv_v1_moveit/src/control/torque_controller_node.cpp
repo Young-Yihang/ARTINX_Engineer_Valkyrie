@@ -1295,14 +1295,12 @@ void TorqueControllerActionServer::controlLoop() {
                             "[SAFETY] Joint state timeout: %.3fs (limit: %.0f ms)",
                             time_since_last_state, joint_state_timeout_sec_ * 1000.0);
       KDL::JntArray tau_timeout(kArmJoints);
-      try {
+      {
         const auto t0 = Clock::now();
         dynamic_computer_->computeGravityTorque(q_copy, tau_timeout);
         computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy, tau_payload_);
         dyn_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
         for (int i = 0; i < kArmJoints; i++) tau_timeout(i) += tau_payload_(i);
-      } catch (const std::exception &e) {
-        RCLCPP_ERROR(this->get_logger(), "[SAFETY] Cannot compute gravity: %s", e.what());
       }
       {
         const auto t0 = Clock::now();
@@ -1317,7 +1315,7 @@ void TorqueControllerActionServer::controlLoop() {
 
     // --- 控制律计算: G(q) + friction + payload [+ PD] ---
     KDL::JntArray tau_arm(kArmJoints);
-    try {
+    {
       const auto t0 = Clock::now();
       KDL::JntArray tau_gravity(kArmJoints);
       dynamic_computer_->computeGravityTorque(q_copy, tau_gravity);
@@ -1349,13 +1347,6 @@ void TorqueControllerActionServer::controlLoop() {
       }
       for (int i = 0; i < kArmJoints; i++) tau_arm(i) += tau_pd(i);
       dyn_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
-    } catch (const std::exception &e) {
-      RCLCPP_ERROR(this->get_logger(), "[SAFETY] Dynamics exception: %s", e.what());
-      std_msgs::msg::Float64MultiArray fallback_msg;
-      fallback_msg.data.assign(last_valid_torque_.begin(), last_valid_torque_.end());
-      rt_torque_pub_->try_publish(fallback_msg);
-      commit();
-      return;
     }
 
     {
@@ -1442,7 +1433,7 @@ void TorqueControllerActionServer::controlLoop() {
 
   // --- TRACK: M(q_d)*q̈_d + C(q_d,q̇_d) + G(q) + friction + PD + payload ---
   KDL::JntArray tau_arm(kArmJoints);
-  try {
+  {
     const auto t0 = Clock::now();
     KDL::JntSpaceInertiaMatrix M(kArmJoints);
     KDL::JntArray C(kArmJoints), G(kArmJoints), tau_fb(kArmJoints);
@@ -1459,11 +1450,6 @@ void TorqueControllerActionServer::controlLoop() {
       tau_arm(i) = tau_inertia + C(i) + G(i) + computeFrictionTorque(i, qd_filt(i)) + tau_fb(i) +
                    tau_payload_(i);
     }
-  } catch (const std::exception &e) {
-    RCLCPP_ERROR(this->get_logger(), "[SAFETY] Dynamics exception: %s", e.what());
-    emergencyStop("Dynamics computation exception");
-    commit();
-    return;
   }
 
   {

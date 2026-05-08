@@ -501,11 +501,7 @@ private:
       } catch (const std::exception &e) {
         RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                               "[ERROR] Send failed: %s", e.what());
-        try {
-          serial_port_->close();
-        } catch (...) {
-          RCLCPP_DEBUG(this->get_logger(), "Serial port close failed during cleanup");
-        }
+        serial_port_->close();
       }
     };
 
