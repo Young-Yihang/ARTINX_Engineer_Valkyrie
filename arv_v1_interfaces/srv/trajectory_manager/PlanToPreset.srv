@@ -1,0 +1,9 @@
+# PlanToPreset.srv - MoveIt2 在线规划到预设位姿并执行
+# 请求
+string preset_name                 # planning_presets.yaml 中的 key (如 "escape")
+float64 planning_timeout           # 规划超时(秒), 0 表示使用默认 5.0
+---
+# 响应
+bool success
+string message
+float64 duration                   # 轨迹执行时长(秒)

@@ -13,6 +13,7 @@
 
 #include "arv_v1_interfaces/srv/gripper_control.hpp"
 #include "arv_v1_interfaces/srv/load_trajectory.hpp"
+#include "arv_v1_interfaces/srv/plan_to_preset.hpp"
 #include "std_msgs/msg/int32.hpp"
 #include "std_msgs/msg/u_int8.hpp"
 
@@ -24,6 +25,7 @@ constexpr uint8_t ARMED = 2;
 
 using LoadTrajectory = arv_v1_interfaces::srv::LoadTrajectory;
 using GripperControl = arv_v1_interfaces::srv::GripperControl;
+using PlanToPreset = arv_v1_interfaces::srv::PlanToPreset;
 using namespace std::chrono_literals;
 
 struct MissionState {
@@ -47,6 +49,7 @@ public:
 
     load_client_ = create_client<LoadTrajectory>("/load_trajectory");
     gripper_client_ = create_client<GripperControl>("/gripper_control");
+    plan_preset_client_ = create_client<PlanToPreset>("/plan_to_preset");
 
     task_command_sub_ = create_subscription<std_msgs::msg::Int32>(
         "/task_command", 10,
@@ -98,6 +101,7 @@ private:
   // --- ROS2 ---
   rclcpp::Client<LoadTrajectory>::SharedPtr load_client_;
   rclcpp::Client<GripperControl>::SharedPtr gripper_client_;
+  rclcpp::Client<PlanToPreset>::SharedPtr plan_preset_client_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr task_command_sub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr control_mode_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr control_mode_pub_;
@@ -260,12 +264,34 @@ private:
   }
 
   void resetToIdle() {
-    if (!reset_trajectory_.empty()) {
-      executeTrajectoryByKey(reset_trajectory_);
-    } else {
-      current_idx_ = 0;
-      RCLCPP_INFO(get_logger(), "Reset to IDLE.");
+    if (control_mode_ != ControlMode::ARMED) {
+      RCLCPP_WARN(get_logger(), "[RESET_HOME] Not ARMED, ignoring.");
+      return;
     }
+    bool expected = false;
+    if (!executing_.compare_exchange_strong(expected, true)) {
+      RCLCPP_WARN(get_logger(), "[RESET_HOME] Busy, ignoring.");
+      return;
+    }
+
+    std::thread([this]() {
+      auto req = std::make_shared<PlanToPreset::Request>();
+      req->preset_name = "Escape";
+      req->planning_timeout = 5.0;
+      auto fut = plan_preset_client_->async_send_request(req);
+      if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+        auto res = fut.get();
+        if (res->success) {
+          RCLCPP_INFO(get_logger(), "[RESET_HOME] Escaped (%.1fs)", res->duration);
+        } else {
+          RCLCPP_ERROR(get_logger(), "[RESET_HOME] Failed: %s", res->message.c_str());
+        }
+      } else {
+        RCLCPP_ERROR(get_logger(), "[RESET_HOME] Service timeout");
+      }
+      current_idx_ = 0;
+      executing_ = false;
+    }).detach();
   }
 
   // --- Gripper ---

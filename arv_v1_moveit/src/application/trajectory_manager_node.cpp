@@ -16,8 +16,11 @@
 #include <std_msgs/msg/u_int16.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
+#include <moveit/move_group_interface/move_group_interface.hpp>
+
 #include "arv_v1_interfaces/srv/list_trajectories.hpp"
 #include "arv_v1_interfaces/srv/load_trajectory.hpp"
+#include "arv_v1_interfaces/srv/plan_to_preset.hpp"
 #include "arv_v1_interfaces/srv/save_last_trajectory.hpp"
 #include "arv_v1_interfaces/srv/save_trajectory.hpp"
 
@@ -70,6 +73,10 @@ public:
         "/list_trajectories", std::bind(&TrajectoryManagerNode::listTrajectoriesCallback, this,
                                         std::placeholders::_1, std::placeholders::_2));
 
+    plan_preset_srv_ = this->create_service<arv_v1_interfaces::srv::PlanToPreset>(
+        "/plan_to_preset", std::bind(&TrajectoryManagerNode::planToPresetCallback, this,
+                                     std::placeholders::_1, std::placeholders::_2));
+
     RCLCPP_INFO(this->get_logger(), " ");
     RCLCPP_INFO(this->get_logger(), "==============================================");
     RCLCPP_INFO(this->get_logger(), "     Trajectory Manager Node Started");
@@ -80,6 +87,7 @@ public:
     RCLCPP_INFO(this->get_logger(), "  /save_trajectory      - Save specified trajectory");
     RCLCPP_INFO(this->get_logger(), "  /load_trajectory      - Load and execute trajectory");
     RCLCPP_INFO(this->get_logger(), "  /list_trajectories    - List saved trajectories");
+    RCLCPP_INFO(this->get_logger(), "  /plan_to_preset       - Plan & execute to SRDF named target");
     RCLCPP_INFO(this->get_logger(), " ");
     RCLCPP_INFO(this->get_logger(), "Usage:");
     RCLCPP_INFO(this->get_logger(), "  1. Plan and execute in RViz");
@@ -108,6 +116,10 @@ private:
   rclcpp::Service<arv_v1_interfaces::srv::SaveLastTrajectory>::SharedPtr save_last_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::LoadTrajectory>::SharedPtr load_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::ListTrajectories>::SharedPtr list_srv_;
+  rclcpp::Service<arv_v1_interfaces::srv::PlanToPreset>::SharedPtr plan_preset_srv_;
+
+  std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
+  bool move_group_ready_ = false;
 
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -458,6 +470,102 @@ private:
       response->success = false;
       response->message = std::string("Exception: ") + e.what();
       RCLCPP_ERROR(this->get_logger(), "[LoadTrajectory] Error: %s", e.what());
+    }
+  }
+
+  bool ensureMoveGroup() {
+    if (move_group_ready_) return true;
+    try {
+      move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
+          shared_from_this(), "ARM");
+      move_group_ready_ = true;
+      RCLCPP_INFO(this->get_logger(), "[PlanToPreset] MoveGroupInterface initialized (group=ARM)");
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(this->get_logger(), "[PlanToPreset] MoveGroupInterface init failed: %s",
+                   e.what());
+    }
+    return move_group_ready_;
+  }
+
+  void planToPresetCallback(
+      const std::shared_ptr<arv_v1_interfaces::srv::PlanToPreset::Request> request,
+      std::shared_ptr<arv_v1_interfaces::srv::PlanToPreset::Response> response) {
+    RCLCPP_INFO(this->get_logger(), "[PlanToPreset] Request: preset='%s', timeout=%.1fs",
+                request->preset_name.c_str(), request->planning_timeout);
+
+    if (!ensureMoveGroup()) {
+      response->success = false;
+      response->message = "MoveGroupInterface not available (move_group node running?)";
+      return;
+    }
+
+    double timeout = request->planning_timeout > 0.0 ? request->planning_timeout : 5.0;
+    move_group_->setPlanningTime(timeout);
+
+    if (!move_group_->setNamedTarget(request->preset_name)) {
+      response->success = false;
+      response->message = "Unknown preset: " + request->preset_name;
+      return;
+    }
+
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    auto result = move_group_->plan(plan);
+    if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+      response->success = false;
+      response->message = "Planning failed (code=" + std::to_string(result.val) + ")";
+      RCLCPP_WARN(this->get_logger(), "[PlanToPreset] %s", response->message.c_str());
+      return;
+    }
+
+    auto& traj = plan.trajectory.joint_trajectory;
+    double duration = 0.0;
+    if (!traj.points.empty()) {
+      auto& last = traj.points.back().time_from_start;
+      duration = last.sec + last.nanosec * 1e-9;
+    }
+    RCLCPP_INFO(this->get_logger(), "[PlanToPreset] Planned %zu points, duration=%.2fs",
+                traj.points.size(), duration);
+
+    if (!action_client_->wait_for_action_server(std::chrono::seconds(2))) {
+      response->success = false;
+      response->message = "Action server not available";
+      return;
+    }
+
+    auto goal = FollowJointTrajectory::Goal();
+    goal.trajectory = traj;
+
+    auto future = action_client_->async_send_goal(goal);
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+      response->success = false;
+      response->message = "Goal send timeout";
+      return;
+    }
+
+    auto goal_handle = future.get();
+    if (!goal_handle) {
+      response->success = false;
+      response->message = "Goal rejected by action server";
+      return;
+    }
+
+    auto result_future = action_client_->async_get_result(goal_handle);
+    auto wait_duration = std::chrono::duration<double>(duration + 5.0);
+    if (result_future.wait_for(wait_duration) != std::future_status::ready) {
+      response->success = false;
+      response->message = "Execution timeout";
+      return;
+    }
+
+    auto action_result = result_future.get();
+    if (action_result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+      response->success = true;
+      response->message = "Executed to preset: " + request->preset_name;
+      response->duration = duration;
+    } else {
+      response->success = false;
+      response->message = "Execution failed (result_code=" +
+                          std::to_string(static_cast<int>(action_result.code)) + ")";
     }
   }
 

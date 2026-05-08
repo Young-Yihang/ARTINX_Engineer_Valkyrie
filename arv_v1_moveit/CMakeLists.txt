@@ -295,6 +295,7 @@ ament_target_dependencies(trajectory_manager_node
   trajectory_msgs
   control_msgs
   arv_v1_interfaces
+  moveit_ros_planning_interface
 )
 
 # -------------------------------------------
