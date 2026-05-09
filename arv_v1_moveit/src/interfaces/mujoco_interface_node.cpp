@@ -1351,9 +1351,8 @@ void MuJoCoInterfaceNode::drawTargetMarker() {
       std::memcpy(base_p, data_->xpos + 3 * base_id, 3 * sizeof(double));
       std::memcpy(base_m, data_->xmat + 9 * base_id, 9 * sizeof(double));
     } else {
-      // URDF world_fixed: <origin xyz="-0.05 0 0.15" rpy="0 0 0"/>
-      // 若 URDF 改了这里必须同步修正 kWorldBaseOffset
-      static constexpr double kWorldBaseOffset[3] = {-0.05, 0.0, 0.15};
+      // URDF world_fixed: <origin xyz="-0.05 0 0.295" rpy="0 0 0"/>
+      static constexpr double kWorldBaseOffset[3] = {-0.05, 0.0, 0.295};
       RCLCPP_WARN_ONCE(this->get_logger(),
                        "[draw] base_link body not found, falling back to URDF world_fixed offset");
       int link1_id = mj_name2id(model_, mjOBJ_BODY, "link1");
