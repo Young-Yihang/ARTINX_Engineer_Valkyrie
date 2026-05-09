@@ -22,7 +22,7 @@ from rcl_interfaces.msg import Log
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import UInt8, Int32
-from arv_v1_interfaces.srv import GripperControl, ListTrajectories, LoadTrajectory
+from arv_v1_interfaces.srv import GripperControl, ListTrajectories, LoadTrajectory, SaveLastTrajectory
 
 ctk.set_appearance_mode("dark")
 
@@ -101,6 +101,7 @@ class PanelNode(Node):
         self.gripper_cli = self.create_client(GripperControl, "/gripper_control")
         self.list_cli = self.create_client(ListTrajectories, "/list_trajectories")
         self.load_cli = self.create_client(LoadTrajectory, "/load_trajectory")
+        self.save_last_cli = self.create_client(SaveLastTrajectory, "/save_last_trajectory")
 
     def _js_cb(self, msg):
         with self._lock:
@@ -156,6 +157,12 @@ class PanelNode(Node):
         req = LoadTrajectory.Request(); req.name = name; req.execute = True
         res = self._wait_future(self.load_cli.call_async(req), 120.0)
         return ("OK" if res.success else res.message) if res else "timeout"
+
+    def call_save_last_trajectory(self, name, description=""):
+        if not self.save_last_cli.wait_for_service(timeout_sec=0.5): return "service not ready"
+        req = SaveLastTrajectory.Request(); req.name = name; req.description = description
+        res = self._wait_future(self.save_last_cli.call_async(req), 5.0)
+        return ("OK: " + res.saved_path if res.success else res.message) if res else "timeout"
 
 
 # ── GUI ────────────────────────────────────────────────
@@ -305,14 +312,18 @@ class MissionPanel:
 
         tb = ctk.CTkFrame(tc, fg_color="transparent")
         tb.grid(row=2, column=0, sticky="ew", padx=12, pady=(4, 10))
-        ctk.CTkButton(tb, text="Refresh", width=100, height=36,
+        ctk.CTkButton(tb, text="Refresh", width=80, height=36,
                       fg_color=BTN_ALT, hover_color=BTN_ALT_HOVER, text_color=BTN_TEXT,
                       font=ctk.CTkFont(size=13),
                       command=self._refresh_trajs).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(tb, text="Execute", width=100, height=36,
+        ctk.CTkButton(tb, text="Execute", width=80, height=36,
                       font=ctk.CTkFont(size=13, weight="bold"),
                       fg_color=BTN_OK, hover_color=BTN_OK_HOVER, text_color=BTN_TEXT,
-                      command=self._exec_traj).pack(side="left")
+                      command=self._exec_traj).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(tb, text="Save Last", width=90, height=36,
+                      font=ctk.CTkFont(size=13),
+                      fg_color=BTN_ALT, hover_color=BTN_ALT_HOVER, text_color=BTN_TEXT,
+                      command=self._save_last_traj).pack(side="left")
 
         # ═══════ ROW 2: Log (full width) ═══════
 
@@ -365,6 +376,20 @@ class MissionPanel:
             color = GREEN if res == "OK" else RED
             self._traj_status.configure(text=f"{name}: {res}", text_color=color)
         self._async(lambda: self._node.call_execute_trajectory(name), done)
+
+    def _save_last_traj(self):
+        dialog = ctk.CTkInputDialog(text="Trajectory name:", title="Save Last Trajectory")
+        name = dialog.get_input()
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        self._traj_status.configure(text="saving...", text_color=LAVENDER)
+        def done(res):
+            color = GREEN if res.startswith("OK") else RED
+            self._traj_status.configure(text=res, text_color=color)
+            if res.startswith("OK"):
+                self._refresh_trajs()
+        self._async(lambda: self._node.call_save_last_trajectory(name), done)
 
     # ── Periodic Update ──
 
