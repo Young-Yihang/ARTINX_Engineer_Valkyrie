@@ -2,6 +2,7 @@
 # 请求
 string preset_name                 # planning_presets.yaml 中的 key (如 "escape")
 float64 planning_timeout           # 规划超时(秒), 0 表示使用默认 5.0
+float64 speed_factor               # 速度/加速度缩放 (0~1], 0 表示使用默认 0.3
 ---
 # 响应
 bool success

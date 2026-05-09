@@ -426,6 +426,11 @@ private:
           return;
         }
 
+        // TODO: 支持 speed_factor 缩放轨迹时间戳 (LoadTrajectory.srv 加 float64 speed_factor)
+        // for (auto& pt : trajectory.points) {
+        //   double t = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9;
+        //   pt.time_from_start = rclcpp::Duration::from_seconds(t / speed_factor);
+        // }
         auto goal = FollowJointTrajectory::Goal();
         goal.trajectory = trajectory;
 
@@ -500,7 +505,12 @@ private:
     }
 
     double timeout = request->planning_timeout > 0.0 ? request->planning_timeout : 5.0;
+    double speed = (request->speed_factor > 0.0 && request->speed_factor <= 1.0)
+                       ? request->speed_factor
+                       : 0.3;
     move_group_->setPlanningTime(timeout);
+    move_group_->setMaxVelocityScalingFactor(speed);
+    move_group_->setMaxAccelerationScalingFactor(speed);
 
     if (!move_group_->setNamedTarget(request->preset_name)) {
       response->success = false;

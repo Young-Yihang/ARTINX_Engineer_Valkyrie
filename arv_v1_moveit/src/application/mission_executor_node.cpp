@@ -278,6 +278,7 @@ private:
       auto req = std::make_shared<PlanToPreset::Request>();
       req->preset_name = "Escape";
       req->planning_timeout = 5.0;
+      req->speed_factor = 1.0;
       auto fut = plan_preset_client_->async_send_request(req);
       if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
         auto res = fut.get();
