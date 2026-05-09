@@ -76,7 +76,7 @@ CartesianControllerNode::CartesianControllerNode() : Node("cartesian_controller_
   status_pub_ = this->create_publisher<std_msgs::msg::String>("/cartesian_controller/status", 10);
 
   js_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-      "/joint_states", 10,
+      "/joint_states", rclcpp::SensorDataQoS(),
       std::bind(&CartesianControllerNode::jointStateCallback, this, std::placeholders::_1));
 
   pose_target_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
