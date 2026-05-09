@@ -6,6 +6,7 @@ arv_v1_moveit/third_party/imgui_backends/
 arv_v1_moveit/third_party/implot/
 
 .cache
+build
 
 # 不公开的文档和项目指令
 docs/
