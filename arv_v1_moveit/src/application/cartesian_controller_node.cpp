@@ -26,6 +26,16 @@ using MoveToCartesianRPY = arv_v1_interfaces::srv::MoveToCartesianRPY;
 
 static constexpr int kArmJoints = 6;
 
+static void quaternionToRotMatrix(const tf2::Quaternion& q, double R[9]) {
+  tf2::Matrix3x3 mat(q);
+  for (int i = 0; i < 3; i++) {
+    tf2::Vector3 row = mat.getRow(i);
+    R[i * 3 + 0] = row.x();
+    R[i * 3 + 1] = row.y();
+    R[i * 3 + 2] = row.z();
+  }
+}
+
 class CartesianControllerNode : public rclcpp::Node {
 public:
   CartesianControllerNode();
@@ -55,7 +65,8 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::TimerBase::SharedPtr pose_publish_timer_;
 
-  // --- Service LIN mode ---
+  // --- Service LIN mode (runs in dedicated callback group to avoid executor self-deadlock) ---
+  rclcpp::CallbackGroup::SharedPtr srv_cbg_;
   rclcpp::Service<MoveToCartesianRPY>::SharedPtr cartesian_srv_;
   rclcpp_action::Client<FollowJointTrajectory>::SharedPtr action_client_;
   std::atomic<bool> action_executing_{false};
@@ -100,12 +111,15 @@ CartesianControllerNode::CartesianControllerNode() : Node("cartesian_controller_
   pose_publish_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(33), std::bind(&CartesianControllerNode::publishCurrentPose, this));
 
+  srv_cbg_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   action_client_ = rclcpp_action::create_client<FollowJointTrajectory>(
-      this, "ARM_controller/follow_joint_trajectory");
+      this, "ARM_controller/follow_joint_trajectory", srv_cbg_);
 
   cartesian_srv_ = this->create_service<MoveToCartesianRPY>(
-      "/move_to_cartesian_rpy", std::bind(&CartesianControllerNode::moveToCartesianCallback, this,
-                                          std::placeholders::_1, std::placeholders::_2));
+      "/move_to_cartesian_rpy",
+      std::bind(&CartesianControllerNode::moveToCartesianCallback, this, std::placeholders::_1,
+                std::placeholders::_2),
+      rclcpp::ServicesQoS(), srv_cbg_);
 
   RCLCPP_INFO(this->get_logger(),
               "Cartesian IK node initialized (servo + LIN service, L2=%.3f L3=%.3f tcp=%.3f)",
@@ -152,18 +166,11 @@ void CartesianControllerNode::poseTargetCallback(
     return;
   }
 
-  // Extract rotation matrix (row-major) from quaternion
   tf2::Quaternion quat(msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z,
                        msg->pose.orientation.w);
   quat.normalize();
-  tf2::Matrix3x3 rot_mat(quat);
   double R[9];
-  for (int i = 0; i < 3; i++) {
-    tf2::Vector3 row = rot_mat.getRow(i);
-    R[i * 3 + 0] = row.x();
-    R[i * 3 + 1] = row.y();
-    R[i * 3 + 2] = row.z();
-  }
+  quaternionToRotMatrix(quat, R);
 
   double p[3] = {msg->pose.position.x, msg->pose.position.y, msg->pose.position.z};
 
@@ -252,7 +259,6 @@ void CartesianControllerNode::moveToCartesianCallback(
     return;
   }
 
-  // Get current pose from TF (start of LIN)
   geometry_msgs::msg::TransformStamped tf_start;
   try {
     tf_start =
@@ -268,25 +274,21 @@ void CartesianControllerNode::moveToCartesianCallback(
   tf2::Quaternion q_start(tf_start.transform.rotation.x, tf_start.transform.rotation.y,
                           tf_start.transform.rotation.z, tf_start.transform.rotation.w);
 
-  // Goal pose
   double p_goal[3] = {request->x, request->y, request->z};
   tf2::Quaternion q_goal;
   q_goal.setRPY(request->roll, request->pitch, request->yaw);
 
-  // Cartesian distance → sample count
   double dx = p_goal[0] - p_start[0], dy = p_goal[1] - p_start[1], dz = p_goal[2] - p_start[2];
   double cart_dist = std::sqrt(dx * dx + dy * dy + dz * dz);
   constexpr double kStepSize = 0.005;
   int N = std::max(2, std::min(200, static_cast<int>(std::ceil(cart_dist / kStepSize))));
 
-  // Velocity scaling
   double vel_scale = (request->velocity_scaling > 0.0 && request->velocity_scaling <= 1.0)
                        ? request->velocity_scaling
                        : 0.3;
   constexpr double kMaxCartVel = 0.5;
   double total_duration = std::max(0.5, cart_dist / (kMaxCartVel * vel_scale));
 
-  // Build LIN trajectory: interpolate in Cartesian, solve IK per point
   trajectory_msgs::msg::JointTrajectory traj;
   traj.joint_names = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"};
 
@@ -299,25 +301,35 @@ void CartesianControllerNode::moveToCartesianCallback(
   for (int step = 0; step <= N; step++) {
     double t = static_cast<double>(step) / N;
 
-    // Position: linear interpolation
     double p_i[3] = {p_start[0] + t * dx, p_start[1] + t * dy, p_start[2] + t * dz};
 
-    // Orientation: slerp
     tf2::Quaternion q_i = q_start.slerp(q_goal, t);
     q_i.normalize();
-    tf2::Matrix3x3 rot_i(q_i);
     double R_i[9];
-    for (int r = 0; r < 3; r++) {
-      tf2::Vector3 row = rot_i.getRow(r);
-      R_i[r * 3 + 0] = row.x();
-      R_i[r * 3 + 1] = row.y();
-      R_i[r * 3 + 2] = row.z();
-    }
+    quaternionToRotMatrix(q_i, R_i);
 
     IKResult ik = ik_.solve(R_i, p_i, q_seed);
     if (!ik.valid) {
       response->success = false;
-      response->message = "IK failed at step " + std::to_string(step) + "/" + std::to_string(N);
+      // 诊断: 尝试无限位约束求解，找出哪个关节超限
+      double diag_msg_buf[128];
+      std::string diag;
+      IKResult ik_unclamped = ik_.solveUnclamped(R_i, p_i, q_seed);
+      if (ik_unclamped.valid) {
+        for (int j = 0; j < kArmJoints; j++) {
+          if (ik_unclamped.q[j] < AnalyticalIK::kJointLower[j] ||
+              ik_unclamped.q[j] > AnalyticalIK::kJointUpper[j]) {
+            diag += " J" + std::to_string(j + 1) + "=" +
+                    std::to_string(ik_unclamped.q[j]).substr(0, 6) + "(lim[" +
+                    std::to_string(AnalyticalIK::kJointLower[j]).substr(0, 5) + "," +
+                    std::to_string(AnalyticalIK::kJointUpper[j]).substr(0, 5) + "])";
+          }
+        }
+      }
+      response->message = "IK failed at step " + std::to_string(step) + "/" +
+                          std::to_string(N) + " t=" + std::to_string(t).substr(0, 4) +
+                          (diag.empty() ? " (unreachable)" : " limit:" + diag);
+      RCLCPP_WARN(this->get_logger(), "[LIN] %s", response->message.c_str());
       return;
     }
 
@@ -329,7 +341,6 @@ void CartesianControllerNode::moveToCartesianCallback(
     for (int i = 0; i < kArmJoints; i++) q_seed[i] = ik.q[i];
   }
 
-  // Send via action
   if (!action_client_->wait_for_action_server(std::chrono::seconds(2))) {
     response->success = false;
     response->message = "Action server not available";
@@ -403,7 +414,7 @@ void CartesianControllerNode::publishStatus(const std::string& status) {
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<CartesianControllerNode>();
-  rclcpp::executors::SingleThreadedExecutor executor;
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
   executor.add_node(node);
   executor.spin();
   rclcpp::shutdown();

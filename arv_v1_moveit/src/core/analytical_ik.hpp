@@ -22,6 +22,36 @@ public:
   static constexpr double kJointLower[6] = {-1.2217, 0.49, -0.90, -2.975, -1.5708, -1e9};
   static constexpr double kJointUpper[6] = {1.2217, 3.14, 0.70, 3.14, 1.5708, 1e9};
 
+  /// Solve IK without joint limit filtering (for diagnostics — reports what joints exceed limits).
+  IKResult solveUnclamped(const double R_target[9], const double p_target[3],
+                          const double q_seed[6]) const {
+    double pw[3] = {p_target[0] - kDtcp * R_target[2], p_target[1] - kDtcp * R_target[5],
+                    p_target[2] - kDtcp * R_target[8]};
+    IKResult best;
+    double best_cost = kInfCost;
+    double q1_candidates[2];
+    int n_q1 = generateQ1(pw, q_seed[0], q1_candidates);
+    for (int iq1 = 0; iq1 < n_q1; iq1++) {
+      double q1 = q1_candidates[iq1];
+      for (int elbow = 0; elbow < 2; elbow++) {
+        double q2, q3;
+        if (!solvePosition(pw, q1, elbow, q2, q3)) continue;
+        for (int wrist_sign = 0; wrist_sign < 2; wrist_sign++) {
+          double q4, q5, q6;
+          if (!solveOrientation(R_target, q1, q2, q3, wrist_sign, q_seed, q4, q5, q6)) continue;
+          std::array<double, 6> q_cand = {q1, q2, q3, q4, q5, q6};
+          double cost = solutionCost(q_cand, q_seed);
+          if (cost < best_cost) {
+            best_cost = cost;
+            best.q = q_cand;
+            best.valid = true;
+          }
+        }
+      }
+    }
+    return best;
+  }
+
   /// Solve IK given target rotation (row-major 3x3) and position, using seed for multi-solution.
   IKResult solve(const double R_target[9], const double p_target[3], const double q_seed[6]) const {
     // Wrist center: pw = p - d_tcp * R[:,2]
