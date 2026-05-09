@@ -45,6 +45,7 @@ POS_STEPS = [0.001, 0.005, 0.01]
 ANG_STEPS = [0.01, 0.05, 0.1]
 
 PLANNERS = {
+    "Direct IK": ("direct", ""),
     "LIN (Pilz)": ("pilz_industrial_motion_planner", "LIN"),
     "PTP (Pilz)": ("pilz_industrial_motion_planner", "PTP"),
     "RRTConnect": ("ompl", "RRTConnect"),
@@ -158,6 +159,7 @@ class StateListener(Node):
         self.joints = None
         self._lock = threading.Lock()
         self.create_subscription(JointState, "/joint_states", self._cb, 10)
+        self.cart_pub = self.create_publisher(PoseStamped, "/cartesian_target_pose", 10)
 
     def _cb(self, msg):
         if len(msg.position) >= 6:
@@ -756,7 +758,33 @@ class ArmPlanningTool:
             pts.append(transforms["tcp"][:3, 3])
         return np.array(pts) if pts else None
 
+    def _do_direct_ik(self):
+        """Bypass MoveIt: publish target pose to /cartesian_target_pose (analytical IK servo)."""
+        if self._get_tab() == "joint":
+            self._set_status("Direct IK: only works in Cartesian tab", RED)
+            return False
+        gx = self._cart_vars["X"][0].get()
+        gy = self._cart_vars["Y"][0].get()
+        gz = self._cart_vars["Z"][0].get()
+        pose = PoseStamped()
+        pose.header.frame_id = REF_FRAME
+        pose.header.stamp = self._listener.get_clock().now().to_msg()
+        pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = gx, gy, gz
+        q = quat_from_rpy(self._cart_vars["Roll"][0].get(),
+                          self._cart_vars["Pitch"][0].get(),
+                          self._cart_vars["Yaw"][0].get())
+        pose.pose.orientation.x, pose.pose.orientation.y = q[0], q[1]
+        pose.pose.orientation.z, pose.pose.orientation.w = q[2], q[3]
+        self._listener.cart_pub.publish(pose)
+        self._goal_xyz = [gx, gy, gz]
+        self._3d_dirty = True
+        self._set_status(f"Direct IK → ({gx:.3f}, {gy:.3f}, {gz:.3f})", GREEN)
+        return True
+
     def _do_plan(self):
+        label = self._planner_var.get()
+        if label == "Direct IK":
+            return self._do_direct_ik()
         self._set_status("Planning...", BLUE)
         try:
             self._set_goal()
