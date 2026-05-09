@@ -759,7 +759,6 @@ class ArmPlanningTool:
         return np.array(pts) if pts else None
 
     def _do_direct_ik(self):
-        """Call /move_to_cartesian_rpy service (analytical IK LIN, recordable)."""
         if self._get_tab() == "joint":
             self._set_status("Direct LIN: only works in Cartesian tab", RED)
             return False
@@ -781,8 +780,12 @@ class ArmPlanningTool:
         req.async_execution = False
         self._set_status("Direct LIN executing...", BLUE)
         future = self._cart_srv.call_async(req)
-        rclpy.spin_until_future_complete(self._listener, future, timeout_sec=30.0)
-        if future.result() is None:
+        # Node is already spinning in background thread; just wait on future
+        import time
+        deadline = time.monotonic() + 30.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not future.done() or future.result() is None:
             self._set_status("Service call timeout", RED)
             return False
         res = future.result()
@@ -883,24 +886,33 @@ class ArmPlanningTool:
             with psm.read_only() as scene:
                 state = scene.current_state
                 joints = list(state.get_joint_group_positions(PLANNING_GROUP))
-                pose = state.get_pose(EE_LINK)
+                # get_global_link_transform returns 4x4 in model(world) frame
+                T_tcp = state.get_global_link_transform(EE_LINK)
+                T_base = state.get_global_link_transform("base_link")
+                # tcp in base_link frame = T_base^{-1} * T_tcp
+                T_rel = np.linalg.inv(T_base) @ T_tcp
+                pose_xyz = T_rel[:3, 3]
+                pose_rot = T_rel[:3, :3]
         except Exception:
             joints = self._listener.get_joints()
-            pose = None
+            pose_xyz = None
+            pose_rot = None
 
         if joints:
             for i in range(6):
                 self._joint_vars[i][0].set(round(joints[i], 4))
-        if pose:
-            self._cart_vars["X"][0].set(round(pose.position.x, 4))
-            self._cart_vars["Y"][0].set(round(pose.position.y, 4))
-            self._cart_vars["Z"][0].set(round(pose.position.z, 4))
-            r, p, y = rpy_from_quat(pose.orientation.x, pose.orientation.y,
-                                     pose.orientation.z, pose.orientation.w)
+        if pose_xyz is not None:
+            self._cart_vars["X"][0].set(round(float(pose_xyz[0]), 4))
+            self._cart_vars["Y"][0].set(round(float(pose_xyz[1]), 4))
+            self._cart_vars["Z"][0].set(round(float(pose_xyz[2]), 4))
+            # RPY from rotation matrix (ZYX convention)
+            r = math.atan2(pose_rot[2, 1], pose_rot[2, 2])
+            p = math.atan2(-pose_rot[2, 0], math.sqrt(pose_rot[2, 1]**2 + pose_rot[2, 2]**2))
+            y = math.atan2(pose_rot[1, 0], pose_rot[0, 0])
             self._cart_vars["Roll"][0].set(round(r, 4))
             self._cart_vars["Pitch"][0].set(round(p, 4))
             self._cart_vars["Yaw"][0].set(round(y, 4))
-            self._set_status("Loaded current pose", GREEN)
+            self._set_status("Loaded current pose (base_link frame)", GREEN)
         elif joints:
             self._set_status("Loaded joints (no FK)", YELLOW)
         else:
