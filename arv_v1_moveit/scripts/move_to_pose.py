@@ -905,10 +905,21 @@ class ArmPlanningTool:
             self._cart_vars["X"][0].set(round(float(pose_xyz[0]), 4))
             self._cart_vars["Y"][0].set(round(float(pose_xyz[1]), 4))
             self._cart_vars["Z"][0].set(round(float(pose_xyz[2]), 4))
-            # RPY from rotation matrix (ZYX convention)
-            r = math.atan2(pose_rot[2, 1], pose_rot[2, 2])
-            p = math.atan2(-pose_rot[2, 0], math.sqrt(pose_rot[2, 1]**2 + pose_rot[2, 2]**2))
-            y = math.atan2(pose_rot[1, 0], pose_rot[0, 0])
+            # RPY from rotation matrix (ZYX convention) — pick solution closest to current UI values
+            r1 = math.atan2(pose_rot[2, 1], pose_rot[2, 2])
+            p1 = math.atan2(-pose_rot[2, 0], math.sqrt(pose_rot[2, 1]**2 + pose_rot[2, 2]**2))
+            y1 = math.atan2(pose_rot[1, 0], pose_rot[0, 0])
+            # Equivalent second solution
+            r2 = r1 + (math.pi if r1 < 0 else -math.pi)
+            p2 = math.pi - p1 if p1 >= 0 else -math.pi - p1
+            y2 = y1 + (math.pi if y1 < 0 else -math.pi)
+            # Pick closer to current input
+            r_cur = self._cart_vars["Roll"][0].get()
+            p_cur = self._cart_vars["Pitch"][0].get()
+            y_cur = self._cart_vars["Yaw"][0].get()
+            cost1 = (r1 - r_cur)**2 + (p1 - p_cur)**2 + (y1 - y_cur)**2
+            cost2 = (r2 - r_cur)**2 + (p2 - p_cur)**2 + (y2 - y_cur)**2
+            r, p, y = (r1, p1, y1) if cost1 <= cost2 else (r2, p2, y2)
             self._cart_vars["Roll"][0].set(round(r, 4))
             self._cart_vars["Pitch"][0].set(round(p, 4))
             self._cart_vars["Yaw"][0].set(round(y, 4))
