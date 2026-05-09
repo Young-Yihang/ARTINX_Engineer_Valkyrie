@@ -1,4 +1,5 @@
-# 控制器参数 | 修改后执行 ./reload_params.sh 热重载
+# 仿真参数 (MuJoCo dynamics) | 修改后执行 ./reload_params.sh 热重载
+# 对应文件: controller_params_hw.yaml (真机版本)
 #控制律: τ = 动力学前馈(M+C+G) + 摩擦前馈(fc·fal+fv·q̇) + cascade PD+PI + 载荷补偿
 
 /torque_controller_action_server:

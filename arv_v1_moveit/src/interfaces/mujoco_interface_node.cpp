@@ -39,15 +39,19 @@ public:
         visualization_only_(false) {
     RCLCPP_INFO(this->get_logger(), "[START] MuJoCo interface node starting");
 
+    this->declare_parameter("sim_mode", true);
     this->declare_parameter("visualization_only", false);
-    visualization_only_ = this->get_parameter("visualization_only").as_bool();
+    sim_mode_ = this->get_parameter("sim_mode").as_bool();
+    bool viz_only_explicit = this->get_parameter("visualization_only").as_bool();
+    visualization_only_ = !sim_mode_ || viz_only_explicit;
 
     if (visualization_only_) {
       RCLCPP_INFO(this->get_logger(),
-                  "[MODE] Digital Twin - visualization only (subscribing /joint_states)");
+                  "[MODE] Digital Twin (sim_mode=%s, no scene obstacles)",
+                  sim_mode_ ? "true" : "false");
     } else {
       RCLCPP_INFO(this->get_logger(),
-                  "[MODE] Physics Simulation (subscribing /effort_controller/commands)");
+                  "[MODE] Physics Simulation (sim_mode=true, full scene)");
     }
 
     try {
@@ -172,6 +176,7 @@ private:
   rclcpp::TimerBase::SharedPtr sim_timer_;
 
   // ========== 运行模式 ==========
+  bool sim_mode_;            // true=full sim with scene, false=digital-twin (no scene)
   bool visualization_only_;  // true=digital-twin, false=physics-sim
 
   // ========== 配置 ==========
@@ -386,12 +391,15 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
   size_t mujoco_end = mjcf_string.find("</mujoco>");
   mjcf_string.insert(mujoco_end, actuator_mjcf);
 
-  // 注入障碍物 (碰撞由下方 contype/conaffinity 统一设置)
-  std::string obstacle_mjcf = buildObstacleMJCF();
-  if (!obstacle_mjcf.empty()) {
-    mujoco_end = mjcf_string.find("</mujoco>");
-    mjcf_string.insert(mujoco_end, obstacle_mjcf);
-    RCLCPP_INFO(this->get_logger(), "[OK] Scene obstacles injected into MJCF");
+  if (sim_mode_) {
+    std::string obstacle_mjcf = buildObstacleMJCF();
+    if (!obstacle_mjcf.empty()) {
+      mujoco_end = mjcf_string.find("</mujoco>");
+      mjcf_string.insert(mujoco_end, obstacle_mjcf);
+      RCLCPP_INFO(this->get_logger(), "[OK] Scene obstacles injected into MJCF");
+    }
+  } else {
+    RCLCPP_INFO(this->get_logger(), "[INFO] Hardware mode: scene obstacles skipped");
   }
 
   // 提升 ambient 光照 (MuJoCo 默认 ambient=0 导致背光面全黑)
@@ -557,9 +565,10 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
 
   RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo model loaded successfully");
 
-  // mj_forward 使 data_->xpos 有效 (collectMagnetAnchors 需要)
   mj_forward(model_, data_);
-  collectMagnetAnchors();
+  if (sim_mode_) {
+    collectMagnetAnchors();
+  }
 
   return true;
 }

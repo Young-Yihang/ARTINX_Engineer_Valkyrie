@@ -381,7 +381,7 @@ start_node() {
 
 # ========== 模式1: 纯仿真 ==========
 start_sim_mode() {
-    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
+    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params_sim.yaml"
     local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
     STEP_CURRENT=0; STEP_TOTAL=6
 
@@ -396,7 +396,7 @@ start_sim_mode() {
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
 
     update_status "MuJoCo (仿真)"
-    start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node" 2
+    start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p sim_mode:=true" 2
 
     update_status "TrajectoryManager"
     start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node --ros-args -p trajectory_dir:=$WORKSPACE_DIR/src/arv_v1_moveit/config/trajectories" 1
@@ -413,7 +413,7 @@ start_sim_mode() {
 
 # ========== 模式2: 串口 + 数字孪生 ==========
 start_serial_mode() {
-    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
+    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params_hw.yaml"
     local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
     STEP_CURRENT=0; STEP_TOTAL=7
 
@@ -436,7 +436,7 @@ start_serial_mode() {
     start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE" 2
 
     update_status "MuJoCo (数字孪生)"
-    start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true" 2
+    start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p sim_mode:=false" 2
 
     update_status "TrajectoryManager"
     start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node --ros-args -p trajectory_dir:=$WORKSPACE_DIR/src/arv_v1_moveit/config/trajectories" 1

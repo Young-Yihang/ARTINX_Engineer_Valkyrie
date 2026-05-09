@@ -53,7 +53,7 @@ def launch_setup(context, *args, **kwargs):
     # --- Parameter snapshot ---
     pkg_share = get_package_share_directory("arv_v1_moveit")
     config_dir = os.path.join(pkg_share, "config")
-    for yaml_name in ["controller_params.yaml", "cartesian_controller_param.yaml"]:
+    for yaml_name in ["controller_params_hw.yaml", "cartesian_controller_param.yaml"]:
         src = os.path.join(config_dir, yaml_name)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(session_dir, yaml_name))
@@ -64,7 +64,7 @@ def launch_setup(context, *args, **kwargs):
     ).to_moveit_configs()
 
     ws_src = os.path.expanduser("~/ros2_ws/src/arv_v1_moveit/config")
-    controller_params = os.path.join(ws_src, "controller_params.yaml")
+    controller_params = os.path.join(ws_src, "controller_params_hw.yaml")
     cartesian_params = os.path.join(ws_src, "cartesian_controller_param.yaml")
     trajectory_dir = os.path.join(ws_src, "trajectories")
 
