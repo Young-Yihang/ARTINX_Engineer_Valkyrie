@@ -1,21 +1,28 @@
 /// @file cartesian_controller_node.cpp
-/// @brief Cartesian IK servo: pose → analytical IK → joint target. Zero-iteration closed-form.
+/// @brief Cartesian IK servo + LIN trajectory service. Zero-iteration closed-form IK.
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
 #include <cmath>
+#include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <functional>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <mutex>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include "analytical_ik.hpp"
+#include "arv_v1_interfaces/srv/move_to_cartesian_rpy.hpp"
+
+using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
+using MoveToCartesianRPY = arv_v1_interfaces::srv::MoveToCartesianRPY;
 
 static constexpr int kArmJoints = 6;
 
@@ -48,9 +55,16 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::TimerBase::SharedPtr pose_publish_timer_;
 
+  // --- Service LIN mode ---
+  rclcpp::Service<MoveToCartesianRPY>::SharedPtr cartesian_srv_;
+  rclcpp_action::Client<FollowJointTrajectory>::SharedPtr action_client_;
+  std::atomic<bool> action_executing_{false};
+
   bool validateTargetPose(double x, double y, double z, std::string& error_msg);
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
   void poseTargetCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+  void moveToCartesianCallback(const std::shared_ptr<MoveToCartesianRPY::Request> request,
+                               std::shared_ptr<MoveToCartesianRPY::Response> response);
   void publishCurrentPose();
   void publishStatus(const std::string& status);
 };
@@ -86,8 +100,15 @@ CartesianControllerNode::CartesianControllerNode() : Node("cartesian_controller_
   pose_publish_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(33), std::bind(&CartesianControllerNode::publishCurrentPose, this));
 
+  action_client_ = rclcpp_action::create_client<FollowJointTrajectory>(
+      this, "ARM_controller/follow_joint_trajectory");
+
+  cartesian_srv_ = this->create_service<MoveToCartesianRPY>(
+      "/move_to_cartesian_rpy", std::bind(&CartesianControllerNode::moveToCartesianCallback, this,
+                                          std::placeholders::_1, std::placeholders::_2));
+
   RCLCPP_INFO(this->get_logger(),
-              "Cartesian analytical IK servo initialized (L2=%.3f L3=%.3f tcp=%.3f)",
+              "Cartesian IK node initialized (servo + LIN service, L2=%.3f L3=%.3f tcp=%.3f)",
               AnalyticalIK::kL2, AnalyticalIK::kL3, AnalyticalIK::kDtcp);
   publishStatus("IDLE");
 }
@@ -122,6 +143,7 @@ void CartesianControllerNode::jointStateCallback(
 
 void CartesianControllerNode::poseTargetCallback(
     const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+  if (action_executing_.load()) return;
   if (!has_joint_state_) return;
 
   std::string err;
@@ -207,6 +229,152 @@ void CartesianControllerNode::poseTargetCallback(
   }
   has_last_target_ = true;
   joint_target_pub_->publish(target_msg);
+}
+
+void CartesianControllerNode::moveToCartesianCallback(
+    const std::shared_ptr<MoveToCartesianRPY::Request> request,
+    std::shared_ptr<MoveToCartesianRPY::Response> response) {
+  if (!has_joint_state_) {
+    response->success = false;
+    response->message = "No joint state received yet";
+    return;
+  }
+  if (action_executing_.load()) {
+    response->success = false;
+    response->message = "Another action is executing";
+    return;
+  }
+
+  std::string err;
+  if (!validateTargetPose(request->x, request->y, request->z, err)) {
+    response->success = false;
+    response->message = err;
+    return;
+  }
+
+  // Get current pose from TF (start of LIN)
+  geometry_msgs::msg::TransformStamped tf_start;
+  try {
+    tf_start =
+        tf_buffer_->lookupTransform(reference_frame_, end_effector_link_, tf2::TimePointZero);
+  } catch (const tf2::TransformException& e) {
+    response->success = false;
+    response->message = std::string("TF lookup failed: ") + e.what();
+    return;
+  }
+
+  double p_start[3] = {tf_start.transform.translation.x, tf_start.transform.translation.y,
+                       tf_start.transform.translation.z};
+  tf2::Quaternion q_start(tf_start.transform.rotation.x, tf_start.transform.rotation.y,
+                          tf_start.transform.rotation.z, tf_start.transform.rotation.w);
+
+  // Goal pose
+  double p_goal[3] = {request->x, request->y, request->z};
+  tf2::Quaternion q_goal;
+  q_goal.setRPY(request->roll, request->pitch, request->yaw);
+
+  // Cartesian distance → sample count
+  double dx = p_goal[0] - p_start[0], dy = p_goal[1] - p_start[1], dz = p_goal[2] - p_start[2];
+  double cart_dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+  constexpr double kStepSize = 0.005;
+  int N = std::max(2, std::min(200, static_cast<int>(std::ceil(cart_dist / kStepSize))));
+
+  // Velocity scaling
+  double vel_scale = (request->velocity_scaling > 0.0 && request->velocity_scaling <= 1.0)
+                       ? request->velocity_scaling
+                       : 0.3;
+  constexpr double kMaxCartVel = 0.5;
+  double total_duration = std::max(0.5, cart_dist / (kMaxCartVel * vel_scale));
+
+  // Build LIN trajectory: interpolate in Cartesian, solve IK per point
+  trajectory_msgs::msg::JointTrajectory traj;
+  traj.joint_names = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"};
+
+  double q_seed[6];
+  {
+    std::lock_guard<std::mutex> lock(js_mutex_);
+    for (int i = 0; i < kArmJoints; i++) q_seed[i] = q_current_[i];
+  }
+
+  for (int step = 0; step <= N; step++) {
+    double t = static_cast<double>(step) / N;
+
+    // Position: linear interpolation
+    double p_i[3] = {p_start[0] + t * dx, p_start[1] + t * dy, p_start[2] + t * dz};
+
+    // Orientation: slerp
+    tf2::Quaternion q_i = q_start.slerp(q_goal, t);
+    q_i.normalize();
+    tf2::Matrix3x3 rot_i(q_i);
+    double R_i[9];
+    for (int r = 0; r < 3; r++) {
+      tf2::Vector3 row = rot_i.getRow(r);
+      R_i[r * 3 + 0] = row.x();
+      R_i[r * 3 + 1] = row.y();
+      R_i[r * 3 + 2] = row.z();
+    }
+
+    IKResult ik = ik_.solve(R_i, p_i, q_seed);
+    if (!ik.valid) {
+      response->success = false;
+      response->message = "IK failed at step " + std::to_string(step) + "/" + std::to_string(N);
+      return;
+    }
+
+    trajectory_msgs::msg::JointTrajectoryPoint pt;
+    pt.positions.assign(ik.q.begin(), ik.q.end());
+    pt.time_from_start = rclcpp::Duration::from_seconds(t * total_duration);
+    traj.points.push_back(pt);
+
+    for (int i = 0; i < kArmJoints; i++) q_seed[i] = ik.q[i];
+  }
+
+  // Send via action
+  if (!action_client_->wait_for_action_server(std::chrono::seconds(2))) {
+    response->success = false;
+    response->message = "Action server not available";
+    return;
+  }
+
+  action_executing_ = true;
+  publishStatus("LIN_EXECUTING");
+
+  auto goal = FollowJointTrajectory::Goal();
+  goal.trajectory = traj;
+  auto future = action_client_->async_send_goal(goal);
+  if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+    action_executing_ = false;
+    response->success = false;
+    response->message = "Goal send timeout";
+    return;
+  }
+  auto goal_handle = future.get();
+  if (!goal_handle) {
+    action_executing_ = false;
+    response->success = false;
+    response->message = "Goal rejected";
+    return;
+  }
+
+  auto result_future = action_client_->async_get_result(goal_handle);
+  auto wait_duration = std::chrono::duration<double>(total_duration + 5.0);
+  if (result_future.wait_for(wait_duration) != std::future_status::ready) {
+    action_executing_ = false;
+    response->success = false;
+    response->message = "Execution timeout";
+    return;
+  }
+
+  action_executing_ = false;
+  has_last_target_ = false;
+  publishStatus("IDLE");
+
+  response->success = true;
+  response->trajectory_duration = total_duration;
+  response->planning_time = 0.0;
+  response->message = "LIN trajectory executed (" + std::to_string(N) + " points, " +
+                      std::to_string(total_duration) + "s)";
+  RCLCPP_INFO(this->get_logger(), "[LIN] %s", response->message.c_str());
 }
 
 void CartesianControllerNode::publishCurrentPose() {

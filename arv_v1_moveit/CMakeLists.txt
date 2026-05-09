@@ -317,12 +317,16 @@ target_include_directories(cartesian_controller_node PUBLIC
 
 ament_target_dependencies(cartesian_controller_node
   rclcpp
+  rclcpp_action
   std_msgs
   sensor_msgs
   geometry_msgs
+  trajectory_msgs
+  control_msgs
   tf2
   tf2_ros
   tf2_geometry_msgs
+  arv_v1_interfaces
 )
 
 # -------------------------------------------

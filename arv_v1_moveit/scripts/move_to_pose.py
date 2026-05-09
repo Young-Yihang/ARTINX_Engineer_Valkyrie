@@ -45,7 +45,7 @@ POS_STEPS = [0.001, 0.005, 0.01]
 ANG_STEPS = [0.01, 0.05, 0.1]
 
 PLANNERS = {
-    "Direct IK": ("direct", ""),
+    "Direct LIN": ("direct", ""),
     "LIN (Pilz)": ("pilz_industrial_motion_planner", "LIN"),
     "PTP (Pilz)": ("pilz_industrial_motion_planner", "PTP"),
     "RRTConnect": ("ompl", "RRTConnect"),
@@ -759,31 +759,44 @@ class ArmPlanningTool:
         return np.array(pts) if pts else None
 
     def _do_direct_ik(self):
-        """Bypass MoveIt: publish target pose to /cartesian_target_pose (analytical IK servo)."""
+        """Call /move_to_cartesian_rpy service (analytical IK LIN, recordable)."""
         if self._get_tab() == "joint":
-            self._set_status("Direct IK: only works in Cartesian tab", RED)
+            self._set_status("Direct LIN: only works in Cartesian tab", RED)
             return False
-        gx = self._cart_vars["X"][0].get()
-        gy = self._cart_vars["Y"][0].get()
-        gz = self._cart_vars["Z"][0].get()
-        pose = PoseStamped()
-        pose.header.frame_id = REF_FRAME
-        pose.header.stamp = self._listener.get_clock().now().to_msg()
-        pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = gx, gy, gz
-        q = quat_from_rpy(self._cart_vars["Roll"][0].get(),
-                          self._cart_vars["Pitch"][0].get(),
-                          self._cart_vars["Yaw"][0].get())
-        pose.pose.orientation.x, pose.pose.orientation.y = q[0], q[1]
-        pose.pose.orientation.z, pose.pose.orientation.w = q[2], q[3]
-        self._listener.cart_pub.publish(pose)
-        self._goal_xyz = [gx, gy, gz]
-        self._3d_dirty = True
-        self._set_status(f"Direct IK → ({gx:.3f}, {gy:.3f}, {gz:.3f})", GREEN)
-        return True
+        from arv_v1_interfaces.srv import MoveToCartesianRPY
+        if not hasattr(self, '_cart_srv'):
+            self._cart_srv = self._listener.create_client(MoveToCartesianRPY, "/move_to_cartesian_rpy")
+        if not self._cart_srv.wait_for_service(timeout_sec=2.0):
+            self._set_status("Service /move_to_cartesian_rpy not available", RED)
+            return False
+        req = MoveToCartesianRPY.Request()
+        req.x = self._cart_vars["X"][0].get()
+        req.y = self._cart_vars["Y"][0].get()
+        req.z = self._cart_vars["Z"][0].get()
+        req.roll = self._cart_vars["Roll"][0].get()
+        req.pitch = self._cart_vars["Pitch"][0].get()
+        req.yaw = self._cart_vars["Yaw"][0].get()
+        req.velocity_scaling = self._vel_var.get()
+        req.acceleration_scaling = self._vel_var.get()
+        req.async_execution = False
+        self._set_status("Direct LIN executing...", BLUE)
+        future = self._cart_srv.call_async(req)
+        rclpy.spin_until_future_complete(self._listener, future, timeout_sec=30.0)
+        if future.result() is None:
+            self._set_status("Service call timeout", RED)
+            return False
+        res = future.result()
+        if res.success:
+            self._goal_xyz = [req.x, req.y, req.z]
+            self._3d_dirty = True
+            self._set_status(f"LIN OK — {res.trajectory_duration:.2f}s", GREEN)
+            return True
+        self._set_status(f"LIN FAIL: {res.message}", RED)
+        return False
 
     def _do_plan(self):
         label = self._planner_var.get()
-        if label == "Direct IK":
+        if label == "Direct LIN":
             return self._do_direct_ik()
         self._set_status("Planning...", BLUE)
         try:
