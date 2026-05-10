@@ -29,7 +29,8 @@ ctk.set_appearance_mode("dark")
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState 
 from geometry_msgs.msg import PoseStamped
 
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -158,7 +159,7 @@ class StateListener(Node):
         super().__init__("planning_tool_listener")
         self.joints = None
         self._lock = threading.Lock()
-        self.create_subscription(JointState, "/joint_states", self._cb, 10)
+        self.create_subscription(JointState, "/joint_states", self._cb, qos_profile_sensor_data)
         self.cart_pub = self.create_publisher(PoseStamped, "/cartesian_target_pose", 10)
 
     def _cb(self, msg):

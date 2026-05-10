@@ -17,7 +17,7 @@ import tkinter as tk
 import customtkinter as ctk
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rcl_interfaces.msg import Log
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
@@ -91,7 +91,7 @@ class PanelNode(Node):
         self._task_seq = 0
 
         best_effort = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.create_subscription(JointState, "/joint_states", self._js_cb, 10)
+        self.create_subscription(JointState, "/joint_states", self._js_cb, qos_profile_sensor_data)
         self.create_subscription(PoseStamped, "/cartesian_controller/current_pose", self._pose_cb, 10)
         self.create_subscription(UInt8, "/control_mode", self._mode_cb, 10)
         self.create_subscription(UInt8, "/arm_state", self._arm_state_cb, 10)
