@@ -308,18 +308,32 @@ detect_mujoco_path() {
     return 1
 }
 
-# ========== 清理残留 DDS 共享内存（防止 FastDDS discovery 死锁）==========
+# ========== 清理残留 DDS 共享内存 + daemon discovery 缓存 ==========
+# 必须 stop daemon 再清 shm 再启 daemon, 否则 daemon 内存里还持有 ghost endpoint,
+# 导致 ros2 node list 出现重名 publisher / subscriber, MCU 收到双发力矩 → 关节抽搐
 cleanup_dds() {
-    local stale
-    stale=$(ls /dev/shm/ 2>/dev/null | grep -cE "fast|rtps|ros2" || true)
-    if [ "$stale" -gt 0 ]; then
-        log_warning "发现 $stale 个残留 DDS shm 文件，清理中..."
-        rm -f /dev/shm/fastrtps_* /dev/shm/*rtps* /tmp/fastrtps_* 2>/dev/null || true
-        log_success "DDS shm 已清理"
+    # 关键: 在 daemon 启动前 export LOCALHOST, 让 daemon 自己也限定本机 discovery
+    # 否则 daemon 用 SUBNET 启动后 cache 远程 endpoint, 后面再 export 已无效
+    export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+
+    # 1. 先停 ros2 daemon, 它持有 discovery 缓存, 不停会复活已删的 shm endpoint
+    ros2 daemon stop >/dev/null 2>&1 || true
+
+    # 2. 杀同名僵尸进程, 释放它们占用的 shm
+    pkill -f "ros2 run arv_v1_moveit" 2>/dev/null || true
+    sleep 0.5
+
+    # 3. 强制清 shm (无条件, 即使 grep 看不到也清, 防止 grep 漏)
+    local before
+    before=$(ls /dev/shm/ 2>/dev/null | grep -cE "fast|rtps|ros2" || true)
+    rm -f /dev/shm/fastrtps_* /dev/shm/*rtps* /dev/shm/sem.fastrtps_* \
+          /tmp/fastrtps_* 2>/dev/null || true
+    if [ "$before" -gt 0 ]; then
+        log_success "已清理 $before 个 DDS shm 残留 + daemon 缓存"
     fi
 
-    # 杀掉同名僵尸进程（静默，不影响正常启动）
-    pkill -f "ros2 run arv_v1_moveit" 2>/dev/null || true
+    # 4. 重启 daemon 让它从干净状态开始 discovery
+    ros2 daemon start >/dev/null 2>&1 || true
     sleep 0.3
 }
 
@@ -335,8 +349,12 @@ setup_environment() {
     source /opt/ros/jazzy/setup.bash
     [ -f "install/setup.bash" ] && source install/setup.bash
 
+    # 限定 ROS 2 discovery 到本机, 避免子网内其他主机（如 NUC）的 ARV 节点被
+    # 自动 discover 后污染 graph（双 publisher 引起 J4/J5 抽搐, 2026-05-11 实地定位）
+    export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+
     detect_mujoco_path || exit 1
-    log_success "环境设置完成"
+    log_success "环境设置完成 (ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST)"
 }
 
 # ========== 编译项目 ==========

@@ -45,6 +45,8 @@ struct SectionStats {
 
 struct LoopProfiler {
   SectionStats total;       // full controlLoop() wall time
+  SectionStats gap;         // interval between controlLoop() entries
+  SectionStats joint_age;   // latest /joint_states age when available
   SectionStats state_lock;  // time spent waiting on state_mutex_
   SectionStats dynamics;    // KDL dynamics computation
   SectionStats publish;     // safeTorquePublish
@@ -53,9 +55,11 @@ struct LoopProfiler {
 
   // Call at end of each loop iteration.
   // Returns true when it is time to print statistics (every print_interval calls).
-  bool record_and_check(int64_t t_us, int64_t lock_us, int64_t dyn_us, int64_t pub_us,
-                        uint64_t print_interval = 1000) {
+  bool record_and_check(int64_t t_us, int64_t gap_us, int64_t joint_age_us, int64_t lock_us,
+                        int64_t dyn_us, int64_t pub_us, uint64_t print_interval = 1000) {
     total.record(t_us);
+    gap.record(gap_us);
+    if (joint_age_us >= 0) joint_age.record(joint_age_us);
     state_lock.record(lock_us);
     dynamics.record(dyn_us);
     publish.record(pub_us);
@@ -65,6 +69,8 @@ struct LoopProfiler {
 
   void reset_all() {
     total.reset();
+    gap.reset();
+    joint_age.reset();
     state_lock.reset();
     dynamics.reset();
     publish.reset();
@@ -114,6 +120,15 @@ public:
         q_dot_filtered_(6) {
     RCLCPP_INFO(this->get_logger(),
                 "[START] Torque controller node starting (Cascade P+PI Control)");
+
+    // --- route_mode: 控制律 bypass, 仅路由 q_target ---
+    this->declare_parameter("route_mode", false);
+    route_mode_ = this->get_parameter("route_mode").as_bool();
+    RCLCPP_INFO(this->get_logger(),
+                "[ROUTE_MODE] %s — control law %s, effort_topic data[0..5] = %s",
+                route_mode_.load() ? "ENABLED" : "DISABLED",
+                route_mode_.load() ? "BYPASSED" : "ACTIVE",
+                route_mode_.load() ? "q_target(rad)" : "tau(Nm)");
 
     this->declare_parameter("kalman.enabled", false);
 
@@ -239,6 +254,7 @@ public:
 
     cascade_pid_->setJointContinuous(5, true);
     cascade_pid_->getJointController(1).setDerivativeMode(2, true);  // J2: 2ms采样+/dt, 同MCU
+    cascade_pid_->getJointController(3).setDerivativeMode(2, true);  // J4: 2ms采样+/dt, 同MCU
 
     RCLCPP_INFO(
         this->get_logger(),
@@ -342,8 +358,8 @@ public:
                 control_frequency_);
 
     // 预热消息内存，避免首次 publish 触发 malloc
-    torque_msg_preallocated_.data.resize(kAllJoints, 0.0);
-    zero_msg_preallocated_.data.resize(kAllJoints, 0.0);
+    torque_msg_preallocated_.data.resize(kAllJoints + 1, 0.0);  // +1 for seq field
+    zero_msg_preallocated_.data.resize(kAllJoints + 1, 0.0);
 
     RCLCPP_INFO(this->get_logger(), "[OK] Torque controller fully initialized (mode: RELAX)");
   }
@@ -378,12 +394,36 @@ private:
   KDL::JntArray q_dot_filtered_;
   bool kalman_filter_enabled_;
 
+  // route_mode: 控制律 bypass, q_target 直接转发到 effort topic (语义改成 q_target rad)
+  // MCU 端: 收到 0x0002 后用 data[0..5] 作为 q_target 跑本地 PID+阻抗
+  std::atomic<bool> route_mode_{false};
+
   size_t control_loop_count_ = 0;
   rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_;
   std::unique_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>
       rt_torque_pub_;
   LoopProfiler loop_prof_;  // timing instrumentation
+  std::chrono::steady_clock::time_point last_control_loop_entry_;
+  std::atomic<uint64_t> torque_publish_count_{0};
+  uint64_t last_timing_publish_count_{0};
+  std::atomic<uint64_t> control_slow_count_{0};
+  std::atomic<uint64_t> control_overrun_count_{0};
+  std::atomic<uint64_t> control_overrun_max_us_{0};
+  std::atomic<uint64_t> control_overrun_max_gap_us_{0};
+  std::atomic<uint64_t> control_overrun_max_js_age_us_{0};
+  std::atomic<uint64_t> joint_state_msg_count_{0};
+  std::atomic<uint64_t> joint_state_invalid_size_count_{0};
+  std::atomic<uint64_t> joint_state_nonfinite_count_{0};
+  std::atomic<uint64_t> joint_state_pos_range_count_{0};
+  std::atomic<uint64_t> joint_state_velocity_spike_count_{0};
+  std::atomic<uint64_t> joint_state_timeout_count_{0};
+  std::atomic<uint64_t> torque_saturation_count_{0};
+  std::atomic<uint64_t> torque_saturation_max_milli_{0};
+  std::atomic<uint64_t> torque_nonfinite_count_{0};
+  // Priority3: torque 序列号 (每次 safeTorquePublish 递增, uint8 回卷)
+  // hardware 侧用来判断 torque_rx 的重复 callback vs 真实发布
+  std::atomic<uint8_t> torque_seq_{0};
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_forward_pub_;
   double control_frequency_;
 
@@ -400,6 +440,7 @@ private:
   std::array<double, 7> last_valid_torque_{};
 
   // 预分配发布消息，避免热路径 malloc
+  // data[0..5]=臂力矩 data[6]=夹爪 data[7]=seq(uint8转db)
   std_msgs::msg::Float64MultiArray torque_msg_preallocated_;
   std_msgs::msg::Float64MultiArray zero_msg_preallocated_;
 
@@ -447,6 +488,13 @@ private:
       return std::pow(std::abs(e), alpha) * std::copysign(1.0, e);
   }
 
+  void updateMaxAtomic(std::atomic<uint64_t> &target, uint64_t value) {
+    uint64_t old = target.load(std::memory_order_relaxed);
+    while (old < value &&
+           !target.compare_exchange_weak(old, value, std::memory_order_relaxed)) {
+    }
+  }
+
   double computeFrictionTorque(int joint_idx, double velocity) {
     return friction_coulomb_[joint_idx] * fal(velocity, fal_alpha_, fal_delta_) +
            friction_viscous_[joint_idx] * velocity;
@@ -472,6 +520,7 @@ private:
     std_msgs::msg::Float64MultiArray safe_msg;
     safe_msg.data.resize(kAllJoints, 0.0);
     torque_pub_->publish(safe_msg);
+    torque_publish_count_++;
 
     // 2. Execute complete recovery ceremony
     {
@@ -539,6 +588,10 @@ private:
                              KDL::JntArray &tau_fb);
 
   void controlLoop();
+
+  // route_mode 主路径: 仅路由 q_target 到 hardware (复用 effort topic, 语义变 q_target rad)
+  // 来源优先级: trajectory action (TODO Phase 2) → /joint_position_target → q_actual fallback
+  void routeTargetToHardware();
 
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
@@ -766,20 +819,20 @@ void TorqueControllerActionServer::handleAccepted(
 
 void TorqueControllerActionServer::jointStateCallback(
     const sensor_msgs::msg::JointState::SharedPtr msg) {
-  // --- 修复死锁 #1: 使用unique_lock手动控制锁生命周期 ---
-  std::unique_lock<std::mutex> state_lock(state_mutex_);
+  joint_state_msg_count_++;
 
   if (msg->position.size() < kAllJoints || msg->velocity.size() < kAllJoints) {
+    joint_state_invalid_size_count_++;
     RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                           "[ERROR] Invalid joint state size! Expected at least %d", kAllJoints);
     return;
   }
 
-  // --- SAFETY: Validate sensor data for NaN/Inf and sanity ---
+  // Validate before taking state_mutex_ so diagnostics cannot hold the state lock.
   bool has_velocity_spike = false;
   for (size_t i = 0; i < kArmJoints; i++) {
-    // Check for NaN or Inf (这种情况必须完全拒绝)
     if (!std::isfinite(msg->position[i]) || !std::isfinite(msg->velocity[i])) {
+      joint_state_nonfinite_count_++;
       RCLCPP_ERROR_THROTTLE(
           this->get_logger(), *this->get_clock(), 1000,
           "[SAFETY] Non-finite sensor data on joint %zu (pos=%.2f, vel=%.2f), rejecting!", i + 1,
@@ -787,22 +840,18 @@ void TorqueControllerActionServer::jointStateCallback(
       return;  // Reject entire message - 完全拒绝，不更新时间戳
     }
 
-    // Sanity check: position within expanded limits (warn but accept)
     if (std::abs(msg->position[i]) > 2 * M_PI) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                           "[SAFETY] Joint %zu position out of range: %.2f rad", i + 1,
-                           msg->position[i]);
+      joint_state_pos_range_count_++;
     }
 
-    // Sanity check: velocity spike detection (限幅而不是拒绝，避免timeout)
     if (std::abs(msg->velocity[i]) > max_velocity_sanity_) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                           "[SAFETY] Joint %zu velocity spike: %.2f rad/s (limit: %.1f), clamping!",
-                           i + 1, msg->velocity[i], max_velocity_sanity_);
+      joint_state_velocity_spike_count_++;
       has_velocity_spike = true;
-      // 不再return，而是继续处理，但会限幅速度
     }
   }
+
+  // --- 修复死锁 #1: 使用unique_lock手动控制锁生命周期 ---
+  std::unique_lock<std::mutex> state_lock(state_mutex_);
 
   // 提取位置和速度（velocity spike时进行限幅）
   for (size_t i = 0; i < kArmJoints; i++) {
@@ -1151,6 +1200,7 @@ bool TorqueControllerActionServer::safeTorquePublish(const KDL::JntArray &tau_ar
   auto &msg = torque_msg_preallocated_;
   for (int i = 0; i < kArmJoints; i++) {
     if (!std::isfinite(tau_arm(i))) {
+      torque_nonfinite_count_++;
       RCLCPP_ERROR(this->get_logger(), "[SAFETY] Non-finite torque on joint %d: %.2f", i + 1,
                    tau_arm(i));
       emergencyStop("Non-finite torque detected");
@@ -1160,17 +1210,130 @@ bool TorqueControllerActionServer::safeTorquePublish(const KDL::JntArray &tau_ar
                                                                         : max_torque_default_;
     msg.data[i] = std::clamp(tau_arm(i), -limit, limit);
     if (std::abs(tau_arm(i)) > limit) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                           "[SAFETY] Joint %d saturated: %.2f -> %.2f", i + 1, tau_arm(i),
-                           msg.data[i]);
+      torque_saturation_count_++;
+      const double exceed = std::abs(tau_arm(i)) - limit;
+      updateMaxAtomic(torque_saturation_max_milli_, static_cast<uint64_t>(exceed * 1000.0));
     }
   }
   msg.data[kArmJoints] = std::clamp(gripper_force, -gripper_max_torque_, gripper_max_torque_);
+  // data[7] = seq id (单调递增 uint8 回卷, hardware 侧用来检测重复/跳序 callback)
+  msg.data[kAllJoints] = static_cast<double>(torque_seq_++ & 0xFF);
   rt_torque_pub_->try_publish(msg);
+  torque_publish_count_++;
   for (int i = 0; i < kAllJoints; i++) {
     last_valid_torque_[i] = msg.data[i];
   }
   return true;
+}
+
+// route_mode 路径: 不算 PID/阻抗/G, 仅采当前 q_target 转发到 effort topic
+// effort_msg.data[0..5] 语义 = q_target(rad), data[6] = gripper, data[7] = seq
+// MCU 端配合: 收到 0x0002 后解析 data[0..5] 为 q_target, 用本地 K/D 跑闭环
+// 锁顺序遵守: action_mutex_ → state_mutex_ → gripper_mutex_
+void TorqueControllerActionServer::routeTargetToHardware() {
+  const bool executing = is_executing_.load(std::memory_order_acquire);
+  const uint8_t mode = control_mode_.load(std::memory_order_acquire);
+
+  KDL::JntArray q_target_out(kArmJoints);
+  bool out_valid = false;          // q_target_out 已由轨迹路径填好
+  bool trajectory_done = false;    // 本帧轨迹结束 (用 last_point + succeed action)
+  std::shared_ptr<GoalHandleFJT> completed_handle;  // 待 succeed 的 goal
+
+  // ---- Phase 2: 轨迹执行中, 实时插值 q_d 作为 q_target ----
+  if (executing && mode == ControlMode::ARMED) {
+    trajectory_msgs::msg::JointTrajectory traj_copy;
+    rclcpp::Time traj_start_copy;
+    std::shared_ptr<GoalHandleFJT> goal_handle_copy;
+    {
+      std::lock_guard<std::mutex> action_lock(action_mutex_);
+      traj_copy = current_trajectory_;
+      traj_start_copy = trajectory_start_time_;
+      goal_handle_copy = current_goal_handle_;
+    }
+    if (!traj_copy.points.empty()) {
+      const double t_now = (this->now() - traj_start_copy).seconds();
+      const auto &last_pt = traj_copy.points.back();
+      const double total_dur =
+          last_pt.time_from_start.sec + last_pt.time_from_start.nanosec * 1e-9;
+      if (t_now >= total_dur) {
+        // 轨迹时间到, 收尾用 last_point, 标记 succeed
+        for (int i = 0; i < kArmJoints; i++) {
+          q_target_out(i) = (i < (int)last_pt.positions.size()) ? last_pt.positions[i] : 0.0;
+        }
+        out_valid = true;
+        trajectory_done = true;
+        completed_handle = goal_handle_copy;
+      } else {
+        // 中间帧: 插值 q_d
+        KDL::JntArray q_d(kArmJoints), qd_d(kArmJoints), qdd_d(kArmJoints);
+        if (interpolateTrajectory(traj_copy, t_now, q_d, qd_d, qdd_d)) {
+          q_target_out = q_d;
+          out_valid = true;
+        }
+        // else: 插值失败 → 走下方 Hold fallback
+      }
+    }
+  }
+
+  // ---- state snapshot + 轨迹完成时同步写回 q_target_ (供下帧 Hold 接住) ----
+  KDL::JntArray q_copy(kArmJoints), q_target_copy(kArmJoints);
+  bool has_target_copy = false;
+  bool state_ok = false;
+  {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    state_ok = state_received_;
+    if (state_ok) {
+      q_copy = q_actual_;
+      has_target_copy = has_target_;
+      if (has_target_) q_target_copy = q_target_;
+    }
+    if (trajectory_done && out_valid) {
+      // 把 last_point 写回 q_target_ 让下一帧 Hold path 接住
+      for (int i = 0; i < kArmJoints; i++) q_target_(i) = q_target_out(i);
+      has_target_ = true;
+    }
+  }
+  if (!state_ok) return;  // 无 joint_states, MCU IsTimeout 自身 Relax
+
+  // ---- 非轨迹分支决定 q_target_out ----
+  if (!out_valid) {
+    if (mode == ControlMode::RELAX || mode == ControlMode::FREEDRIVE) {
+      q_target_out = q_copy;
+    } else if (has_target_copy) {
+      q_target_out = q_target_copy;
+    } else {
+      q_target_out = q_copy;
+    }
+  }
+
+  // ---- 轨迹完成 succeed (在 state lock 释放后取 action lock) ----
+  if (trajectory_done && completed_handle) {
+    auto result = std::make_shared<FollowJointTrajectory::Result>();
+    result->error_code = FollowJointTrajectory::Result::SUCCESSFUL;
+    completed_handle->succeed(result);
+    RCLCPP_INFO(this->get_logger(), "[ROUTE] Trajectory completed");
+    {
+      std::lock_guard<std::mutex> action_lock(action_mutex_);
+      is_executing_.store(false, std::memory_order_release);
+      current_goal_handle_.reset();
+    }
+  }
+
+  // ---- gripper + publish ----
+  double gripper_force_copy;
+  {
+    std::lock_guard<std::mutex> glock(gripper_mutex_);
+    gripper_force_copy = gripper_torque_cmd_;
+  }
+
+  auto &msg = torque_msg_preallocated_;
+  for (int i = 0; i < kArmJoints; i++) {
+    msg.data[i] = std::isfinite(q_target_out(i)) ? q_target_out(i) : q_copy(i);
+  }
+  msg.data[kArmJoints] = std::clamp(gripper_force_copy, -gripper_max_torque_, gripper_max_torque_);
+  msg.data[kAllJoints] = static_cast<double>(torque_seq_++ & 0xFF);
+  rt_torque_pub_->try_publish(msg);
+  torque_publish_count_++;
 }
 
 void TorqueControllerActionServer::controlLoop() {
@@ -1178,15 +1341,19 @@ void TorqueControllerActionServer::controlLoop() {
   using us = std::chrono::microseconds;
 
   const auto t_entry = Clock::now();
+  const int64_t control_gap_us =
+      (last_control_loop_entry_ == Clock::time_point{})
+          ? 0
+          : std::chrono::duration_cast<us>(t_entry - last_control_loop_entry_).count();
+  last_control_loop_entry_ = t_entry;
 
   // --- SAFETY: Monitor control loop timing ---
   rclcpp::Time now = this->now();
   if (control_loop_count_ > 0) {
     double period = (now - last_control_loop_time_).seconds();
     if (period > max_control_period_sec_) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                           "[SAFETY] Control loop slow: %.1f ms (expected 1ms @ 1kHz)",
-                           period * 1000.0);
+      control_slow_count_++;
+      updateMaxAtomic(control_overrun_max_gap_us_, static_cast<uint64_t>(period * 1000000.0));
     }
   }
   last_control_loop_time_ = now;
@@ -1196,6 +1363,7 @@ void TorqueControllerActionServer::controlLoop() {
 
   // Timing section accumulators (filled by each path before recording)
   int64_t lock_us = 0, dyn_us = 0, pub_us = 0;
+  int64_t joint_state_age_us = -1;
   const char *path_name = "RELAX";  // updated per code path
 
   // -----------------------------------------------------------------------
@@ -1205,23 +1373,34 @@ void TorqueControllerActionServer::controlLoop() {
   auto commit = [&]() {
     int64_t total_us = std::chrono::duration_cast<us>(Clock::now() - t_entry).count();
 
-    bool print_now = loop_prof_.record_and_check(total_us, lock_us, dyn_us, pub_us, 1000);
+    bool print_now = loop_prof_.record_and_check(total_us, control_gap_us, joint_state_age_us,
+                                                 lock_us, dyn_us, pub_us, 1000);
 
     if (total_us > loop_prof_.overrun_threshold_us) {
-      RCLCPP_WARN(this->get_logger(),
-                  "[TIMING] OVERRUN path=%-12s total=%4ldus | lock=%3ldus dyn=%3ldus pub=%3ldus",
-                  path_name, total_us, lock_us, dyn_us, pub_us);
+      control_overrun_count_++;
+      updateMaxAtomic(control_overrun_max_us_, static_cast<uint64_t>(total_us));
+      updateMaxAtomic(control_overrun_max_gap_us_, static_cast<uint64_t>(control_gap_us));
+      if (joint_state_age_us > 0) {
+        updateMaxAtomic(control_overrun_max_js_age_us_, static_cast<uint64_t>(joint_state_age_us));
+      }
     }
 
     if (print_now) {
+      const uint64_t publish_now = torque_publish_count_.load(std::memory_order_relaxed);
+      const uint64_t publish_delta = publish_now - last_timing_publish_count_;
+      last_timing_publish_count_ = publish_now;
       RCLCPP_INFO(this->get_logger(),
                   "[TIMING/1k] total: min=%ldus avg=%ldus max=%ldus | "
+                  "gap: avg=%ldus max=%ldus | js_age: avg=%ldus max=%ldus | "
                   "lock: avg=%ldus max=%ldus | dyn: avg=%ldus max=%ldus | "
-                  "pub: avg=%ldus max=%ldus | overruns=%lu",
+                  "pub: avg=%ldus max=%ldus count=%lu | overruns=%lu",
                   loop_prof_.total.min_us, loop_prof_.total.avg_us(), loop_prof_.total.max_us,
+                  loop_prof_.gap.avg_us(), loop_prof_.gap.max_us, loop_prof_.joint_age.avg_us(),
+                  loop_prof_.joint_age.max_us,
                   loop_prof_.state_lock.avg_us(), loop_prof_.state_lock.max_us,
                   loop_prof_.dynamics.avg_us(), loop_prof_.dynamics.max_us,
-                  loop_prof_.publish.avg_us(), loop_prof_.publish.max_us, loop_prof_.overruns);
+                  loop_prof_.publish.avg_us(), loop_prof_.publish.max_us, publish_delta,
+                  loop_prof_.overruns);
       loop_prof_.reset_all();
     }
   };
@@ -1231,14 +1410,53 @@ void TorqueControllerActionServer::controlLoop() {
     std::lock_guard<std::mutex> state_lock(state_mutex_);
     double time_since_state =
         state_received_ ? (this->now() - last_joint_state_time_).seconds() : -1.0;
+    static uint64_t last_joint_state_msg_count = 0;
+    const uint64_t joint_state_msg_now = joint_state_msg_count_.load(std::memory_order_relaxed);
+    const double joint_state_rx_rate =
+        static_cast<double>(joint_state_msg_now - last_joint_state_msg_count) / 5.0;
+    last_joint_state_msg_count = joint_state_msg_now;
+    const uint64_t slow_count = control_slow_count_.exchange(0);
+    const uint64_t overrun_count = control_overrun_count_.exchange(0);
+    const uint64_t overrun_max_us = control_overrun_max_us_.exchange(0);
+    const uint64_t overrun_max_gap_us = control_overrun_max_gap_us_.exchange(0);
+    const uint64_t overrun_max_js_age_us = control_overrun_max_js_age_us_.exchange(0);
+    const uint64_t invalid_size = joint_state_invalid_size_count_.exchange(0);
+    const uint64_t nonfinite = joint_state_nonfinite_count_.exchange(0);
+    const uint64_t pos_range = joint_state_pos_range_count_.exchange(0);
+    const uint64_t vel_spike = joint_state_velocity_spike_count_.exchange(0);
+    const uint64_t timeouts = joint_state_timeout_count_.exchange(0);
+    const uint64_t saturations = torque_saturation_count_.exchange(0);
+    const uint64_t saturation_max_milli = torque_saturation_max_milli_.exchange(0);
+    const uint64_t nonfinite_torque = torque_nonfinite_count_.exchange(0);
 
     static const char *mode_names[] = {"RELAX", "FREEDRIVE", "ARMED"};
     uint8_t m = control_mode_.load(std::memory_order_acquire);
     const char *mode_str = (m <= ControlMode::ARMED) ? mode_names[m] : "UNKNOWN";
     RCLCPP_INFO(
-        this->get_logger(), "[HEALTH] Loop #%zu | Mode: %s%s | State age: %.1f ms | Kalman: %s",
+        this->get_logger(),
+        "[HEALTH] Loop #%zu | Mode: %s%s | State age: %.1f ms | js_rx: %.1f Hz | Kalman: %s",
         control_loop_count_, mode_str, is_executing_.load(std::memory_order_acquire) ? "+EXEC" : "",
-        time_since_state * 1000.0, kalman_filter_enabled_ ? "ON" : "OFF");
+        time_since_state * 1000.0, joint_state_rx_rate, kalman_filter_enabled_ ? "ON" : "OFF");
+    RCLCPP_INFO(
+        this->get_logger(),
+        "[HEALTH/CTRL_DIAG] slow=%lu overruns=%lu max_total=%luus max_gap=%luus max_js_age=%luus "
+        "| js_invalid=%lu js_nonfinite=%lu js_pos_range=%lu js_vel_spike=%lu js_timeout=%lu "
+        "| torque_sat=%lu sat_max=%.3fNm torque_nonfinite=%lu",
+        slow_count, overrun_count, overrun_max_us, overrun_max_gap_us, overrun_max_js_age_us,
+        invalid_size, nonfinite, pos_range, vel_spike, timeouts, saturations,
+        static_cast<double>(saturation_max_milli) / 1000.0, nonfinite_torque);
+  }
+
+  // === ROUTE MODE: bypass 控制律, 仅转发 q_target → MCU 跑本地 PID/阻抗 ===
+  // 决策: 上位机闭环延迟 3-5ms 使下位机鲁棒参数 K=10 D=0.63 在上位机失稳 (J5 现象)
+  // 比赛优先: 把控制律全压回 MCU 1ms 同 tick 闭环, 上位机只做规划层
+  if (route_mode_.load(std::memory_order_acquire)) {
+    const auto t_pub_start = Clock::now();
+    routeTargetToHardware();
+    pub_us = std::chrono::duration_cast<us>(Clock::now() - t_pub_start).count();
+    path_name = "ROUTE";
+    commit();
+    return;
   }
 
   bool executing = is_executing_.load(std::memory_order_acquire);
@@ -1252,6 +1470,7 @@ void TorqueControllerActionServer::controlLoop() {
       {
         const auto t0 = Clock::now();
         rt_torque_pub_->try_publish(zero_msg_preallocated_);
+        torque_publish_count_++;
         pub_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
       }
       commit();
@@ -1290,18 +1509,25 @@ void TorqueControllerActionServer::controlLoop() {
 
     // --- SAFETY: Check joint state timeout ---
     double time_since_last_state = (this->now() - last_state_time_copy).seconds();
+    joint_state_age_us = static_cast<int64_t>(time_since_last_state * 1000000.0);
     if (time_since_last_state > joint_state_timeout_sec_) {
       path_name = "TIMEOUT";
+      joint_state_timeout_count_++;
       RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                             "[SAFETY] Joint state timeout: %.3fs (limit: %.0f ms)",
                             time_since_last_state, joint_state_timeout_sec_ * 1000.0);
       KDL::JntArray tau_timeout(kArmJoints);
       {
         const auto t0 = Clock::now();
-        dynamic_computer_->computeGravityTorque(q_copy, tau_timeout);
+        KDL::JntArray tau_g_full(kArmJoints);
+        dynamic_computer_->computeGravityTorque(q_copy, tau_g_full);
         computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy, tau_payload_);
         dyn_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
-        for (int i = 0; i < kArmJoints; i++) tau_timeout(i) += tau_payload_(i);
+        // 对齐 ARMED_HOLD: 仅 J2/J3 用 G，避免 js timeout/恢复时 J1/J4/J5/J6 力矩跳变
+        static constexpr bool kUseGravityTO[kArmJoints] = {false, true, true, false, false, false};
+        for (int i = 0; i < kArmJoints; i++) {
+          tau_timeout(i) = (kUseGravityTO[i] ? tau_g_full(i) : 0.0) + tau_payload_(i);
+        }
       }
       {
         const auto t0 = Clock::now();
@@ -1322,8 +1548,11 @@ void TorqueControllerActionServer::controlLoop() {
       dynamic_computer_->computeGravityTorque(q_copy, tau_gravity);
       computePayloadCompensation(q_copy, gripper_pos_copy, gripper_force_copy, tau_payload_);
 
+      // 对齐下位机 ff={0,g1,g2,0,0,0}: J1/J4/J5/J6 KDL G 与实物偏差大，反而激励振荡
+      static constexpr bool kUseGravity[kArmJoints] = {false, true, true, false, false, false};
       for (int i = 0; i < kArmJoints; i++) {
-        tau_arm(i) = tau_gravity(i) + computeFrictionTorque(i, qd_copy(i)) + tau_payload_(i);
+        double g = kUseGravity[i] ? tau_gravity(i) : 0.0;
+        tau_arm(i) = g + computeFrictionTorque(i, qd_copy(i)) + tau_payload_(i);
       }
 
       // FREEDRIVE: G + friction + payload，无 PD
@@ -1417,6 +1646,7 @@ void TorqueControllerActionServer::controlLoop() {
 
   // --- 状态拷贝 ---
   KDL::JntArray q_act(kArmJoints), qd_filt(kArmJoints);
+  rclcpp::Time last_state_time_exec;
   double grip_pos = 0.0;
   {
     const auto t0 = Clock::now();
@@ -1424,8 +1654,11 @@ void TorqueControllerActionServer::controlLoop() {
     lock_us += std::chrono::duration_cast<us>(Clock::now() - t0).count();  // accumulate both locks
     q_act = q_actual_;
     qd_filt = q_dot_filtered_;
+    last_state_time_exec = last_joint_state_time_;
     grip_pos = gripper_position_;
   }
+  joint_state_age_us = static_cast<int64_t>((this->now() - last_state_time_exec).seconds() *
+                                            1000000.0);
   double grip_force;
   {
     std::lock_guard<std::mutex> glock(gripper_mutex_);
@@ -1492,7 +1725,13 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
   for (const auto &param : parameters) {
     const std::string &name = param.get_name();
 
-    if (name == "kalman.enabled") {
+    if (name == "route_mode") {
+      route_mode_ = param.as_bool();
+      RCLCPP_WARN(this->get_logger(),
+                  "[ROUTE_MODE] dynamically set to %s — effort_topic data[0..5] = %s",
+                  route_mode_.load() ? "ENABLED" : "DISABLED",
+                  route_mode_.load() ? "q_target(rad)" : "tau(Nm)");
+    } else if (name == "kalman.enabled") {
       kalman_filter_enabled_ = param.as_bool();
       RCLCPP_INFO(this->get_logger(), "[INFO] Kalman filter %s",
                   kalman_filter_enabled_ ? "[OK] Enabled" : "[DISABLED]");

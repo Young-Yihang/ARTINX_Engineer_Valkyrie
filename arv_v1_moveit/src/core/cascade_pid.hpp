@@ -58,6 +58,8 @@ private:
   uint32_t d_sample_counter_ = 0;
   double pos_fdb_lowsample_[2] = {};
   double pos_d_held_ = 0.0;
+  // reset 后前 N 拍 D=0，避免 pos_fdb_lowsample_[1]=0 首拍 spike (对齐 MCU Pid::firstupdate)
+  uint32_t firstupdate_remaining_ = 1;
 
   // --- loop处理
   double max_vel_;  // rad/s

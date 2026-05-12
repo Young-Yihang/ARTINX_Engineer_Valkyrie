@@ -163,29 +163,49 @@ if [ -n "$pids" ]; then
     fi
 fi
 
-# 逐个停止节点
-for i in "${!nodes[@]}"; do
-    node="${nodes[$i]}"
-    update_status "停止: $node"
-
+# 第一轮：所有节点同时 SIGTERM（给 fastrtps 时间清理 endpoint，避免 stale 残留）
+update_status "向所有节点发送 SIGTERM"
+all_term_pids=""
+for node in "${nodes[@]}"; do
     pids=$(pgrep -f "$node")
     if [ -n "$pids" ]; then
-        kill $pids 2>/dev/null
-        sleep 0.3
-        pids=$(pgrep -f "$node")
-        if [ -n "$pids" ]; then
-            kill -9 $pids 2>/dev/null
-        fi
+        all_term_pids="$all_term_pids $pids"
         ((stopped++))
     fi
 done
+if [ -n "$all_term_pids" ]; then
+    kill $all_term_pids 2>/dev/null
+fi
+
+# 等 fastrtps cleanup 完成（实测 1.5s 够清空 /dev/shm/fastrtps_* endpoint）
+sleep 2.0
+
+# 第二轮：还活着的 SIGKILL 兜底
+update_status "SIGKILL 兜底未退出的节点"
+for node in "${nodes[@]}"; do
+    pids=$(pgrep -f "$node")
+    if [ -n "$pids" ]; then
+        kill -9 $pids 2>/dev/null
+    fi
+done
+sleep 0.3
+
+# 关键: 清理 fastrtps shared memory 残留 + 停 ros2 daemon
+# 原因: kill 没给 fastrtps 足够 cleanup 时间, 残留 endpoint 在 shm 里
+#       下次启动时被 daemon 重新 discover → ghost publisher 双发 → J5 抽搐
+# 注意: daemon 必须停, 不然它在内存里持有 ghost endpoint 让 ros2 node list 看到重名
+update_status "清理 fastrtps shm + 停 ros2 daemon"
+[ -f /opt/ros/jazzy/setup.bash ] && source /opt/ros/jazzy/setup.bash 2>/dev/null
+ros2 daemon stop >/dev/null 2>&1 || true
+rm -f /dev/shm/fastrtps_* /dev/shm/*rtps* /dev/shm/sem.fastrtps_* \
+      /tmp/fastrtps_* 2>/dev/null
 
 # 最终报告
 echo ""
 if [ $stopped -gt 0 ]; then
-    echo -e "  ${GREEN}${BOLD}✓ 已停止 $stopped 个节点${NC}"
+    echo -e "  ${GREEN}${BOLD}✓ 已停止 $stopped 个节点 (shm + daemon 已清理)${NC}"
 else
-    echo -e "  ${YELLOW}${BOLD}✓ 未发现运行中的节点${NC}"
+    echo -e "  ${YELLOW}${BOLD}✓ 未发现运行中的节点 (shm + daemon 已清理)${NC}"
 fi
 echo ""
 cursor_show

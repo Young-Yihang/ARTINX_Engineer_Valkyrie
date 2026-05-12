@@ -78,12 +78,30 @@ public:
     const int send_hz = this->get_parameter("send_rate_hz").as_int();
     const int grip_hz = this->get_parameter("gripper_rate_hz").as_int();
     gripper_divider_ = (grip_hz > 0 && send_hz >= grip_hz) ? (send_hz / grip_hz) : 4;
-    auto send_period = std::chrono::microseconds(1000000 / send_hz);
-    send_timer_ =
-        this->create_wall_timer(send_period, std::bind(&HardwareInterfaceNode::sendLoop, this));
 
     last_torque_update_ = this->now();
-    RCLCPP_INFO(this->get_logger(), "[OK] Send timer started at %dHz, gripper at %dHz (1:%d)",
+
+    // ── 1kHz TX 独立 steady_clock 线程 (替换 ROS wall_timer) ──
+    // 原因: wall_timer 受 ROS executor 调度, 观测到 gap max≈49ms;
+    //       sleep_until 直接绑定时钟, 典型 jitter < 1ms.
+    send_thread_ = std::thread([this, send_hz]() {
+      using Clock = std::chrono::steady_clock;
+      const auto period = std::chrono::microseconds(1000000 / send_hz);
+      auto next_tick = Clock::now() + period;
+      while (running_) {
+        sendLoop();
+        next_tick += period;
+        // ── 追赶跳过 (catch-up skip) ──
+        // 若 sendLoop() 因 serial write 阻塞导致 next_tick 已落后,
+        // 不做连续无 sleep 追赶 (会 flood 串口); 直接对齐到 now+period.
+        const auto now = Clock::now();
+        if (next_tick < now) {
+          next_tick = now + period;
+        }
+        std::this_thread::sleep_until(next_tick);
+      }
+    });
+    RCLCPP_INFO(this->get_logger(), "[OK] Send thread started at %dHz, gripper at %dHz (1:%d)",
                 send_hz, grip_hz, gripper_divider_);
 
     last_rx_activity_.store(std::chrono::steady_clock::now());
@@ -109,6 +127,11 @@ public:
       }
     } catch (const std::exception &e) {
       RCLCPP_WARN(this->get_logger(), "[WARN] Serial close: %s", e.what());
+    }
+
+    // send_thread_ 先 join: running_=false 后循环退出, sleep_until 会在下一 tick 醒来
+    if (send_thread_.joinable()) {
+      send_thread_.join();
     }
 
     if (receive_thread_.joinable()) {
@@ -142,7 +165,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr task_command_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr link_diag_pub_;
-  rclcpp::TimerBase::SharedPtr send_timer_;
+  std::thread send_thread_;  // 1kHz TX 独立线程 (替换 ROS wall_timer, 消除 49ms 调度空洞)
 
   // --- 数据缓存 ---
   std::mutex data_mutex_;
@@ -153,6 +176,7 @@ private:
   std::mutex torque_cache_mutex_;
   float cached_torques_[SerialProtocol::NUM_ALL_JOINTS] = {0};
   rclcpp::Time last_torque_update_;
+  std::chrono::steady_clock::time_point last_torque_steady_{};  // 锁内用 steady_clock 计算 age
   bool torque_data_valid_ = false;
 
   int gripper_divider_ = 4;
@@ -182,26 +206,106 @@ private:
   struct SendStats {
     int64_t min_us{INT64_MAX}, max_us{0}, sum_us{0};
     int64_t lock_sum_us{0};
+    int64_t gap_max_us{0}, param_max_us{0}, cache_max_us{0};
+    int64_t build_torque_max_us{0}, send_torque_max_us{0};
+    int64_t build_gripper_max_us{0}, send_gripper_max_us{0};
+    int64_t build_status_max_us{0}, send_status_max_us{0};
+    int64_t gap_sum_us{0}, param_sum_us{0}, cache_sum_us{0};
+    int64_t build_torque_sum_us{0}, send_torque_sum_us{0};
+    int64_t build_gripper_sum_us{0}, send_gripper_sum_us{0};
+    int64_t build_status_sum_us{0}, send_status_sum_us{0};
     uint64_t count{0}, overruns{0};
-    void record(int64_t total, int64_t lock) {
+    void record(int64_t total, int64_t lock, int64_t gap, int64_t param, int64_t cache,
+                int64_t build_torque, int64_t send_torque, int64_t build_gripper,
+                int64_t send_gripper, int64_t build_status, int64_t send_status) {
       if (total < min_us) min_us = total;
       if (total > max_us) max_us = total;
+      if (gap > gap_max_us) gap_max_us = gap;
+      if (param > param_max_us) param_max_us = param;
+      if (cache > cache_max_us) cache_max_us = cache;
+      if (build_torque > build_torque_max_us) build_torque_max_us = build_torque;
+      if (send_torque > send_torque_max_us) send_torque_max_us = send_torque;
+      if (build_gripper > build_gripper_max_us) build_gripper_max_us = build_gripper;
+      if (send_gripper > send_gripper_max_us) send_gripper_max_us = send_gripper;
+      if (build_status > build_status_max_us) build_status_max_us = build_status;
+      if (send_status > send_status_max_us) send_status_max_us = send_status;
       sum_us += total;
       lock_sum_us += lock;
+      gap_sum_us += gap;
+      param_sum_us += param;
+      cache_sum_us += cache;
+      build_torque_sum_us += build_torque;
+      send_torque_sum_us += send_torque;
+      build_gripper_sum_us += build_gripper;
+      send_gripper_sum_us += send_gripper;
+      build_status_sum_us += build_status;
+      send_status_sum_us += send_status;
       ++count;
       if (total > 1500) ++overruns;
     }
     int64_t avg_us() const { return count ? sum_us / (int64_t)count : 0; }
     int64_t lock_avg_us() const { return count ? lock_sum_us / (int64_t)count : 0; }
+    int64_t avg(int64_t sum) const { return count ? sum / (int64_t)count : 0; }
     void reset() {
       min_us = INT64_MAX;
       max_us = 0;
       sum_us = 0;
       lock_sum_us = 0;
+      gap_max_us = param_max_us = cache_max_us = 0;
+      build_torque_max_us = send_torque_max_us = 0;
+      build_gripper_max_us = send_gripper_max_us = 0;
+      build_status_max_us = send_status_max_us = 0;
+      gap_sum_us = param_sum_us = cache_sum_us = 0;
+      build_torque_sum_us = send_torque_sum_us = 0;
+      build_gripper_sum_us = send_gripper_sum_us = 0;
+      build_status_sum_us = send_status_sum_us = 0;
       count = 0;
       overruns = 0;
     }
   } send_stats_;
+  std::chrono::steady_clock::time_point last_send_entry_{};
+
+  // ── RX gap 分布统计 ──
+  // receiveLoop 单线程写 live_, healthCheck 在 rx_gap_mutex_ 下 swap→snap 读
+  struct RxGapStats {
+    int64_t min_us{INT64_MAX}, max_us{0}, sum_us{0};
+    uint64_t count{0};
+    // 分桶: <2ms / 2-5ms / 5-20ms / >20ms
+    uint64_t lt2ms{0}, b2_5ms{0}, b5_20ms{0}, gt20ms{0};
+    void record(int64_t us) {
+      if (us < min_us) min_us = us;
+      if (us > max_us) max_us = us;
+      sum_us += us;
+      ++count;
+      if (us < 2000)       ++lt2ms;
+      else if (us < 5000)  ++b2_5ms;
+      else if (us < 20000) ++b5_20ms;
+      else                 ++gt20ms;
+    }
+    int64_t avg_us() const { return count ? sum_us / (int64_t)count : 0; }
+    void reset() { *this = RxGapStats{}; }
+  };
+  // receiveLoop 线程私有 (无锁)
+  RxGapStats sof_gap_live_;
+  RxGapStats jfb_gap_live_;
+  std::chrono::steady_clock::time_point last_sof_tp_{};
+  std::chrono::steady_clock::time_point last_jfb_tp_{};
+  bool first_sof_{true}, first_jfb_{true};
+  // healthCheck 读快照 (rx_gap_mutex_ 保护)
+  mutable std::mutex rx_gap_mutex_;
+  RxGapStats sof_gap_snap_;
+  RxGapStats jfb_gap_snap_;
+  // torque RX 计数 & seq 追踪
+  std::atomic<uint64_t> torque_rx_count_{0};
+  uint64_t last_torque_rx_count_{0};
+  std::atomic<uint64_t> torque_seq_dup_{0};
+  std::atomic<uint64_t> torque_seq_skip_{0};
+  uint8_t last_torque_seq_{0xFF};
+  // ── torque cache 健康计数 (替换锁内日志, 防止 send_thread_ 卡顿) ──
+  std::atomic<uint64_t> cache_stale_warn_{0};        // age > 10ms 秒
+  std::atomic<uint64_t> cache_stale_invalidated_{0}; // age > 100ms, 已开始发魔
+  std::atomic<uint64_t> cache_no_torque_{0};         // torque_data_valid_=false
+  std::atomic<uint64_t> cache_force_zero_{0};        // force_zero_torque 模式
 
   void linkDiagLoop() {
     uint64_t last_rx = 0;
@@ -412,7 +516,25 @@ private:
                   SerialProtocol::NUM_ARM_JOINTS);
       return;
     }
+    torque_rx_count_++;
+
+    // ── Priority3: seq id 追踪 (torque msg 第8元素为 seq, 可选) ──
+    // seq 字段由 torque_controller_node 在 data[7] 写入 (uint8 转 double)
+    if (msg->data.size() >= 8) {
+      const uint8_t seq = static_cast<uint8_t>(msg->data[7]);
+      if (last_torque_seq_ != 0xFF) {
+        const uint8_t expected = static_cast<uint8_t>(last_torque_seq_ + 1);
+        if (seq == last_torque_seq_) {
+          torque_seq_dup_++;
+        } else if (seq != expected) {
+          torque_seq_skip_++;
+        }
+      }
+      last_torque_seq_ = seq;
+    }
+
     std::lock_guard<std::mutex> lock(torque_cache_mutex_);
+    // data[0..5]=臂力矩, data[6]=夹爪, data[7]=seq(忽略缓存)
     const size_t n = std::min(msg->data.size(), SerialProtocol::NUM_ALL_JOINTS);
     for (size_t i = 0; i < n; ++i) {
       cached_torques_[i] = static_cast<float>(msg->data[i]);
@@ -421,6 +543,7 @@ private:
       cached_torques_[SerialProtocol::NUM_ARM_JOINTS] = 0.0f;
     }
     last_torque_update_ = this->now();
+    last_torque_steady_ = std::chrono::steady_clock::now();  // sendLoop 锁内 age 用
     torque_data_valid_ = true;
   }
 
@@ -431,6 +554,11 @@ private:
     using us = std::chrono::microseconds;
     const auto t_entry = Clock::now();
     int64_t serial_lock_us = 0;
+    const int64_t timer_gap_us =
+        (last_send_entry_ == Clock::time_point{})
+            ? 0
+            : std::chrono::duration_cast<us>(t_entry - last_send_entry_).count();
+    last_send_entry_ = t_entry;
 
     // tx_attempt 时间戳仅在 sendRaw 真正尝试发包时更新, 避免串口未开时诊断撒谎
     {
@@ -440,35 +568,35 @@ private:
       }
     }
 
+    const auto t_param0 = Clock::now();
     const bool force_zero = this->get_parameter("force_zero_torque").as_bool();
+    const int64_t param_us = std::chrono::duration_cast<us>(Clock::now() - t_param0).count();
 
-    // ── 读取缓存力矩 ──
+    // ── 读取缓存力矩 (锁内仅做数据操作, 无任何日志/系统调用) ──
     float torques_to_send[SerialProtocol::NUM_ARM_JOINTS];
     bool data_fresh = false;
+    const auto t_cache0 = Clock::now();
     {
       std::lock_guard<std::mutex> lock(torque_cache_mutex_);
       if (torque_data_valid_) {
-        double age = (this->now() - last_torque_update_).seconds();
-        if (age > 0.1) {
+        // age 用 steady_clock 计算, 避免在锁内调用 this->now() (ROS 时钟可能慢)
+        const double age_s = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - last_torque_steady_).count();
+        if (age_s > 0.1) {
           torque_data_valid_ = false;
           std::fill(cached_torques_, cached_torques_ + SerialProtocol::NUM_ALL_JOINTS, 0.0f);
-          RCLCPP_ERROR(this->get_logger(),
-                       "[SAFETY] Torque data stale (%.0f ms), invalidated → sending zeros",
-                       age * 1000);
-        } else if (age > 0.01) {
-          RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                               "[WARN] Torque data slightly stale (%.1f ms old)", age * 1000);
+          cache_stale_invalidated_++;  // 健康汇总: [HEALTH/TORQUE_CACHE] 输出
+        } else if (age_s > 0.01) {
+          cache_stale_warn_++;
         }
-        data_fresh = torque_data_valid_;  // 可能刚被清除
+        data_fresh = torque_data_valid_;
       } else {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                             "[WARN] No torque data received yet, sending zeros");
+        cache_no_torque_++;
       }
 
       if (force_zero) {
         std::fill(torques_to_send, torques_to_send + SerialProtocol::NUM_ARM_JOINTS, 0.0f);
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                             "[SAFETY] Force zero torque mode enabled - sending all zeros");
+        cache_force_zero_++;
       } else if (data_fresh) {
         std::copy(cached_torques_, cached_torques_ + SerialProtocol::NUM_ARM_JOINTS,
                   torques_to_send);
@@ -476,6 +604,7 @@ private:
         std::fill(torques_to_send, torques_to_send + SerialProtocol::NUM_ARM_JOINTS, 0.0f);
       }
     }
+    const int64_t cache_us = std::chrono::duration_cast<us>(Clock::now() - t_cache0).count();
 
     // ── 发送力矩包 ──
     SerialProtocol::TorqueCommand cmd;
@@ -483,15 +612,18 @@ private:
       cmd.torques[i] = torques_to_send[i];
     }
 
-    auto sendRaw = [&](const std::vector<uint8_t> &pkt) {
+    auto sendRaw = [&](const std::vector<uint8_t> &pkt) -> int64_t {
       tx_attempt_count_++;
       last_tx_attempt_activity_.store(std::chrono::steady_clock::now());
       const auto t_lock0 = Clock::now();
       std::lock_guard<std::mutex> slock(serial_mutex_);
       serial_lock_us += std::chrono::duration_cast<us>(Clock::now() - t_lock0).count();
+      int64_t send_us = 0;
       try {
-        if (!serial_port_ || !serial_port_->is_open()) return;
+        if (!serial_port_ || !serial_port_->is_open()) return send_us;
+        const auto t_send0 = Clock::now();
         const size_t sent = serial_port_->send(pkt);
+        send_us = std::chrono::duration_cast<us>(Clock::now() - t_send0).count();
         if (sent != pkt.size()) {
           RCLCPP_WARN(this->get_logger(), "[WARN] Partial send: %zu/%zu", sent, pkt.size());
         } else {
@@ -503,11 +635,18 @@ private:
                               "[ERROR] Send failed: %s", e.what());
         serial_port_->close();
       }
+      return send_us;
     };
 
-    sendRaw(SerialProtocol::buildTorquePacket(cmd));
+    const auto t_build_torque0 = Clock::now();
+    const auto torque_packet = SerialProtocol::buildTorquePacket(cmd);
+    const int64_t build_torque_us =
+        std::chrono::duration_cast<us>(Clock::now() - t_build_torque0).count();
+    const int64_t send_torque_us = sendRaw(torque_packet);
 
     // ── 分频发送夹爪包: [6] > +0.1 → GRIP, < -0.1 → RELEASE, else → STOP ──
+    int64_t build_gripper_us = 0;
+    int64_t send_gripper_us = 0;
     gripper_counter_ = (gripper_counter_ + 1) % gripper_divider_;
     if (gripper_counter_ == 0) {
       SerialProtocol::GripperAction action;
@@ -528,10 +667,16 @@ private:
         last_gripper_state_.store(SerialProtocol::GripperState::CLOSED);
       else if (action == SerialProtocol::GripperAction::RELEASE)
         last_gripper_state_.store(SerialProtocol::GripperState::OPEN);
-      sendRaw(SerialProtocol::buildGripperPacket(action));
+      const auto t_build_gripper0 = Clock::now();
+      const auto gripper_packet = SerialProtocol::buildGripperPacket(action);
+      build_gripper_us =
+          std::chrono::duration_cast<us>(Clock::now() - t_build_gripper0).count();
+      send_gripper_us = sendRaw(gripper_packet);
     }
 
     // ── 分频发送臂状态包 0x0006: 10Hz ──
+    int64_t build_status_us = 0;
+    int64_t send_status_us = 0;
     status_counter_ = (status_counter_ + 1) % status_divider_;
     if (status_counter_ == 0) {
       SerialProtocol::ArmStatusPacket status;
@@ -542,25 +687,52 @@ private:
       status.task_progress = 0;
       status.error_code = SerialProtocol::ArmError::NO_ERROR;
       status.gripper_state = last_gripper_state_.load();
-      sendRaw(SerialProtocol::buildArmStatusPacket(status));
+      const auto t_build_status0 = Clock::now();
+      const auto status_packet = SerialProtocol::buildArmStatusPacket(status);
+      build_status_us = std::chrono::duration_cast<us>(Clock::now() - t_build_status0).count();
+      send_status_us = sendRaw(status_packet);
     }
 
     // ── sendLoop 时序统计 (每1000次打印一次, 约1s) ──
     {
       const int64_t total_us = std::chrono::duration_cast<us>(Clock::now() - t_entry).count();
-      send_stats_.record(total_us, serial_lock_us);
+      send_stats_.record(total_us, serial_lock_us, timer_gap_us, param_us, cache_us,
+                         build_torque_us, send_torque_us, build_gripper_us, send_gripper_us,
+                         build_status_us, send_status_us);
 
       if (total_us > 1500) {
-        RCLCPP_WARN(this->get_logger(), "[SEND/TIMING] OVERRUN total=%ldus serial_lock=%ldus",
-                    total_us, serial_lock_us);
+        RCLCPP_WARN(this->get_logger(),
+                    "[SEND/TIMING] OVERRUN total=%ldus gap=%ldus param=%ldus cache=%ldus "
+                    "build_torque=%ldus send_torque=%ldus build_gripper=%ldus "
+                    "send_gripper=%ldus build_status=%ldus send_status=%ldus serial_lock=%ldus",
+                    total_us, timer_gap_us, param_us, cache_us, build_torque_us, send_torque_us,
+                    build_gripper_us, send_gripper_us, build_status_us, send_status_us,
+                    serial_lock_us);
       }
 
       if (send_stats_.count % 1000 == 0) {
         RCLCPP_INFO(this->get_logger(),
                     "[SEND/TIMING/1k] total: min=%ldus avg=%ldus max=%ldus | "
-                    "serial_lock: avg=%ldus | overruns=%lu",
+                    "gap: avg=%ldus max=%ldus | param: avg=%ldus max=%ldus | "
+                    "cache: avg=%ldus max=%ldus | build_torque: avg=%ldus max=%ldus | "
+                    "send_torque: avg=%ldus max=%ldus | build_gripper: avg=%ldus max=%ldus | "
+                    "send_gripper: avg=%ldus max=%ldus | build_status: avg=%ldus max=%ldus | "
+                    "send_status: avg=%ldus max=%ldus | serial_lock: avg=%ldus | overruns=%lu",
                     send_stats_.min_us, send_stats_.avg_us(), send_stats_.max_us,
-                    send_stats_.lock_avg_us(), send_stats_.overruns);
+                    send_stats_.avg(send_stats_.gap_sum_us), send_stats_.gap_max_us,
+                    send_stats_.avg(send_stats_.param_sum_us), send_stats_.param_max_us,
+                    send_stats_.avg(send_stats_.cache_sum_us), send_stats_.cache_max_us,
+                    send_stats_.avg(send_stats_.build_torque_sum_us),
+                    send_stats_.build_torque_max_us, send_stats_.avg(send_stats_.send_torque_sum_us),
+                    send_stats_.send_torque_max_us,
+                    send_stats_.avg(send_stats_.build_gripper_sum_us),
+                    send_stats_.build_gripper_max_us,
+                    send_stats_.avg(send_stats_.send_gripper_sum_us),
+                    send_stats_.send_gripper_max_us, send_stats_.avg(send_stats_.build_status_sum_us),
+                    send_stats_.build_status_max_us,
+                    send_stats_.avg(send_stats_.send_status_sum_us),
+                    send_stats_.send_status_max_us, send_stats_.lock_avg_us(),
+                    send_stats_.overruns);
         send_stats_.reset();
       }
     }
@@ -595,6 +767,17 @@ private:
             last_rx_activity_.store(std::chrono::steady_clock::now());
 
             if (byte == SerialProtocol::SOF) {
+              // ── SOF gap 记录 (仅 receiveLoop 线程写, 无锁) ──
+              const auto now_tp = std::chrono::steady_clock::now();
+              if (!first_sof_) {
+                const int64_t gap_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    now_tp - last_sof_tp_).count();
+                sof_gap_live_.record(gap_us);
+              } else {
+                first_sof_ = false;
+              }
+              last_sof_tp_ = now_tp;
+
               buffer.clear();
               buffer.push_back(byte);
               state = READ_LEN;
@@ -716,6 +899,18 @@ private:
         velocities[i] = SerialProtocol::read_float(packet.data(), offset);
         islive[i] = SerialProtocol::read_uint32(packet.data(), offset);
       }
+      // ── JFB gap 记录 (仅 receiveLoop 线程写, 无锁) ──
+      {
+        const auto now_tp = std::chrono::steady_clock::now();
+        if (!first_jfb_) {
+          const int64_t gap_us = std::chrono::duration_cast<std::chrono::microseconds>(
+              now_tp - last_jfb_tp_).count();
+          jfb_gap_live_.record(gap_us);
+        } else {
+          first_jfb_ = false;
+        }
+        last_jfb_tp_ = now_tp;
+      }
       updateAndPublishJointStates(positions, velocities);
 
     } else if (cmd_id == SerialProtocol::CMD_TASK_COMMAND) {
@@ -789,22 +984,33 @@ private:
     static uint64_t last_rx_count = 0;
     static uint64_t last_tx_count = 0;
     static uint64_t last_crc_errors = 0;
+    constexpr double kInterval = 5.0;
 
-    uint64_t current_rx = rx_packet_count_.load();
-    uint64_t current_tx = tx_packet_count_.load();
+    uint64_t current_rx  = rx_packet_count_.load();
+    uint64_t current_tx  = tx_packet_count_.load();
     uint64_t current_crc = rx_crc_errors_.load();
+    uint64_t current_trx = torque_rx_count_.load();
 
-    double rx_rate = (current_rx - last_rx_count) / 5.0;  // 5 sec interval
-    double tx_rate = (current_tx - last_tx_count) / 5.0;
-    uint64_t new_crc_errors = current_crc - last_crc_errors;
+    double rx_rate       = (current_rx  - last_rx_count)       / kInterval;
+    double tx_rate       = (current_tx  - last_tx_count)       / kInterval;
+    double torque_rx_hz  = (current_trx - last_torque_rx_count_) / kInterval;
+    uint64_t new_crc     = current_crc  - last_crc_errors;
 
-    // Check RX thread health
-    auto now = std::chrono::steady_clock::now();
-    auto last_activity = last_rx_activity_.load();
-    auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - last_activity).count();
+    auto now          = std::chrono::steady_clock::now();
+    auto last_act     = last_rx_activity_.load();
+    auto elapsed_ms   = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_act).count();
+    bool serial_ok    = serial_port_ && serial_port_->is_open();
 
-    bool serial_ok = serial_port_ && serial_port_->is_open();
+    // ── swap RX gap live → snap ──
+    RxGapStats sof_snap, jfb_snap;
+    {
+      std::lock_guard<std::mutex> lk(rx_gap_mutex_);
+      sof_snap = sof_gap_live_;  sof_gap_live_.reset();
+      jfb_snap = jfb_gap_live_;  jfb_gap_live_.reset();
+    }
+
+    uint64_t seq_dup  = torque_seq_dup_.exchange(0);
+    uint64_t seq_skip = torque_seq_skip_.exchange(0);
 
     if (simulation_mode_) {
       RCLCPP_INFO(this->get_logger(), "[HEALTH] TX: %.1f Hz | Serial: SIMULATION MODE", tx_rate);
@@ -814,25 +1020,66 @@ private:
                     "[HEALTH] RX thread inactive for %ld ms! Serial OK but no data", elapsed_ms);
       }
 
-      std::string status = serial_ok ? "OK" : "CLOSED";
-      if (new_crc_errors > 0) {
+      const std::string status = serial_ok ? "OK" : "CLOSED";
+      if (new_crc > 0) {
         RCLCPP_WARN(this->get_logger(),
-                    "[HEALTH] TX: %.1f Hz | RX: %.1f Hz | Serial: %s | CRC errors: +%lu", tx_rate,
-                    rx_rate, status.c_str(), new_crc_errors);
+                    "[HEALTH] TX: %.1f Hz | RX_OK: %.1f Hz | torque_rx: %.1f Hz | Serial: %s"
+                    " | CRC: +%lu",
+                    tx_rate, rx_rate, torque_rx_hz, status.c_str(), new_crc);
       } else {
-        RCLCPP_INFO(this->get_logger(), "[HEALTH] TX: %.1f Hz | RX: %.1f Hz | Serial: %s", tx_rate,
-                    rx_rate, status.c_str());
+        RCLCPP_INFO(this->get_logger(),
+                    "[HEALTH] TX: %.1f Hz | RX_OK: %.1f Hz | torque_rx: %.1f Hz | Serial: %s",
+                    tx_rate, rx_rate, torque_rx_hz, status.c_str());
+      }
+
+      // ── [HEALTH/RX_PIPE] SOF & JFB gap 分布 ──
+      if (sof_snap.count > 0) {
+        RCLCPP_INFO(this->get_logger(),
+                    "[HEALTH/RX_PIPE] SOF: n=%lu avg=%ldus max=%ldus"
+                    " | gap_bucket: <2ms=%lu 2-5ms=%lu 5-20ms=%lu >20ms=%lu"
+                    " | JFB: n=%lu avg=%ldus max=%ldus gt20ms=%lu",
+                    sof_snap.count, sof_snap.avg_us(), sof_snap.max_us,
+                    sof_snap.lt2ms, sof_snap.b2_5ms, sof_snap.b5_20ms, sof_snap.gt20ms,
+                    jfb_snap.count, jfb_snap.avg_us(), jfb_snap.max_us, jfb_snap.gt20ms);
+      } else {
+        RCLCPP_INFO(this->get_logger(), "[HEALTH/RX_PIPE] no SOF in this window");
+      }
+
+      // ── [HEALTH/TORQUE_CACHE] 力矩缓存健康 (替换锁内日志) ──
+      const uint64_t stale_w = cache_stale_warn_.exchange(0);
+      const uint64_t stale_i = cache_stale_invalidated_.exchange(0);
+      const uint64_t no_tq   = cache_no_torque_.exchange(0);
+      const uint64_t fzero   = cache_force_zero_.exchange(0);
+      if (stale_i > 0) {
+        RCLCPP_ERROR(this->get_logger(),
+                     "[HEALTH/TORQUE_CACHE] INVALIDATED=%lu (age>100ms) stale_warn=%lu "
+                     "no_torque=%lu force_zero=%lu (in %.0fs)",
+                     stale_i, stale_w, no_tq, fzero, kInterval);
+      } else if (stale_w > 0 || no_tq > 0) {
+        RCLCPP_WARN(this->get_logger(),
+                    "[HEALTH/TORQUE_CACHE] stale_warn=%lu no_torque=%lu force_zero=%lu (in %.0fs)",
+                    stale_w, no_tq, fzero, kInterval);
+      } else {
+        RCLCPP_INFO(this->get_logger(),
+                    "[HEALTH/TORQUE_CACHE] ok stale_warn=0 no_torque=0 force_zero=%lu", fzero);
+      }
+      if (seq_dup > 0 || seq_skip > 0) {
+        RCLCPP_WARN(this->get_logger(),
+                    "[HEALTH/TORQUE_SEQ] dup=%lu skip=%lu (in %.0fs)",
+                    seq_dup, seq_skip, kInterval);
+      } else {
+        RCLCPP_INFO(this->get_logger(), "[HEALTH/TORQUE_SEQ] dup=0 skip=0");
       }
     }
 
-    last_rx_count = current_rx;
-    last_tx_count = current_tx;
-    last_crc_errors = current_crc;
+    last_rx_count        = current_rx;
+    last_tx_count        = current_tx;
+    last_crc_errors      = current_crc;
+    last_torque_rx_count_ = current_trx;
 
-    // Publish: [tx_rate, rx_rate, crc_errors_delta, serial_ok, idle_ms]
     std_msgs::msg::Float64MultiArray diag_msg;
-    diag_msg.data = {tx_rate, rx_rate, static_cast<double>(new_crc_errors), serial_ok ? 1.0 : 0.0,
-                     static_cast<double>(elapsed_ms)};
+    diag_msg.data = {tx_rate, rx_rate, static_cast<double>(new_crc), serial_ok ? 1.0 : 0.0,
+                     static_cast<double>(elapsed_ms), torque_rx_hz};
     link_diag_pub_->publish(diag_msg);
   }
 };

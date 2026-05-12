@@ -118,8 +118,8 @@ class PanelNode(Node):
         line = f"[{sev}] {name}: {msg.msg}"
         with self._log_lock:
             self.log_lines.append((line, sev))
-            if len(self.log_lines) > 500:
-                self.log_lines = self.log_lines[-300:]
+            if len(self.log_lines) > 1000:
+                self.log_lines = self.log_lines[-500:]
 
     def pub_mode(self, mode):
         m = UInt8(); m.data = mode; self.mode_pub.publish(m)
@@ -131,8 +131,11 @@ class PanelNode(Node):
         with self._lock:
             return dict(joints=list(self.joints) if self.joints else None,
                         pose=self.pose, mode=self.control_mode, arm_state=self.arm_state)
-    def get_new_logs(self, since):
-        with self._log_lock: return self.log_lines[since:]
+    def get_new_logs(self):
+        with self._log_lock:
+            res = self.log_lines
+            self.log_lines = []
+            return res
 
     @staticmethod
     def _wait_future(fut, timeout=3.0):
@@ -172,7 +175,6 @@ class MissionPanel:
         rclpy.init()
         self._node = PanelNode()
         threading.Thread(target=lambda: rclpy.spin(self._node), daemon=True).start()
-        self._log_offset = 0
         self._trajs = []
         self._build_gui()
         self._root.after(500, self._refresh_trajs)
@@ -421,13 +423,19 @@ class MissionPanel:
                              ("Roll", r), ("Pitch", pi), ("Yaw", ya)]:
                 self._pose_vals[key].configure(text=f"{val:+.3f}")
 
-        new = self._node.get_new_logs(self._log_offset)
+        new = self._node.get_new_logs()
         if new:
-            self._log_offset += len(new)
             self._log_text.configure(state="normal")
             for line, sev in new:
                 tag = sev if sev in ("WRN", "ERR", "FTL", "INF") else None
                 self._log_text.insert(tk.END, line + "\n", tag)
+            
+            # Limit the Tkinter text widget length to prevent memory leak
+            idx_end = self._log_text.index("end-1c")
+            line_count = int(float(idx_end))
+            if line_count > 500:
+                self._log_text.delete("1.0", f"{line_count - 500 + 1}.0")
+                
             self._log_text.see(tk.END)
             self._log_text.configure(state="disabled")
 

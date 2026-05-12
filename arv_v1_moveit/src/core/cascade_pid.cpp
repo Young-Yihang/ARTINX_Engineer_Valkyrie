@@ -40,6 +40,10 @@ double CascadePid::compute(double pos_ref, double pos_fdb, double vel_fdb, doubl
     double d_fdb = angleDiff(pos_fdb_lowsample_[0], pos_fdb_lowsample_[1]);
     pos_d_held_ = -pos_gains_.kd * d_fdb * d_dt_inv_;
   }
+  if (firstupdate_remaining_ > 0) {
+    --firstupdate_remaining_;
+    pos_d_held_ = 0.0;
+  }
   double pos_d = pos_d_held_;
 
   ref_vel_ = std::clamp(pos_p + pos_i + pos_d, -max_vel_, max_vel_);
@@ -84,12 +88,14 @@ void CascadePid::reset() {
   pos_fdb_lowsample_[0] = 0.0;
   pos_fdb_lowsample_[1] = 0.0;
   pos_d_held_ = 0.0;
+  firstupdate_remaining_ = d_sample_period_ms_;
 }
 
 void CascadePid::setDerivativeMode(uint32_t sample_period_ms, bool divide_dt) {
   d_sample_period_ms_ = (sample_period_ms > 0) ? sample_period_ms : 1;
   d_divide_dt_ = divide_dt;
   d_dt_inv_ = divide_dt ? (1.0 / (d_sample_period_ms_ * 0.001)) : 1.0;
+  firstupdate_remaining_ = d_sample_period_ms_;
 }
 
 void CascadePid::setPositionGains(const PidGains &gains) {

@@ -4,6 +4,13 @@
 
 /torque_controller_action_server:
   ros__parameters:
+    # ========== route_mode: 控制律 bypass, 仅路由 q_target 给 MCU ==========
+    # ON: torque_controller 退化为 target router (源: /joint_position_target topic + 轨迹 action)
+    #     effort_topic 的 data[0..5] 语义变为 q_target(rad), MCU 端需配合解析
+    #     避免上位机闭环延迟引起 J5 等关节抽搐 (2026-05-11 决策)
+    # OFF: 原 PID/阻抗 + 动力学控制律
+    route_mode: true
+
     # ========== 卡尔曼滤波器（速度滤波，降低噪声）==========
     kalman:
       enabled: false
@@ -56,14 +63,14 @@
         vel_limit: 5.0
 
       joint_4:
-        pos_Kp: 40.0       # MCU 直接值
+        pos_Kp: 13.0       # MCU 同值; dMode(2,true) 见 torque_controller_node init
         pos_Ki: 0.0
-        pos_Kd: 0.0
-        max_integral_pos: 0.3
-        vel_Kp: 0.2
+        pos_Kd: 0.02       # MCU 同值
+        max_integral_pos: 2.0
+        vel_Kp: 0.9        # MCU 同值
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 1.6   # MCU posPid max_output=1.6
+        vel_limit: 1.0   # MCU posPid max_output=1.0
 
       joint_5:
         pos_Kp: 15.0
