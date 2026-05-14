@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/trajectory_manager/SaveLastTrajectory.srv"
   "srv/trajectory_manager/PlanToPreset.srv"
   "srv/trajectory_manager/ComposeTrajectory.srv"
+  "srv/trajectory_manager/CancelCurrentTrajectory.srv"
   # mission_executor_node 服务
   "srv/mission_executor/ExecuteAction.srv"
   "srv/mission_executor/GetTaskState.srv"

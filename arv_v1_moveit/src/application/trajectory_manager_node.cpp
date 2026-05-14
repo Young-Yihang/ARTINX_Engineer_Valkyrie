@@ -17,6 +17,7 @@
 #include <std_msgs/msg/u_int16.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
+#include "arv_v1_interfaces/srv/cancel_current_trajectory.hpp"
 #include "arv_v1_interfaces/srv/compose_trajectory.hpp"
 #include "arv_v1_interfaces/srv/list_trajectories.hpp"
 #include "arv_v1_interfaces/srv/load_trajectory.hpp"
@@ -46,6 +47,11 @@ public:
 
     joint_names_ = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"};
 
+    // Callback groups: service 串行 (MutuallyExclusive), action client 并发 (Reentrant)
+    // 让 service callback 同步 wait_for action result 时, action 响应回调能在另一线程跑, 不死锁.
+    service_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    action_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
         "/joint_states", rclcpp::SensorDataQoS(),
         std::bind(&TrajectoryManagerNode::jointStateCallback, this, std::placeholders::_1));
@@ -54,32 +60,53 @@ public:
         "/ARM_controller/joint_trajectory", 10,
         std::bind(&TrajectoryManagerNode::trajectoryCallback, this, std::placeholders::_1));
 
+    rcl_action_client_options_t action_opts = rcl_action_client_get_default_options();
     action_client_ = rclcpp_action::create_client<FollowJointTrajectory>(
-        this, "/ARM_controller/follow_joint_trajectory");
+        this, "/ARM_controller/follow_joint_trajectory", action_cb_group_, action_opts);
+
+    rclcpp::QoS svc_qos = rclcpp::ServicesQoS();
 
     save_srv_ = this->create_service<arv_v1_interfaces::srv::SaveTrajectory>(
-        "/save_trajectory", std::bind(&TrajectoryManagerNode::saveTrajectoryCallback, this,
-                                      std::placeholders::_1, std::placeholders::_2));
+        "/save_trajectory",
+        std::bind(&TrajectoryManagerNode::saveTrajectoryCallback, this, std::placeholders::_1,
+                  std::placeholders::_2),
+        svc_qos, service_cb_group_);
 
     save_last_srv_ = this->create_service<arv_v1_interfaces::srv::SaveLastTrajectory>(
-        "/save_last_trajectory", std::bind(&TrajectoryManagerNode::saveLastTrajectoryCallback, this,
-                                           std::placeholders::_1, std::placeholders::_2));
+        "/save_last_trajectory",
+        std::bind(&TrajectoryManagerNode::saveLastTrajectoryCallback, this, std::placeholders::_1,
+                  std::placeholders::_2),
+        svc_qos, service_cb_group_);
 
     load_srv_ = this->create_service<arv_v1_interfaces::srv::LoadTrajectory>(
-        "/load_trajectory", std::bind(&TrajectoryManagerNode::loadTrajectoryCallback, this,
-                                      std::placeholders::_1, std::placeholders::_2));
+        "/load_trajectory",
+        std::bind(&TrajectoryManagerNode::loadTrajectoryCallback, this, std::placeholders::_1,
+                  std::placeholders::_2),
+        svc_qos, service_cb_group_);
 
     list_srv_ = this->create_service<arv_v1_interfaces::srv::ListTrajectories>(
-        "/list_trajectories", std::bind(&TrajectoryManagerNode::listTrajectoriesCallback, this,
-                                        std::placeholders::_1, std::placeholders::_2));
+        "/list_trajectories",
+        std::bind(&TrajectoryManagerNode::listTrajectoriesCallback, this, std::placeholders::_1,
+                  std::placeholders::_2),
+        svc_qos, service_cb_group_);
 
     plan_preset_srv_ = this->create_service<arv_v1_interfaces::srv::PlanToPreset>(
-        "/plan_to_preset", std::bind(&TrajectoryManagerNode::planToPresetCallback, this,
-                                     std::placeholders::_1, std::placeholders::_2));
+        "/plan_to_preset",
+        std::bind(&TrajectoryManagerNode::planToPresetCallback, this, std::placeholders::_1,
+                  std::placeholders::_2),
+        svc_qos, service_cb_group_);
 
     compose_srv_ = this->create_service<arv_v1_interfaces::srv::ComposeTrajectory>(
-        "/compose_trajectory", std::bind(&TrajectoryManagerNode::composeTrajectoryCallback, this,
-                                         std::placeholders::_1, std::placeholders::_2));
+        "/compose_trajectory",
+        std::bind(&TrajectoryManagerNode::composeTrajectoryCallback, this, std::placeholders::_1,
+                  std::placeholders::_2),
+        svc_qos, service_cb_group_);
+
+    cancel_srv_ = this->create_service<arv_v1_interfaces::srv::CancelCurrentTrajectory>(
+        "/cancel_current_trajectory",
+        std::bind(&TrajectoryManagerNode::cancelCurrentTrajectoryCallback, this,
+                  std::placeholders::_1, std::placeholders::_2),
+        svc_qos, service_cb_group_);
 
     RCLCPP_INFO(this->get_logger(), " ");
     RCLCPP_INFO(this->get_logger(), "==============================================");
@@ -93,6 +120,10 @@ public:
     RCLCPP_INFO(this->get_logger(), "  /list_trajectories    - List saved trajectories");
     RCLCPP_INFO(this->get_logger(),
                 "  /plan_to_preset       - Plan & execute to SRDF named target");
+    RCLCPP_INFO(this->get_logger(),
+                "  /compose_trajectory   - Plan & save multi-waypoint trajectory");
+    RCLCPP_INFO(this->get_logger(),
+                "  /cancel_current_trajectory - Cancel active FJT goal (B fast-forward)");
     RCLCPP_INFO(this->get_logger(), " ");
     RCLCPP_INFO(this->get_logger(), "Usage:");
     RCLCPP_INFO(this->get_logger(), "  1. Plan and execute in RViz");
@@ -123,6 +154,15 @@ private:
   rclcpp::Service<arv_v1_interfaces::srv::ListTrajectories>::SharedPtr list_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::PlanToPreset>::SharedPtr plan_preset_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::ComposeTrajectory>::SharedPtr compose_srv_;
+  rclcpp::Service<arv_v1_interfaces::srv::CancelCurrentTrajectory>::SharedPtr cancel_srv_;
+
+  rclcpp::CallbackGroup::SharedPtr service_cb_group_;
+  rclcpp::CallbackGroup::SharedPtr action_cb_group_;
+
+  // 当前 active FJT goal handle, /cancel_current_trajectory 用其调 async_cancel_goal.
+  // 由 loadTrajectoryCallback 的 send_goal 线程 set/clear, cancel callback 读
+  GoalHandleFJT::SharedPtr current_goal_handle_;
+  std::mutex goal_handle_mu_;
 
   std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
   bool move_group_ready_ = false;
@@ -462,46 +502,68 @@ private:
           return;
         }
 
-        // TODO: 支持 speed_factor 缩放轨迹时间戳 (LoadTrajectory.srv 加 float64 speed_factor)
-        // for (auto& pt : trajectory.points) {
-        //   double t = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9;
-        //   pt.time_from_start = rclcpp::Duration::from_seconds(t / speed_factor);
-        // }
         auto goal = FollowJointTrajectory::Goal();
         goal.trajectory = trajectory;
 
         auto send_goal_options = rclcpp_action::Client<FollowJointTrajectory>::SendGoalOptions();
+        auto goal_fut = action_client_->async_send_goal(goal, send_goal_options);
 
-        send_goal_options.goal_response_callback =
-            [this](const GoalHandleFJT::SharedPtr& goal_handle) {
-              if (!goal_handle) {
-                RCLCPP_ERROR(this->get_logger(), "[LoadTrajectory] Goal rejected");
-              } else {
-                RCLCPP_INFO(this->get_logger(), "[LoadTrajectory] Goal accepted, executing...");
-              }
-            };
+        // 等 goal_handle (action server accept)
+        if (goal_fut.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+          response->success = false;
+          response->message = "Goal send timeout";
+          return;
+        }
+        auto goal_handle = goal_fut.get();
+        if (!goal_handle) {
+          response->success = false;
+          response->message = "Goal rejected by action server";
+          return;
+        }
 
-        send_goal_options.result_callback = [this](const GoalHandleFJT::WrappedResult& result) {
-          switch (result.code) {
-            case rclcpp_action::ResultCode::SUCCEEDED:
-              RCLCPP_INFO(this->get_logger(), "[LoadTrajectory] Execution completed successfully");
-              break;
-            case rclcpp_action::ResultCode::ABORTED:
-              RCLCPP_ERROR(this->get_logger(), "[LoadTrajectory] Execution aborted");
-              break;
-            case rclcpp_action::ResultCode::CANCELED:
-              RCLCPP_WARN(this->get_logger(), "[LoadTrajectory] Execution canceled");
-              break;
-            default:
-              RCLCPP_ERROR(this->get_logger(), "[LoadTrajectory] Unknown result code");
-              break;
-          }
-        };
+        // 记入 current_goal_handle_, 让 /cancel_current_trajectory 能砍
+        {
+          std::lock_guard<std::mutex> lk(goal_handle_mu_);
+          current_goal_handle_ = goal_handle;
+        }
 
-        action_client_->async_send_goal(goal, send_goal_options);
+        // 同步等 action result (action_cb_group_ Reentrant 保证 result 回调在另一线程跑, 不死锁)
+        auto result_fut = action_client_->async_get_result(goal_handle);
+        auto wait_dur = std::chrono::duration<double>(duration + 5.0);
+        auto result_status = result_fut.wait_for(wait_dur);
 
-        response->success = true;
-        response->message = "Trajectory loaded and execution started";
+        // 清 current_goal_handle_ (无论结果)
+        {
+          std::lock_guard<std::mutex> lk(goal_handle_mu_);
+          current_goal_handle_.reset();
+        }
+
+        if (result_status != std::future_status::ready) {
+          response->success = false;
+          response->message = "Execution timeout";
+          return;
+        }
+
+        auto wrapped = result_fut.get();
+        switch (wrapped.code) {
+          case rclcpp_action::ResultCode::SUCCEEDED:
+            response->success = true;
+            response->message = "";
+            break;
+          case rclcpp_action::ResultCode::CANCELED:
+            // 区分: B fast-forward 砍的轨迹也算 "成功" 但消息标 canceled
+            response->success = true;
+            response->message = "canceled";
+            break;
+          case rclcpp_action::ResultCode::ABORTED:
+            response->success = false;
+            response->message = "aborted by controller";
+            break;
+          default:
+            response->success = false;
+            response->message = "unknown result code";
+            break;
+        }
       } else {
         response->success = true;
         response->message = "Trajectory loaded (not executed)";
@@ -731,6 +793,26 @@ private:
     }
   }
 
+  void cancelCurrentTrajectoryCallback(
+      const std::shared_ptr<arv_v1_interfaces::srv::CancelCurrentTrajectory::Request> /*req*/,
+      std::shared_ptr<arv_v1_interfaces::srv::CancelCurrentTrajectory::Response> res) {
+    GoalHandleFJT::SharedPtr handle;
+    {
+      std::lock_guard<std::mutex> lk(goal_handle_mu_);
+      handle = current_goal_handle_;
+    }
+    if (!handle) {
+      // 幂等: 无 active goal 也 success
+      res->success = true;
+      res->message = "no active goal";
+      return;
+    }
+    RCLCPP_WARN(this->get_logger(), "[CancelCurrent] Canceling active FJT goal");
+    action_client_->async_cancel_goal(handle);
+    res->success = true;
+    res->message = "cancel requested";
+  }
+
   void listTrajectoriesCallback(
       const std::shared_ptr<arv_v1_interfaces::srv::ListTrajectories::Request> /*request*/,
       std::shared_ptr<arv_v1_interfaces::srv::ListTrajectories::Response> response) {
@@ -772,7 +854,11 @@ int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   try {
     auto node = std::make_shared<TrajectoryManagerNode>();
-    rclcpp::spin(node);
+    // MultiThreadedExecutor + Reentrant action_cb_group_ 让 service callback 同步等 action
+    // result 时, action 的 goal_response / result / cancel 回调能在其他线程跑, 避免死锁.
+    rclcpp::executors::MultiThreadedExecutor exec;
+    exec.add_node(node);
+    exec.spin();
   } catch (const std::exception& e) {
     RCLCPP_FATAL(rclcpp::get_logger("trajectory_manager"), "Fatal: %s", e.what());
   }
