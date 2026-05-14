@@ -665,6 +665,33 @@ private:
     move_group_->setPlanningTime(timeout);
     move_group_->setMaxVelocityScalingFactor(speed);
     move_group_->setMaxAccelerationScalingFactor(speed);
+    // Pilz PTP 关节空间解析解, 跟 compose 一致, 避免 OMPL 卡死
+    move_group_->setPlanningPipelineId("pilz_industrial_motion_planner");
+    move_group_->setPlannerId("PTP");
+
+    // 显式设 start state 从自己的 /joint_states sub (current_position_), 绕开 MoveIt
+    // current_state_monitor 的 QoS 不匹配坑 — 不然 plan 用空 start state 生成无效轨迹.
+    auto robot_model = move_group_->getRobotModel();
+    if (!robot_model) {
+      response->success = false;
+      response->message = "Robot model not available";
+      return;
+    }
+    moveit::core::RobotState start_state(robot_model);
+    start_state.setToDefaultValues();
+    std::vector<double> cur(6);
+    {
+      std::lock_guard<std::mutex> lk(state_mutex_);
+      if (!joint_state_received_) {
+        response->success = false;
+        response->message = "No /joint_states received yet";
+        return;
+      }
+      cur.assign(current_position_.begin(), current_position_.end());
+    }
+    start_state.setJointGroupPositions("ARM", cur);
+    start_state.update();
+    move_group_->setStartState(start_state);
 
     if (!move_group_->setNamedTarget(request->preset_name)) {
       response->success = false;
