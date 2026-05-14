@@ -183,8 +183,12 @@ private:
   int gripper_counter_ = 0;
 
   // 0x0006 ARM_STATUS TX: 10Hz (1kHz / 100)
+  // 0x0006 = mission_executor 心跳: 若 /arm_state 停发 >500ms (即 mission_executor 挂了),
+  // 这里也不再向 MCU 发 0x0006, 让 MCU watchdog 检测到"上位机死亡".
   uint8_t cached_arm_state_ = 0x05;  // 默认 ArmState::RELAX
   std::mutex arm_state_mutex_;
+  std::chrono::steady_clock::time_point arm_state_last_rx_{};
+  bool arm_state_ever_received_ = false;
   int status_divider_ = 100;
   int status_counter_ = 0;
 
@@ -277,10 +281,14 @@ private:
       if (us > max_us) max_us = us;
       sum_us += us;
       ++count;
-      if (us < 2000)       ++lt2ms;
-      else if (us < 5000)  ++b2_5ms;
-      else if (us < 20000) ++b5_20ms;
-      else                 ++gt20ms;
+      if (us < 2000)
+        ++lt2ms;
+      else if (us < 5000)
+        ++b2_5ms;
+      else if (us < 20000)
+        ++b5_20ms;
+      else
+        ++gt20ms;
     }
     int64_t avg_us() const { return count ? sum_us / (int64_t)count : 0; }
     void reset() { *this = RxGapStats{}; }
@@ -302,10 +310,10 @@ private:
   std::atomic<uint64_t> torque_seq_skip_{0};
   uint8_t last_torque_seq_{0xFF};
   // ── torque cache 健康计数 (替换锁内日志, 防止 send_thread_ 卡顿) ──
-  std::atomic<uint64_t> cache_stale_warn_{0};        // age > 10ms 秒
-  std::atomic<uint64_t> cache_stale_invalidated_{0}; // age > 100ms, 已开始发魔
-  std::atomic<uint64_t> cache_no_torque_{0};         // torque_data_valid_=false
-  std::atomic<uint64_t> cache_force_zero_{0};        // force_zero_torque 模式
+  std::atomic<uint64_t> cache_stale_warn_{0};         // age > 10ms 秒
+  std::atomic<uint64_t> cache_stale_invalidated_{0};  // age > 100ms, 已开始发魔
+  std::atomic<uint64_t> cache_no_torque_{0};          // torque_data_valid_=false
+  std::atomic<uint64_t> cache_force_zero_{0};         // force_zero_torque 模式
 
   void linkDiagLoop() {
     uint64_t last_rx = 0;
@@ -505,6 +513,8 @@ private:
           }
           std::lock_guard<std::mutex> lk(arm_state_mutex_);
           cached_arm_state_ = msg->data;
+          arm_state_last_rx_ = std::chrono::steady_clock::now();
+          arm_state_ever_received_ = true;
         });
   }
 
@@ -580,8 +590,9 @@ private:
       std::lock_guard<std::mutex> lock(torque_cache_mutex_);
       if (torque_data_valid_) {
         // age 用 steady_clock 计算, 避免在锁内调用 this->now() (ROS 时钟可能慢)
-        const double age_s = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - last_torque_steady_).count();
+        const double age_s =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - last_torque_steady_)
+                .count();
         if (age_s > 0.1) {
           torque_data_valid_ = false;
           std::fill(cached_torques_, cached_torques_ + SerialProtocol::NUM_ALL_JOINTS, 0.0f);
@@ -669,28 +680,41 @@ private:
         last_gripper_state_.store(SerialProtocol::GripperState::OPEN);
       const auto t_build_gripper0 = Clock::now();
       const auto gripper_packet = SerialProtocol::buildGripperPacket(action);
-      build_gripper_us =
-          std::chrono::duration_cast<us>(Clock::now() - t_build_gripper0).count();
+      build_gripper_us = std::chrono::duration_cast<us>(Clock::now() - t_build_gripper0).count();
       send_gripper_us = sendRaw(gripper_packet);
     }
 
-    // ── 分频发送臂状态包 0x0006: 10Hz ──
+    // ── 分频发送臂状态包 0x0006: 10Hz, 同时承载 mission_executor 心跳 ──
+    // 若 /arm_state 停发 >500ms (mission_executor 挂了), 这里跳过发送让 MCU watchdog
+    // 检测到上位机死亡. 仅 hardware_interface 本身存活不算"上位机活着".
     int64_t build_status_us = 0;
     int64_t send_status_us = 0;
     status_counter_ = (status_counter_ + 1) % status_divider_;
     if (status_counter_ == 0) {
+      bool fresh = false;
       SerialProtocol::ArmStatusPacket status;
       {
         std::lock_guard<std::mutex> lk(arm_state_mutex_);
+        if (arm_state_ever_received_) {
+          auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - arm_state_last_rx_)
+                         .count();
+          fresh = age < 500;
+        }
         status.arm_state = static_cast<SerialProtocol::ArmState>(cached_arm_state_);
       }
-      status.task_progress = 0;
-      status.error_code = SerialProtocol::ArmError::NO_ERROR;
-      status.gripper_state = last_gripper_state_.load();
-      const auto t_build_status0 = Clock::now();
-      const auto status_packet = SerialProtocol::buildArmStatusPacket(status);
-      build_status_us = std::chrono::duration_cast<us>(Clock::now() - t_build_status0).count();
-      send_status_us = sendRaw(status_packet);
+      if (fresh) {
+        status.task_progress = 0;
+        status.error_code = SerialProtocol::ArmError::NO_ERROR;
+        status.gripper_state = last_gripper_state_.load();
+        const auto t_build_status0 = Clock::now();
+        const auto status_packet = SerialProtocol::buildArmStatusPacket(status);
+        build_status_us = std::chrono::duration_cast<us>(Clock::now() - t_build_status0).count();
+        send_status_us = sendRaw(status_packet);
+      } else {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                             "[0x0006] /arm_state stale, skip TX (mission_executor 挂了?)");
+      }
     }
 
     // ── sendLoop 时序统计 (每1000次打印一次, 约1s) ──
@@ -711,28 +735,25 @@ private:
       }
 
       if (send_stats_.count % 1000 == 0) {
-        RCLCPP_INFO(this->get_logger(),
-                    "[SEND/TIMING/1k] total: min=%ldus avg=%ldus max=%ldus | "
-                    "gap: avg=%ldus max=%ldus | param: avg=%ldus max=%ldus | "
-                    "cache: avg=%ldus max=%ldus | build_torque: avg=%ldus max=%ldus | "
-                    "send_torque: avg=%ldus max=%ldus | build_gripper: avg=%ldus max=%ldus | "
-                    "send_gripper: avg=%ldus max=%ldus | build_status: avg=%ldus max=%ldus | "
-                    "send_status: avg=%ldus max=%ldus | serial_lock: avg=%ldus | overruns=%lu",
-                    send_stats_.min_us, send_stats_.avg_us(), send_stats_.max_us,
-                    send_stats_.avg(send_stats_.gap_sum_us), send_stats_.gap_max_us,
-                    send_stats_.avg(send_stats_.param_sum_us), send_stats_.param_max_us,
-                    send_stats_.avg(send_stats_.cache_sum_us), send_stats_.cache_max_us,
-                    send_stats_.avg(send_stats_.build_torque_sum_us),
-                    send_stats_.build_torque_max_us, send_stats_.avg(send_stats_.send_torque_sum_us),
-                    send_stats_.send_torque_max_us,
-                    send_stats_.avg(send_stats_.build_gripper_sum_us),
-                    send_stats_.build_gripper_max_us,
-                    send_stats_.avg(send_stats_.send_gripper_sum_us),
-                    send_stats_.send_gripper_max_us, send_stats_.avg(send_stats_.build_status_sum_us),
-                    send_stats_.build_status_max_us,
-                    send_stats_.avg(send_stats_.send_status_sum_us),
-                    send_stats_.send_status_max_us, send_stats_.lock_avg_us(),
-                    send_stats_.overruns);
+        RCLCPP_INFO(
+            this->get_logger(),
+            "[SEND/TIMING/1k] total: min=%ldus avg=%ldus max=%ldus | "
+            "gap: avg=%ldus max=%ldus | param: avg=%ldus max=%ldus | "
+            "cache: avg=%ldus max=%ldus | build_torque: avg=%ldus max=%ldus | "
+            "send_torque: avg=%ldus max=%ldus | build_gripper: avg=%ldus max=%ldus | "
+            "send_gripper: avg=%ldus max=%ldus | build_status: avg=%ldus max=%ldus | "
+            "send_status: avg=%ldus max=%ldus | serial_lock: avg=%ldus | overruns=%lu",
+            send_stats_.min_us, send_stats_.avg_us(), send_stats_.max_us,
+            send_stats_.avg(send_stats_.gap_sum_us), send_stats_.gap_max_us,
+            send_stats_.avg(send_stats_.param_sum_us), send_stats_.param_max_us,
+            send_stats_.avg(send_stats_.cache_sum_us), send_stats_.cache_max_us,
+            send_stats_.avg(send_stats_.build_torque_sum_us), send_stats_.build_torque_max_us,
+            send_stats_.avg(send_stats_.send_torque_sum_us), send_stats_.send_torque_max_us,
+            send_stats_.avg(send_stats_.build_gripper_sum_us), send_stats_.build_gripper_max_us,
+            send_stats_.avg(send_stats_.send_gripper_sum_us), send_stats_.send_gripper_max_us,
+            send_stats_.avg(send_stats_.build_status_sum_us), send_stats_.build_status_max_us,
+            send_stats_.avg(send_stats_.send_status_sum_us), send_stats_.send_status_max_us,
+            send_stats_.lock_avg_us(), send_stats_.overruns);
         send_stats_.reset();
       }
     }
@@ -770,8 +791,9 @@ private:
               // ── SOF gap 记录 (仅 receiveLoop 线程写, 无锁) ──
               const auto now_tp = std::chrono::steady_clock::now();
               if (!first_sof_) {
-                const int64_t gap_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                    now_tp - last_sof_tp_).count();
+                const int64_t gap_us =
+                    std::chrono::duration_cast<std::chrono::microseconds>(now_tp - last_sof_tp_)
+                        .count();
                 sof_gap_live_.record(gap_us);
               } else {
                 first_sof_ = false;
@@ -903,8 +925,8 @@ private:
       {
         const auto now_tp = std::chrono::steady_clock::now();
         if (!first_jfb_) {
-          const int64_t gap_us = std::chrono::duration_cast<std::chrono::microseconds>(
-              now_tp - last_jfb_tp_).count();
+          const int64_t gap_us =
+              std::chrono::duration_cast<std::chrono::microseconds>(now_tp - last_jfb_tp_).count();
           jfb_gap_live_.record(gap_us);
         } else {
           first_jfb_ = false;
@@ -986,30 +1008,32 @@ private:
     static uint64_t last_crc_errors = 0;
     constexpr double kInterval = 5.0;
 
-    uint64_t current_rx  = rx_packet_count_.load();
-    uint64_t current_tx  = tx_packet_count_.load();
+    uint64_t current_rx = rx_packet_count_.load();
+    uint64_t current_tx = tx_packet_count_.load();
     uint64_t current_crc = rx_crc_errors_.load();
     uint64_t current_trx = torque_rx_count_.load();
 
-    double rx_rate       = (current_rx  - last_rx_count)       / kInterval;
-    double tx_rate       = (current_tx  - last_tx_count)       / kInterval;
-    double torque_rx_hz  = (current_trx - last_torque_rx_count_) / kInterval;
-    uint64_t new_crc     = current_crc  - last_crc_errors;
+    double rx_rate = (current_rx - last_rx_count) / kInterval;
+    double tx_rate = (current_tx - last_tx_count) / kInterval;
+    double torque_rx_hz = (current_trx - last_torque_rx_count_) / kInterval;
+    uint64_t new_crc = current_crc - last_crc_errors;
 
-    auto now          = std::chrono::steady_clock::now();
-    auto last_act     = last_rx_activity_.load();
-    auto elapsed_ms   = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_act).count();
-    bool serial_ok    = serial_port_ && serial_port_->is_open();
+    auto now = std::chrono::steady_clock::now();
+    auto last_act = last_rx_activity_.load();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_act).count();
+    bool serial_ok = serial_port_ && serial_port_->is_open();
 
     // ── swap RX gap live → snap ──
     RxGapStats sof_snap, jfb_snap;
     {
       std::lock_guard<std::mutex> lk(rx_gap_mutex_);
-      sof_snap = sof_gap_live_;  sof_gap_live_.reset();
-      jfb_snap = jfb_gap_live_;  jfb_gap_live_.reset();
+      sof_snap = sof_gap_live_;
+      sof_gap_live_.reset();
+      jfb_snap = jfb_gap_live_;
+      jfb_gap_live_.reset();
     }
 
-    uint64_t seq_dup  = torque_seq_dup_.exchange(0);
+    uint64_t seq_dup = torque_seq_dup_.exchange(0);
     uint64_t seq_skip = torque_seq_skip_.exchange(0);
 
     if (simulation_mode_) {
@@ -1038,9 +1062,9 @@ private:
                     "[HEALTH/RX_PIPE] SOF: n=%lu avg=%ldus max=%ldus"
                     " | gap_bucket: <2ms=%lu 2-5ms=%lu 5-20ms=%lu >20ms=%lu"
                     " | JFB: n=%lu avg=%ldus max=%ldus gt20ms=%lu",
-                    sof_snap.count, sof_snap.avg_us(), sof_snap.max_us,
-                    sof_snap.lt2ms, sof_snap.b2_5ms, sof_snap.b5_20ms, sof_snap.gt20ms,
-                    jfb_snap.count, jfb_snap.avg_us(), jfb_snap.max_us, jfb_snap.gt20ms);
+                    sof_snap.count, sof_snap.avg_us(), sof_snap.max_us, sof_snap.lt2ms,
+                    sof_snap.b2_5ms, sof_snap.b5_20ms, sof_snap.gt20ms, jfb_snap.count,
+                    jfb_snap.avg_us(), jfb_snap.max_us, jfb_snap.gt20ms);
       } else {
         RCLCPP_INFO(this->get_logger(), "[HEALTH/RX_PIPE] no SOF in this window");
       }
@@ -1048,8 +1072,8 @@ private:
       // ── [HEALTH/TORQUE_CACHE] 力矩缓存健康 (替换锁内日志) ──
       const uint64_t stale_w = cache_stale_warn_.exchange(0);
       const uint64_t stale_i = cache_stale_invalidated_.exchange(0);
-      const uint64_t no_tq   = cache_no_torque_.exchange(0);
-      const uint64_t fzero   = cache_force_zero_.exchange(0);
+      const uint64_t no_tq = cache_no_torque_.exchange(0);
+      const uint64_t fzero = cache_force_zero_.exchange(0);
       if (stale_i > 0) {
         RCLCPP_ERROR(this->get_logger(),
                      "[HEALTH/TORQUE_CACHE] INVALIDATED=%lu (age>100ms) stale_warn=%lu "
@@ -1064,22 +1088,25 @@ private:
                     "[HEALTH/TORQUE_CACHE] ok stale_warn=0 no_torque=0 force_zero=%lu", fzero);
       }
       if (seq_dup > 0 || seq_skip > 0) {
-        RCLCPP_WARN(this->get_logger(),
-                    "[HEALTH/TORQUE_SEQ] dup=%lu skip=%lu (in %.0fs)",
-                    seq_dup, seq_skip, kInterval);
+        RCLCPP_WARN(this->get_logger(), "[HEALTH/TORQUE_SEQ] dup=%lu skip=%lu (in %.0fs)", seq_dup,
+                    seq_skip, kInterval);
       } else {
         RCLCPP_INFO(this->get_logger(), "[HEALTH/TORQUE_SEQ] dup=0 skip=0");
       }
     }
 
-    last_rx_count        = current_rx;
-    last_tx_count        = current_tx;
-    last_crc_errors      = current_crc;
+    last_rx_count = current_rx;
+    last_tx_count = current_tx;
+    last_crc_errors = current_crc;
     last_torque_rx_count_ = current_trx;
 
     std_msgs::msg::Float64MultiArray diag_msg;
-    diag_msg.data = {tx_rate, rx_rate, static_cast<double>(new_crc), serial_ok ? 1.0 : 0.0,
-                     static_cast<double>(elapsed_ms), torque_rx_hz};
+    diag_msg.data = {tx_rate,
+                     rx_rate,
+                     static_cast<double>(new_crc),
+                     serial_ok ? 1.0 : 0.0,
+                     static_cast<double>(elapsed_ms),
+                     torque_rx_hz};
     link_diag_pub_->publish(diag_msg);
   }
 };

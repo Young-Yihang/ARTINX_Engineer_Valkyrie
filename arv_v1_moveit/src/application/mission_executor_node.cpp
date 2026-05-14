@@ -129,6 +129,9 @@ private:
   std::condition_variable task_cv_;
   std::atomic<bool> step_skip_requested_{false};   // B 砍 current step
   std::atomic<bool> task_abort_requested_{false};  // X/ESTOP/F 砍整个序列
+  // 上一个 binding 正常跑完 (非 abort), 当前空闲但保持 hold 位. 操作手凭此区分
+  // "READY = 刚启动空闲" vs "HOLDING = 序列做完等待下一指令".
+  std::atomic<bool> last_sequence_completed_{false};
 
   // --- ROS2 ---
   rclcpp::Client<LoadTrajectory>::SharedPtr load_client_;
@@ -148,7 +151,8 @@ private:
     if (control_mode_ == ControlMode::RELAX) return 0x05;
     if (control_mode_ == ControlMode::FREEDRIVE) return 0x06;
     if (executing_) return 0x01;
-    return 0x00;
+    if (last_sequence_completed_) return 0x02;  // HOLDING: 序列做完, 在 hold 位待命
+    return 0x00;                                // READY: 空闲, 上次 abort/未跑过
   }
 
   void publishControlMode(uint8_t mode) {
@@ -349,6 +353,7 @@ private:
       active_task_ = ActiveTask{key, 0, false};
     }
     executing_ = true;
+    last_sequence_completed_ = false;  // 新序列启动, 清 HOLDING 标记
     RCLCPP_INFO(get_logger(), "[Binding] start '%s'", key.c_str());
 
     std::thread([this, key]() { executeBinding(key); }).detach();
@@ -423,16 +428,20 @@ private:
   }
 
   void finishBinding() {
+    bool aborted = task_abort_requested_.load();
     {
       std::lock_guard<std::mutex> lk(active_mu_);
       if (active_task_) {
-        RCLCPP_INFO(get_logger(), "[Binding] '%s' finished", active_task_->binding_key.c_str());
+        RCLCPP_INFO(get_logger(), "[Binding] '%s' %s", active_task_->binding_key.c_str(),
+                    aborted ? "aborted" : "finished");
       }
       active_task_.reset();
     }
     step_skip_requested_ = false;
     task_abort_requested_ = false;
     executing_ = false;
+    // 正常完成 → HOLDING; abort/X/ESTOP → 不 hold (resetToIdle 会清, ESTOP 切 RELAX)
+    last_sequence_completed_ = !aborted;
   }
 
   // --- B 推进 ---
@@ -475,6 +484,7 @@ private:
   void emergencyStop() {
     triggerTaskAbort();
     executing_ = false;
+    last_sequence_completed_ = false;
     publishControlMode(ControlMode::RELAX);
     RCLCPP_WARN(get_logger(), "[ESTOP] Forced RELAX, abort signaled.");
   }
@@ -516,6 +526,7 @@ private:
         RCLCPP_ERROR(get_logger(), "[RESET_HOME] Service timeout");
       }
       executing_ = false;
+      last_sequence_completed_ = false;  // 回零后是 READY, 不是 HOLDING
     }).detach();
   }
 
