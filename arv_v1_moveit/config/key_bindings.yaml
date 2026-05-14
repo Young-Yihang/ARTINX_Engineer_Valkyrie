@@ -23,23 +23,23 @@ bindings:
   stow_left:
     interruptible_by: [0x01, 0x02, 0x30]               # ESTOP/X/B
     steps:
-      - trajectory: "save_left_111"        # 存矿, 末尾 open gripper
-      - trajectory: "save_left_safe_exit"  # 安全退出 (占位, 用户后续 Compose 录)
+      - trajectory: "save_left_111"        # 存矿到身上左槽, 末尾 open gripper (放下矿石)
+      - trajectory: "save_left_reset"      # 不碰矿石撤离 → escape
 
   # 右存矿: C (cmd 0x25)
   stow_right:
     interruptible_by: [0x01, 0x02, 0x30]
     steps:
       - trajectory: "save_right_111"
-      - trajectory: "save_right_safe_exit" # 占位
+      - trajectory: "save_right_reset"
 
   # 从自身左槽取矿: Shift+Z (cmd 0x26)
   retrieve_left:
     interruptible_by: [0x01, 0x02, 0x30]
     steps:
-      - trajectory: "pick_s_left_111"      # 逼近自身左槽, 等 B 确认夹取
+      - trajectory: "pick_s_left_111"      # 逼近自身左槽, 末尾 close gripper, 等 B 确认夹取
         wait_for_next: true
-      - trajectory: "pick_left_1111"       # 取出回 escape (注: 文件名 4 个 1, 不对称)
+      - trajectory: "pick_left_1111"       # 夹住矿石取出回 escape (注: 4 个 1, 与 pick_right 不对称)
 
   # 从自身右槽取矿: Shift+C (cmd 0x27)
   retrieve_right:
@@ -47,4 +47,4 @@ bindings:
     steps:
       - trajectory: "pick_s_right_111"
         wait_for_next: true
-      - trajectory: "pick_right_111"
+      - trajectory: "pick_right_111"       # 夹住矿石取出回 escape
