@@ -404,14 +404,13 @@ private:
         break;
       }
 
-      // B fast-forward 砍的轨迹返回 success+message="canceled". 不跑 gripper, 直接进下一步.
+      // B fast-forward 砍的轨迹返回 success+message="canceled", 直接进下一步.
+      // 注: gripper schedule 由 trajectory_manager 自己 fork side-thread 触发 (Commit 7),
+      // 这里不再 scheduleGripperActions, 避免重复 + 时序错位.
       if (was_skip || res->message == "canceled") {
         RCLCPP_INFO(get_logger(), "[Binding] step %zu canceled (fast-forward), next", i);
         continue;
       }
-
-      // 执行 gripper 动作
-      scheduleGripperActions(res->gripper_action_times, res->gripper_action_commands);
 
       if (step.wait_for_next) {
         std::unique_lock<std::mutex> lk(active_mu_);

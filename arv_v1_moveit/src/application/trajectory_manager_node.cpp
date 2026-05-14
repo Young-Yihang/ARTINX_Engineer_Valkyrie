@@ -19,6 +19,7 @@
 
 #include "arv_v1_interfaces/srv/cancel_current_trajectory.hpp"
 #include "arv_v1_interfaces/srv/compose_trajectory.hpp"
+#include "arv_v1_interfaces/srv/gripper_control.hpp"
 #include "arv_v1_interfaces/srv/list_trajectories.hpp"
 #include "arv_v1_interfaces/srv/load_trajectory.hpp"
 #include "arv_v1_interfaces/srv/plan_to_preset.hpp"
@@ -27,6 +28,7 @@
 
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GoalHandleFJT = rclcpp_action::ClientGoalHandle<FollowJointTrajectory>;
+using GripperControl = arv_v1_interfaces::srv::GripperControl;
 
 class TrajectoryManagerNode : public rclcpp::Node {
 public:
@@ -108,6 +110,11 @@ public:
                   std::placeholders::_1, std::placeholders::_2),
         svc_qos, service_cb_group_);
 
+    // gripper_client_ 走 Reentrant action_cb_group_, 让 side-thread 的 async_send_request
+    // future.wait_for 在 service_cb 同步阻塞期间能拿到响应.
+    gripper_client_ = this->create_client<GripperControl>("/gripper_control", rclcpp::ServicesQoS(),
+                                                          action_cb_group_);
+
     RCLCPP_INFO(this->get_logger(), " ");
     RCLCPP_INFO(this->get_logger(), "==============================================");
     RCLCPP_INFO(this->get_logger(), "     Trajectory Manager Node Started");
@@ -155,6 +162,10 @@ private:
   rclcpp::Service<arv_v1_interfaces::srv::PlanToPreset>::SharedPtr plan_preset_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::ComposeTrajectory>::SharedPtr compose_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::CancelCurrentTrajectory>::SharedPtr cancel_srv_;
+
+  // 夹爪并入轨迹管理职责: action 起飞那刻起 wall-clock side-thread 触发 gripper_actions,
+  // 跟 action result 等待并行. 避免同步等 LoadTrajectory 完成后再调度导致的时序错位.
+  rclcpp::Client<GripperControl>::SharedPtr gripper_client_;
 
   rclcpp::CallbackGroup::SharedPtr service_cb_group_;
   rclcpp::CallbackGroup::SharedPtr action_cb_group_;
@@ -398,6 +409,38 @@ private:
     }
   }
 
+  // 旁线程: action 起跑那刻锚 wall-clock, 按 gripper_action_times 顺序触发夹爪.
+  // detach 跑完即退, 不阻塞 service callback. 跟 action result 等待并行.
+  // 注: 若 action 中途被 cancel, 此线程仍按原计划触发剩余动作 (TODO: 加 abort flag).
+  void fireGripperSchedule(std::vector<double> times, std::vector<std::string> commands,
+                           std::chrono::steady_clock::time_point start) {
+    for (size_t i = 0; i < times.size(); ++i) {
+      auto target = start + std::chrono::duration<double>(times[i]);
+      std::this_thread::sleep_until(target);
+      double torque;
+      if (commands[i] == "open")
+        torque = -70.0;
+      else if (commands[i] == "close")
+        torque = 70.0;
+      else if (commands[i] == "stop")
+        torque = 0.0;
+      else
+        continue;
+
+      auto req = std::make_shared<GripperControl::Request>();
+      req->torque = torque;
+      auto fut = gripper_client_->async_send_request(req);
+      if (fut.wait_for(std::chrono::seconds(3)) == std::future_status::ready) {
+        auto res = fut.get();
+        RCLCPP_INFO(this->get_logger(), "[Gripper] t=%.2fs %s (%.0f N)", times[i],
+                    commands[i].c_str(), torque);
+        (void)res;
+      } else {
+        RCLCPP_ERROR(this->get_logger(), "[Gripper] timeout at t=%.2fs", times[i]);
+      }
+    }
+  }
+
   void loadTrajectoryCallback(
       const std::shared_ptr<arv_v1_interfaces::srv::LoadTrajectory::Request> request,
       std::shared_ptr<arv_v1_interfaces::srv::LoadTrajectory::Response> response) {
@@ -525,6 +568,20 @@ private:
         {
           std::lock_guard<std::mutex> lk(goal_handle_mu_);
           current_goal_handle_ = goal_handle;
+        }
+
+        // ━━━ Fork gripper schedule 旁线程 (action 起跑那刻锚 wall-clock) ━━━
+        // 跟下面 async_get_result 等待并行, 在轨迹跑的过程中按时触发夹爪.
+        if (!response->gripper_action_times.empty() &&
+            response->gripper_action_times.size() == response->gripper_action_commands.size()) {
+          auto schedule_start = std::chrono::steady_clock::now();
+          std::vector<double> g_times(response->gripper_action_times.begin(),
+                                      response->gripper_action_times.end());
+          std::vector<std::string> g_cmds(response->gripper_action_commands.begin(),
+                                          response->gripper_action_commands.end());
+          std::thread(&TrajectoryManagerNode::fireGripperSchedule, this, std::move(g_times),
+                      std::move(g_cmds), schedule_start)
+              .detach();
         }
 
         // 同步等 action result (action_cb_group_ Reentrant 保证 result 回调在另一线程跑, 不死锁)
