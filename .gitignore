@@ -7,6 +7,8 @@ arv_v1_moveit/third_party/implot/
 
 .cache
 build
+__pycache__/
+*.pyc
 
 # 不公开的文档和项目指令
 docs/
