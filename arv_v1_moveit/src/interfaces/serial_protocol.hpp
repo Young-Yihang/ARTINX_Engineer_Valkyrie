@@ -25,15 +25,19 @@ constexpr size_t NUM_ARM_JOINTS = 6;
 constexpr size_t NUM_ALL_JOINTS = 7;  // arm + gripper
 
 // ─────────── 0x0005 TaskCmd: [cmd(1)][param(1)][seq(1)] ───────────
+// 与下位机 ARTINX/engineer_2026 components/Controller/HostCom/HostProtocol.hpp 对齐
 enum class TaskCmd : uint8_t {
   EMERGENCY_STOP = 0x01,    // param ignored
-  RESET_HOME = 0x02,        // param ignored
-  PICK_OBJ = 0x10,          // param = obj_id (0-5)
-  STOW_OBJ = 0x11,          // param = slot_id (0-5)
-  DEPOSIT_MODE = 0x20,      // param: 1=enter, 0=exit
-  NEXT_STEP = 0x30,         // param ignored
-  ABORT_TASK = 0x31,        // param ignored, hold position
-  GRIPPER_CMD = 0x40,       // param = GripperAction
+  RESET_HOME = 0x02,        // param ignored, X 键回 escape
+  PICK_OBJ = 0x10,          // param = obj_id (0-5), W/A/S/D/Q/E
+  DEPOSIT_MODE = 0x20,      // param: 1=enter, 0=exit (SDC 模式切换)
+  STOW_LEFT = 0x24,         // Z 键: 存矿到身上左槽
+  STOW_RIGHT = 0x25,        // C 键: 存矿到身上右槽
+  RETRIEVE_LEFT = 0x26,     // Shift+Z: 从身上左槽取矿
+  RETRIEVE_RIGHT = 0x27,    // Shift+C: 从身上右槽取矿
+  NEXT_STEP = 0x30,         // B 键, 任意时刻 fast-forward
+  ABORT_TASK = 0x31,        // F 键, hold position
+  GRIPPER_CMD = 0x40,       // G 键, param = GripperAction
   SET_CONTROL_MODE = 0x50,  // param = ControlMode
 };
 
