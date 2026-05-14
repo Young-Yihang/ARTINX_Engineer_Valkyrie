@@ -6,6 +6,7 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(service_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   # trajectory_manager_node 服务
@@ -14,6 +15,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/trajectory_manager/SaveTrajectory.srv"
   "srv/trajectory_manager/SaveLastTrajectory.srv"
   "srv/trajectory_manager/PlanToPreset.srv"
+  "srv/trajectory_manager/ComposeTrajectory.srv"
   # mission_executor_node 服务
   "srv/mission_executor/ExecuteAction.srv"
   "srv/mission_executor/GetTaskState.srv"
@@ -22,7 +24,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/cartesian_executor/StopCartesianMotion.srv"
   # gripper 控制服务
   "srv/GripperControl.srv"
-  DEPENDENCIES trajectory_msgs service_msgs geometry_msgs
+  DEPENDENCIES trajectory_msgs service_msgs geometry_msgs sensor_msgs
 )
 
 ament_package()

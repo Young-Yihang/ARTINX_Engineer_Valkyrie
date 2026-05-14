@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <moveit/move_group_interface/move_group_interface.hpp>
 #include <mutex>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -16,8 +17,7 @@
 #include <std_msgs/msg/u_int16.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
-#include <moveit/move_group_interface/move_group_interface.hpp>
-
+#include "arv_v1_interfaces/srv/compose_trajectory.hpp"
 #include "arv_v1_interfaces/srv/list_trajectories.hpp"
 #include "arv_v1_interfaces/srv/load_trajectory.hpp"
 #include "arv_v1_interfaces/srv/plan_to_preset.hpp"
@@ -77,6 +77,10 @@ public:
         "/plan_to_preset", std::bind(&TrajectoryManagerNode::planToPresetCallback, this,
                                      std::placeholders::_1, std::placeholders::_2));
 
+    compose_srv_ = this->create_service<arv_v1_interfaces::srv::ComposeTrajectory>(
+        "/compose_trajectory", std::bind(&TrajectoryManagerNode::composeTrajectoryCallback, this,
+                                         std::placeholders::_1, std::placeholders::_2));
+
     RCLCPP_INFO(this->get_logger(), " ");
     RCLCPP_INFO(this->get_logger(), "==============================================");
     RCLCPP_INFO(this->get_logger(), "     Trajectory Manager Node Started");
@@ -87,7 +91,8 @@ public:
     RCLCPP_INFO(this->get_logger(), "  /save_trajectory      - Save specified trajectory");
     RCLCPP_INFO(this->get_logger(), "  /load_trajectory      - Load and execute trajectory");
     RCLCPP_INFO(this->get_logger(), "  /list_trajectories    - List saved trajectories");
-    RCLCPP_INFO(this->get_logger(), "  /plan_to_preset       - Plan & execute to SRDF named target");
+    RCLCPP_INFO(this->get_logger(),
+                "  /plan_to_preset       - Plan & execute to SRDF named target");
     RCLCPP_INFO(this->get_logger(), " ");
     RCLCPP_INFO(this->get_logger(), "Usage:");
     RCLCPP_INFO(this->get_logger(), "  1. Plan and execute in RViz");
@@ -117,6 +122,7 @@ private:
   rclcpp::Service<arv_v1_interfaces::srv::LoadTrajectory>::SharedPtr load_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::ListTrajectories>::SharedPtr list_srv_;
   rclcpp::Service<arv_v1_interfaces::srv::PlanToPreset>::SharedPtr plan_preset_srv_;
+  rclcpp::Service<arv_v1_interfaces::srv::ComposeTrajectory>::SharedPtr compose_srv_;
 
   std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
   bool move_group_ready_ = false;
@@ -154,7 +160,10 @@ private:
 
   bool saveTrajectoryToFile(const std::string& name, const std::string& description,
                             const trajectory_msgs::msg::JointTrajectory& trajectory,
-                            std::string& saved_path, std::string& error_message) {
+                            const std::vector<double>& gripper_times,
+                            const std::vector<std::string>& gripper_cmds, std::string& saved_path,
+                            std::string& error_message,
+                            const std::vector<std::vector<double>>& waypoints_meta = {}) {
     std::string filename = trajectory_dir_ + "/" + name + ".yaml";
 
     try {
@@ -177,6 +186,29 @@ private:
         duration = last_point.time_from_start.sec + last_point.time_from_start.nanosec * 1e-9;
       }
       out << YAML::Key << "duration_sec" << YAML::Value << duration;
+
+      // gripper_actions: 跟 LoadTrajectory 期望的格式对齐 (meta.gripper_actions)
+      if (!gripper_times.empty() && gripper_times.size() == gripper_cmds.size()) {
+        out << YAML::Key << "gripper_actions" << YAML::Value << YAML::BeginSeq;
+        for (size_t i = 0; i < gripper_times.size(); ++i) {
+          out << YAML::BeginMap;
+          out << YAML::Key << "time" << YAML::Value << gripper_times[i];
+          out << YAML::Key << "action" << YAML::Value << gripper_cmds[i];
+          out << YAML::EndMap;
+        }
+        out << YAML::EndSeq;
+      }
+
+      // waypoints 溯源: ComposeTrajectory 写入原始关节角, 便于将来重规划
+      if (!waypoints_meta.empty()) {
+        out << YAML::Key << "waypoints" << YAML::Value << YAML::BeginSeq;
+        for (const auto& wp : waypoints_meta) {
+          out << YAML::Flow << YAML::BeginSeq;
+          for (const auto& v : wp) out << v;
+          out << YAML::EndSeq;
+        }
+        out << YAML::EndSeq;
+      }
       out << YAML::EndMap;  // meta
 
       out << YAML::Key << "joint_names" << YAML::Value << YAML::BeginSeq;
@@ -277,8 +309,10 @@ private:
     }
 
     std::string saved_path, error_message;
-    if (saveTrajectoryToFile(request->name, request->description, request->trajectory, saved_path,
-                             error_message)) {
+    std::vector<std::string> g_cmds(request->gripper_action_commands.begin(),
+                                    request->gripper_action_commands.end());
+    if (saveTrajectoryToFile(request->name, request->description, request->trajectory,
+                             request->gripper_action_times, g_cmds, saved_path, error_message)) {
       response->success = true;
       response->message = "Trajectory saved successfully";
       response->saved_path = saved_path;
@@ -311,8 +345,10 @@ private:
     }
 
     std::string saved_path, error_message;
-    if (saveTrajectoryToFile(request->name, request->description, trajectory_to_save, saved_path,
-                             error_message)) {
+    std::vector<double> empty_times;
+    std::vector<std::string> empty_cmds;
+    if (saveTrajectoryToFile(request->name, request->description, trajectory_to_save, empty_times,
+                             empty_cmds, saved_path, error_message)) {
       response->success = true;
       response->message = "Last trajectory saved successfully";
       response->saved_path = saved_path;
@@ -505,9 +541,8 @@ private:
     }
 
     double timeout = request->planning_timeout > 0.0 ? request->planning_timeout : 5.0;
-    double speed = (request->speed_factor > 0.0 && request->speed_factor <= 1.0)
-                       ? request->speed_factor
-                       : 0.3;
+    double speed =
+        (request->speed_factor > 0.0 && request->speed_factor <= 1.0) ? request->speed_factor : 0.3;
     move_group_->setPlanningTime(timeout);
     move_group_->setMaxVelocityScalingFactor(speed);
     move_group_->setMaxAccelerationScalingFactor(speed);
@@ -574,8 +609,125 @@ private:
       response->duration = duration;
     } else {
       response->success = false;
-      response->message = "Execution failed (result_code=" +
-                          std::to_string(static_cast<int>(action_result.code)) + ")";
+      response->message =
+          "Execution failed (result_code=" + std::to_string(static_cast<int>(action_result.code)) +
+          ")";
+    }
+  }
+
+  void composeTrajectoryCallback(
+      const std::shared_ptr<arv_v1_interfaces::srv::ComposeTrajectory::Request> request,
+      std::shared_ptr<arv_v1_interfaces::srv::ComposeTrajectory::Response> response) {
+    RCLCPP_INFO(this->get_logger(), "[Compose] name='%s', waypoints=%zu, speed=%.2f",
+                request->name.c_str(), request->waypoints.size(), request->speed_factor);
+
+    if (request->name.empty()) {
+      response->success = false;
+      response->message = "Trajectory name cannot be empty";
+      return;
+    }
+    if (request->waypoints.size() < 2) {
+      response->success = false;
+      response->message = "Need at least 2 waypoints";
+      return;
+    }
+    // 校验每个 waypoint 有 ≥6 个 joint 位置 (前 6 个用作 ARM 关节)
+    std::vector<std::vector<double>> wp_joints;
+    wp_joints.reserve(request->waypoints.size());
+    for (size_t i = 0; i < request->waypoints.size(); ++i) {
+      const auto& js = request->waypoints[i];
+      if (js.position.size() < 6) {
+        response->success = false;
+        response->message = "Waypoint " + std::to_string(i) + " has <6 joint positions";
+        return;
+      }
+      wp_joints.emplace_back(js.position.begin(), js.position.begin() + 6);
+    }
+
+    if (!ensureMoveGroup()) {
+      response->success = false;
+      response->message = "MoveGroupInterface not available (move_group node running?)";
+      return;
+    }
+
+    double speed =
+        (request->speed_factor > 0.0 && request->speed_factor <= 1.0) ? request->speed_factor : 0.3;
+    move_group_->setMaxVelocityScalingFactor(speed);
+    move_group_->setMaxAccelerationScalingFactor(speed);
+    move_group_->setPlanningTime(5.0);
+    // Pilz PTP: 关节空间点到点, 解析解, 成功率高且毫秒级返回 (避免 OMPL 采样不收敛卡死)
+    move_group_->setPlanningPipelineId("pilz_industrial_motion_planner");
+    move_group_->setPlannerId("PTP");
+
+    trajectory_msgs::msg::JointTrajectory combined;
+    combined.joint_names = joint_names_;
+    double t_offset = 0.0;
+
+    auto robot_model = move_group_->getRobotModel();
+    if (!robot_model) {
+      response->success = false;
+      response->message = "Robot model not available from MoveGroupInterface";
+      return;
+    }
+
+    for (size_t seg = 0; seg + 1 < wp_joints.size(); ++seg) {
+      // 直接从 robot model 构造 RobotState, 不依赖 current_state_monitor (QoS 不匹配会卡)
+      moveit::core::RobotState start_state(robot_model);
+      start_state.setToDefaultValues();
+      start_state.setJointGroupPositions("ARM", wp_joints[seg]);
+      start_state.update();
+      move_group_->setStartState(start_state);
+
+      move_group_->setJointValueTarget(wp_joints[seg + 1]);
+
+      moveit::planning_interface::MoveGroupInterface::Plan plan;
+      auto code = move_group_->plan(plan);
+      if (code != moveit::core::MoveItErrorCode::SUCCESS) {
+        response->success = false;
+        response->message = "Planning failed at segment " + std::to_string(seg) +
+                            " (code=" + std::to_string(code.val) + ")";
+        RCLCPP_ERROR(this->get_logger(), "[Compose] %s", response->message.c_str());
+        return;
+      }
+
+      const auto& seg_traj = plan.trajectory.joint_trajectory;
+      // 段间衔接: 第一段全保留, 后续段跳过首点 (避免与上一段末点重复)
+      size_t start_idx = (seg == 0) ? 0 : 1;
+      for (size_t i = start_idx; i < seg_traj.points.size(); ++i) {
+        auto pt = seg_traj.points[i];
+        double t = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9;
+        pt.time_from_start = rclcpp::Duration::from_seconds(t + t_offset);
+        combined.points.push_back(pt);
+      }
+      if (!seg_traj.points.empty()) {
+        const auto& last_t = seg_traj.points.back().time_from_start;
+        t_offset += last_t.sec + last_t.nanosec * 1e-9;
+      }
+    }
+
+    if (combined.points.empty()) {
+      response->success = false;
+      response->message = "No points produced by planner";
+      return;
+    }
+
+    std::vector<std::string> g_cmds(request->gripper_action_commands.begin(),
+                                    request->gripper_action_commands.end());
+    std::vector<double> g_times(request->gripper_action_times.begin(),
+                                request->gripper_action_times.end());
+
+    std::string saved_path, err;
+    if (saveTrajectoryToFile(request->name, request->description, combined, g_times, g_cmds,
+                             saved_path, err, wp_joints)) {
+      response->success = true;
+      response->message = "Composed and saved (" + std::to_string(wp_joints.size()) +
+                          " waypoints, " + std::to_string(combined.points.size()) + " points)";
+      response->saved_path = saved_path;
+      response->duration = t_offset;
+      response->point_count = combined.points.size();
+    } else {
+      response->success = false;
+      response->message = err;
     }
   }
 

@@ -22,7 +22,16 @@ from rcl_interfaces.msg import Log
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import UInt8, Int32
-from arv_v1_interfaces.srv import GripperControl, ListTrajectories, LoadTrajectory, SaveLastTrajectory
+import datetime
+from arv_v1_interfaces.srv import (
+    ComposeTrajectory,
+    GripperControl,
+    ListTrajectories,
+    LoadTrajectory,
+    SaveLastTrajectory,
+    SaveTrajectory,
+)
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ctk.set_appearance_mode("dark")
 
@@ -102,10 +111,26 @@ class PanelNode(Node):
         self.list_cli = self.create_client(ListTrajectories, "/list_trajectories")
         self.load_cli = self.create_client(LoadTrajectory, "/load_trajectory")
         self.save_last_cli = self.create_client(SaveLastTrajectory, "/save_last_trajectory")
+        self.save_cli = self.create_client(SaveTrajectory, "/save_trajectory")
+        self.compose_cli = self.create_client(ComposeTrajectory, "/compose_trajectory")
+
+        # 示教录制 (50Hz 降采样)
+        self.teach_recording = False
+        self.teach_buffer = []
+        self.teach_gripper_events = []  # [(t_offset, "open"/"close"/"stop")]
+        self.teach_start_wall = 0.0
+        self.teach_last_t = 0.0
+        self.TEACH_INTERVAL_S = 0.02
 
     def _js_cb(self, msg):
         with self._lock:
             self.joints = list(msg.position[:7]) if len(msg.position) >= 6 else None
+            # 示教录制: 50Hz 降采样 buffer 当前 6 关节角
+            if self.teach_recording and len(msg.position) >= 6:
+                now = time.time()
+                if now - self.teach_last_t >= self.TEACH_INTERVAL_S:
+                    self.teach_buffer.append((now - self.teach_start_wall, list(msg.position[:6])))
+                    self.teach_last_t = now
     def _pose_cb(self, msg):
         with self._lock: self.pose = msg.pose
     def _mode_cb(self, msg):
@@ -146,6 +171,12 @@ class PanelNode(Node):
 
     def call_gripper(self, force):
         if not self.gripper_cli.wait_for_service(timeout_sec=0.5): return "service not ready"
+        # 录制中: buffer gripper 事件 (跟 LoadTrajectory.srv 字段对齐)
+        if self.teach_recording:
+            cmd = "close" if force > 0.5 else ("open" if force < -0.5 else "stop")
+            t = time.time() - self.teach_start_wall
+            with self._lock:
+                self.teach_gripper_events.append((t, cmd))
         req = GripperControl.Request(); req.torque = float(force)
         res = self._wait_future(self.gripper_cli.call_async(req), 3.0)
         return ("OK" if res.success else res.message) if res else "timeout"
@@ -166,6 +197,73 @@ class PanelNode(Node):
         req = SaveLastTrajectory.Request(); req.name = name; req.description = description
         res = self._wait_future(self.save_last_cli.call_async(req), 5.0)
         return ("OK: " + res.saved_path if res.success else res.message) if res else "timeout"
+
+    def call_compose_trajectory(self, name, waypoints_q, speed=0.3, description="",
+                                 gripper_actions=None):
+        """waypoints_q: List[List[float]] (6 joints each). gripper_actions: List[(t, cmd)]."""
+        if not self.compose_cli.wait_for_service(timeout_sec=0.5):
+            return "service not ready (move_group running?)"
+        req = ComposeTrajectory.Request()
+        req.name = name
+        req.description = description
+        req.speed_factor = float(speed)
+        for q in waypoints_q:
+            js = JointState()
+            js.name = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
+            js.position = list(q)
+            req.waypoints.append(js)
+        if gripper_actions:
+            req.gripper_action_times = [float(t) for t, _ in gripper_actions]
+            req.gripper_action_commands = [c for _, c in gripper_actions]
+        res = self._wait_future(self.compose_cli.call_async(req), 30.0)
+        if not res:
+            return "compose timeout"
+        return (f"OK: {res.saved_path} ({res.point_count} pts, {res.duration:.2f}s)"
+                if res.success else res.message)
+
+    def teach_start(self):
+        with self._lock:
+            self.teach_buffer = []
+            self.teach_gripper_events = []
+            self.teach_start_wall = time.time()
+            self.teach_last_t = 0.0
+            self.teach_recording = True
+
+    def teach_stop_and_save(self):
+        """停录 → 自动命名 teach_MMDD_HHMM 并保存 (含 gripper actions)"""
+        with self._lock:
+            self.teach_recording = False
+            buf = list(self.teach_buffer)
+            g_events = list(self.teach_gripper_events)
+
+        if len(buf) < 2:
+            return "no points captured"
+
+        now = datetime.datetime.now()
+        name = f"teach_{now.strftime('%m%d_%H%M')}"
+
+        traj = JointTrajectory()
+        traj.joint_names = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
+        for t, q in buf:
+            pt = JointTrajectoryPoint()
+            pt.positions = q
+            pt.time_from_start.sec = int(t)
+            pt.time_from_start.nanosec = int((t - int(t)) * 1e9)
+            traj.points.append(pt)
+
+        if not self.save_cli.wait_for_service(timeout_sec=2.0):
+            return "save_trajectory service unavailable"
+        req = SaveTrajectory.Request()
+        req.name = name
+        req.description = f"teach @ {now.isoformat(timespec='seconds')}, {len(buf)} pts, {len(g_events)} grip"
+        req.trajectory = traj
+        req.gripper_action_times = [t for t, _ in g_events]
+        req.gripper_action_commands = [c for _, c in g_events]
+        res = self._wait_future(self.save_cli.call_async(req), 5.0)
+        if not res:
+            return "save timeout"
+        return (f"OK: {name} ({len(buf)} pts, {len(g_events)} grip)"
+                if res.success else res.message)
 
 
 # ── GUI ────────────────────────────────────────────────
@@ -188,7 +286,14 @@ class MissionPanel:
     def _build_gui(self):
         self._root = ctk.CTk()
         self._root.title("ARV_V1 Mission Panel")
-        self._root.geometry("1000x760")
+        # 自适应屏幕分辨率: 75% 宽 × 80% 高, 但 clamp 到合理范围
+        sw = self._root.winfo_screenwidth()
+        sh = self._root.winfo_screenheight()
+        w = max(800, min(int(sw * 0.75), 1800))
+        h = max(600, min(int(sh * 0.80), 1100))
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        self._root.geometry(f"{w}x{h}+{x}+{y}")
         self._root.minsize(800, 600)
         self._root.configure(fg_color=BASE)
 
@@ -326,6 +431,16 @@ class MissionPanel:
                       font=ctk.CTkFont(size=13),
                       fg_color=BTN_ALT, hover_color=BTN_ALT_HOVER, text_color=BTN_TEXT,
                       command=self._save_last_traj).pack(side="left")
+        self._teach_btn = ctk.CTkButton(tb, text="Teach", width=80, height=36,
+                                        font=ctk.CTkFont(size=13),
+                                        fg_color=BTN_ALT, hover_color=BTN_ALT_HOVER,
+                                        text_color=BTN_TEXT,
+                                        command=self._toggle_teach)
+        self._teach_btn.pack(side="left", padx=(6, 0))
+        ctk.CTkButton(tb, text="Compose", width=90, height=36,
+                      font=ctk.CTkFont(size=13),
+                      fg_color=BTN_ALT, hover_color=BTN_ALT_HOVER, text_color=BTN_TEXT,
+                      command=self._open_compose).pack(side="left", padx=(6, 0))
 
         # ═══════ ROW 2: Log (full width) ═══════
 
@@ -378,6 +493,134 @@ class MissionPanel:
             color = GREEN if res == "OK" else RED
             self._traj_status.configure(text=f"{name}: {res}", text_color=color)
         self._async(lambda: self._node.call_execute_trajectory(name), done)
+
+    def _toggle_teach(self):
+        if not self._node.teach_recording:
+            # 开始录制: 切按钮红色
+            self._node.teach_start()
+            self._teach_btn.configure(text="Stop", fg_color=BTN_DANGER, hover_color=BTN_DANGER_HOVER)
+            self._traj_status.configure(text="recording...", text_color=YELLOW)
+        else:
+            # 停录 + 保存
+            self._teach_btn.configure(text="Teach", fg_color=BTN_ALT, hover_color=BTN_ALT_HOVER)
+            self._traj_status.configure(text="saving...", text_color=LAVENDER)
+            def done(res):
+                color = GREEN if str(res).startswith("OK") else RED
+                self._traj_status.configure(text=res, text_color=color)
+                if str(res).startswith("OK"):
+                    self._refresh_trajs()
+            self._async(self._node.teach_stop_and_save, done)
+
+    def _open_compose(self):
+        """Compose dialog: capture 2+ waypoints from current joint state, plan & save via MoveIt."""
+        win = ctk.CTkToplevel(self._root)
+        win.title("Compose Trajectory")
+        win.geometry("520x460")
+        win.configure(fg_color=BASE)
+        win.transient(self._root)
+
+        captured = []  # List[List[float]]
+
+        ctk.CTkLabel(win, text="COMPOSE TRAJECTORY",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color=OVERLAY).pack(anchor="w", padx=14, pady=(12, 6))
+        ctk.CTkLabel(win, text="拖臂(FREEDRIVE)到目标点 → Capture, 至少 2 个",
+                     font=ctk.CTkFont(size=11), text_color=SUBTEXT).pack(anchor="w", padx=14)
+
+        # Waypoint list (scrollable)
+        wp_card = ctk.CTkFrame(win, fg_color=CARD_FG, corner_radius=8)
+        wp_card.pack(fill="both", expand=True, padx=14, pady=8)
+        wp_list = tk.Listbox(wp_card, font=(FONT_MONO, 11), bg=CRUST, fg=TEXT,
+                             selectbackground=MAUVE, selectforeground=CRUST,
+                             borderwidth=0, highlightthickness=0, height=6)
+        wp_list.pack(fill="both", expand=True, padx=8, pady=8)
+
+        def refresh_list():
+            wp_list.delete(0, tk.END)
+            for i, q in enumerate(captured):
+                wp_list.insert(tk.END,
+                               f" {i}: " + ", ".join(f"{v:+.3f}" for v in q))
+
+        def do_capture():
+            s = self._node.get_state()
+            if not s["joints"]:
+                status.configure(text="no joint state yet", text_color=YELLOW); return
+            q = list(s["joints"][:6])
+            captured.append(q)
+            refresh_list()
+            status.configure(text=f"captured #{len(captured) - 1}", text_color=GREEN)
+
+        def do_remove():
+            sel = wp_list.curselection()
+            if not sel: return
+            captured.pop(sel[0])
+            refresh_list()
+
+        # Capture / remove buttons
+        br = ctk.CTkFrame(win, fg_color="transparent")
+        br.pack(fill="x", padx=14, pady=(0, 6))
+        ctk.CTkButton(br, text="Capture", width=100, height=32,
+                      fg_color=BTN, hover_color=BTN_HOVER, text_color=BTN_TEXT,
+                      command=do_capture).pack(side="left")
+        ctk.CTkButton(br, text="Remove selected", width=140, height=32,
+                      fg_color=BTN_ALT, hover_color=BTN_ALT_HOVER, text_color=BTN_TEXT,
+                      command=do_remove).pack(side="left", padx=8)
+
+        # Name + speed + gripper hints
+        form = ctk.CTkFrame(win, fg_color="transparent")
+        form.pack(fill="x", padx=14, pady=(4, 4))
+        ctk.CTkLabel(form, text="Name:", text_color=TEXT,
+                     font=ctk.CTkFont(size=12)).grid(row=0, column=0, sticky="e", padx=4, pady=4)
+        name_var = tk.StringVar()
+        ctk.CTkEntry(form, textvariable=name_var, width=200).grid(row=0, column=1, sticky="w",
+                                                                   padx=4, pady=4)
+        ctk.CTkLabel(form, text="Speed:", text_color=TEXT,
+                     font=ctk.CTkFont(size=12)).grid(row=0, column=2, sticky="e", padx=4, pady=4)
+        speed_var = tk.DoubleVar(value=0.3)
+        ctk.CTkEntry(form, textvariable=speed_var, width=60).grid(row=0, column=3, sticky="w",
+                                                                    padx=4, pady=4)
+
+        status = ctk.CTkLabel(win, text="", font=ctk.CTkFont(size=11), text_color=OVERLAY)
+        status.pack(anchor="w", padx=14)
+
+        def do_plan_save():
+            if len(captured) < 2:
+                status.configure(text="need ≥ 2 waypoints", text_color=YELLOW); return
+            name = name_var.get().strip()
+            if not name:
+                status.configure(text="name required", text_color=YELLOW); return
+            try:
+                speed = float(speed_var.get())
+            except Exception:
+                status.configure(text="invalid speed", text_color=YELLOW); return
+
+            # v1: 不带 gripper 动作 — Compose 出 YAML 后可手动编辑 meta.gripper_actions 添加
+            # 后续: srv 加 waypoint-index 基础的 gripper trigger, server 推断实际时间
+            status.configure(text="planning...", text_color=LAVENDER)
+            btn_save.configure(state="disabled")
+
+            def done(res):
+                btn_save.configure(state="normal")
+                color = GREEN if str(res).startswith("OK") else RED
+                status.configure(text=str(res), text_color=color)
+                if str(res).startswith("OK"):
+                    self._refresh_trajs()
+                    win.after(1500, win.destroy)
+
+            self._async(lambda: self._node.call_compose_trajectory(
+                name, captured, speed=speed), done)
+
+        # Actions
+        ar = ctk.CTkFrame(win, fg_color="transparent")
+        ar.pack(fill="x", padx=14, pady=(4, 14))
+        ctk.CTkButton(ar, text="Cancel", width=100, height=36,
+                      fg_color=BTN_ALT, hover_color=BTN_ALT_HOVER, text_color=BTN_TEXT,
+                      command=win.destroy).pack(side="right")
+        btn_save = ctk.CTkButton(ar, text="Plan & Save", width=140, height=36,
+                                 font=ctk.CTkFont(size=13, weight="bold"),
+                                 fg_color=BTN_OK, hover_color=BTN_OK_HOVER, text_color=BTN_TEXT,
+                                 command=do_plan_save)
+        btn_save.pack(side="right", padx=8)
 
     def _save_last_traj(self):
         dialog = ctk.CTkInputDialog(text="Trajectory name:", title="Save Last Trajectory")
