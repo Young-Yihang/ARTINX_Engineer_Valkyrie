@@ -12,7 +12,6 @@ meta:
     1.327249526977539, 0.4816810190677643]
   gripper_actions:
   - {time: 0.0, action: open}
-  - {time: 2.889025434, action: close}
 joint_names: [joint_1, joint_2, joint_3, joint_4, joint_5, joint_6]
 start_position: [0.011936426162719727, 2.3883728981018066, -0.82584547996521, -0.004986286163330078,
   0.013854026794433594, 0.0499865859746933]
