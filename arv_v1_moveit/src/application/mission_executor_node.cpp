@@ -3,6 +3,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -56,10 +57,18 @@ class MissionExecutorNode : public rclcpp::Node {
 public:
   MissionExecutorNode() : Node("mission_executor") {
     trajectory_timeout_s_ = declare_parameter<double>("trajectory_execution_timeout", 120.0);
-    key_bindings_path_ = declare_parameter<std::string>(
-        "key_bindings_path", "/home/huan/ros2_ws/src/arv_v1_moveit/config/key_bindings.yaml");
-    trajectory_dir_ = declare_parameter<std::string>(
-        "trajectory_dir", "/home/huan/ros2_ws/src/arv_v1_moveit/config/trajectories");
+    // 默认值用 ament_index 找 install share, 跨用户名 portable
+    std::string pkg_share;
+    try {
+      pkg_share = ament_index_cpp::get_package_share_directory("arv_v1_moveit");
+    } catch (const std::exception& e) {
+      RCLCPP_WARN(get_logger(), "[Bootstrap] get_package_share_directory failed: %s", e.what());
+      pkg_share = "/tmp";
+    }
+    key_bindings_path_ = declare_parameter<std::string>("key_bindings_path",
+                                                        pkg_share + "/config/key_bindings.yaml");
+    trajectory_dir_ =
+        declare_parameter<std::string>("trajectory_dir", pkg_share + "/config/trajectories");
 
     // Callback groups: subscription / service client 各一. Reentrant 让 service
     // 客户端 wait_for 在不同线程跑, 不阻塞 onTaskCommand 派发.

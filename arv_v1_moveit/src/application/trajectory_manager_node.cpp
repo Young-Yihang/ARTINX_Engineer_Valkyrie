@@ -3,6 +3,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <chrono>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <filesystem>
@@ -36,7 +37,14 @@ public:
     this->declare_parameter<std::string>("trajectory_dir", "");
     std::string traj_dir = this->get_parameter("trajectory_dir").as_string();
     if (traj_dir.empty()) {
-      traj_dir = "/home/huan/ros2_ws/src/arv_v1_moveit/config/trajectories";
+      try {
+        traj_dir =
+            ament_index_cpp::get_package_share_directory("arv_v1_moveit") + "/config/trajectories";
+      } catch (const std::exception& e) {
+        RCLCPP_WARN(this->get_logger(),
+                    "[Bootstrap] get_package_share_directory failed (%s), fallback /tmp", e.what());
+        traj_dir = "/tmp/trajectories";
+      }
     }
     trajectory_dir_ = traj_dir;
 

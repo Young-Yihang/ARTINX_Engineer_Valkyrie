@@ -296,6 +296,7 @@ ament_target_dependencies(trajectory_manager_node
   control_msgs
   arv_v1_interfaces
   moveit_ros_planning_interface
+  ament_index_cpp
 )
 
 # -------------------------------------------
@@ -347,6 +348,7 @@ ament_target_dependencies(mission_executor_node
   geometry_msgs
   tf2
   arv_v1_interfaces
+  ament_index_cpp
 )
 
 # -------------------------------------------
