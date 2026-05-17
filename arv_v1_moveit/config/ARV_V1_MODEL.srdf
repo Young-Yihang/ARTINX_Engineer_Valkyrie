@@ -103,28 +103,28 @@
          ╚══════════════════════════════════════════════════════════════════════╝ -->
 
     <!-- base_link vs distant links: 物理隔了整条臂, 几何上不可能撞 -->
-    <disable_collisions link1="base_link" link2="link2" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="base_link" link2="link4" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="base_link" link2="link5" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="base_link" link2="link6" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="base_link" link2="link_gripper1" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="base_link" link2="link_gripper2" reason="Manually verified (full-range test)"/>
+    <disable_collisions link1="base_link" link2="link2" reason="Never"/>
+    <disable_collisions link1="base_link" link2="link4" reason="Never"/>
+    <disable_collisions link1="base_link" link2="link5" reason="Never"/>
+    <disable_collisions link1="base_link" link2="link6" reason="Never"/>
+    <disable_collisions link1="base_link" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="base_link" link2="link_gripper2" reason="Never"/>
 
     <!-- link1 vs distal: 折叠极限下接近, 但实际 mesh 不接触 -->
-    <disable_collisions link1="link1" link2="link4" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="link1" link2="link5" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="link1" link2="link6" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="link1" link2="link_gripper1" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="link1" link2="link_gripper2" reason="Manually verified (full-range test)"/>
+    <disable_collisions link1="link1" link2="link4" reason="Never"/>
+    <disable_collisions link1="link1" link2="link5" reason="Never"/>
+    <disable_collisions link1="link1" link2="link6" reason="Never"/>
+    <disable_collisions link1="link1" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="link1" link2="link_gripper2" reason="Never"/>
 
     <!-- link2 vs 远端: 极限折叠时几何 envelope 接近, 实测不接触 -->
-    <disable_collisions link1="link2" link2="link5" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="link2" link2="link6" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="link2" link2="link_gripper1" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="link2" link2="link_gripper2" reason="Manually verified (full-range test)"/>
+    <disable_collisions link1="link2" link2="link5" reason="Never"/>
+    <disable_collisions link1="link2" link2="link6" reason="Never"/>
+    <disable_collisions link1="link2" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="link2" link2="link_gripper2" reason="Never"/>
 
     <!-- link4 vs gripper: link4=Roll1 旋转可能让 gripper 接近自身, 实测不撞 -->
-    <disable_collisions link1="link4" link2="link_gripper1" reason="Manually verified (full-range test)"/>
-    <disable_collisions link1="link4" link2="link_gripper2" reason="Manually verified (full-range test)"/>
+    <disable_collisions link1="link4" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="link4" link2="link_gripper2" reason="Never"/>
 
 </robot>
