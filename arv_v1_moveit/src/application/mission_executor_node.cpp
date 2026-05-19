@@ -1,262 +1,169 @@
 /// @file mission_executor_node.cpp
-/// @brief ncurses TUI for mission control — hotkey-driven, non-blocking.
+/// @brief Headless mission state machine — MCU key events → trajectory sequencing + interrupt
+/// allowlist + B fast-forward.
 
-#include <ncurses.h>
-#include <signal.h>
-#include <tf2/LinearMath/Quaternion.h>
 #include <yaml-cpp/yaml.h>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <atomic>
 #include <chrono>
-#include <clocale>
-#include <deque>
+#include <condition_variable>
 #include <filesystem>
-#include <fstream>
-#include <functional>
-#include <future>
-#include <iomanip>
-#include <iostream>
-#include <limits>
-#include <map>
 #include <mutex>
-#include <queue>
+#include <optional>
 #include <rclcpp/rclcpp.hpp>
-#include <sstream>
+#include <set>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
+#include "arv_v1_interfaces/srv/cancel_current_trajectory.hpp"
 #include "arv_v1_interfaces/srv/gripper_control.hpp"
-#include "arv_v1_interfaces/srv/list_trajectories.hpp"
 #include "arv_v1_interfaces/srv/load_trajectory.hpp"
-#include "arv_v1_interfaces/srv/save_last_trajectory.hpp"
-#include "geometry_msgs/msg/pose_stamped.hpp"
-#include "std_msgs/msg/int32.hpp"   // /task_command from hardware_interface
-#include "std_msgs/msg/u_int8.hpp"  // /control_mode
+#include "arv_v1_interfaces/srv/plan_to_preset.hpp"
+#include "std_msgs/msg/int32.hpp"
+#include "std_msgs/msg/u_int8.hpp"
 
-// 与 serial_protocol.hpp ControlMode 同步
 namespace ControlMode {
-constexpr uint8_t RELAX = 0;      // 全零力矩
-constexpr uint8_t FREEDRIVE = 1;  // 仅重力补偿
-constexpr uint8_t ARMED = 2;      // 就绪: G(q)+PD 保持, 可接受轨迹执行
+constexpr uint8_t RELAX = 0;
+constexpr uint8_t FREEDRIVE = 1;
+constexpr uint8_t ARMED = 2;
 }  // namespace ControlMode
 
 using LoadTrajectory = arv_v1_interfaces::srv::LoadTrajectory;
-using ListTrajectories = arv_v1_interfaces::srv::ListTrajectories;
-using SaveLastTrajectory = arv_v1_interfaces::srv::SaveLastTrajectory;
 using GripperControl = arv_v1_interfaces::srv::GripperControl;
+using PlanToPreset = arv_v1_interfaces::srv::PlanToPreset;
+using CancelCurrentTrajectory = arv_v1_interfaces::srv::CancelCurrentTrajectory;
 using namespace std::chrono_literals;
 
-// --- 数据结构 ---
+// --- Binding 数据结构 ---
 
-struct MissionState {
-  std::string id;
-  std::string trajectory;
-  std::string description;
+struct BindingStep {
+  std::string trajectory;      // trajectory 名 (可含 {param} 模板, loader 已展开)
+  bool wait_for_next = false;  // step 跑完是否停下等 B
 };
 
-struct TrajectoryEntry {
-  std::string name;
-  std::string description;
+struct Binding {
+  std::vector<BindingStep> steps;
+  std::set<uint8_t> interruptible_by;  // 序列执行中接受的 cmd 白名单
 };
 
-// 日志环形缓冲
-class LogBuffer {
-public:
-  void add(const std::string& msg, int color_pair) {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (logs_.size() >= max_size_) logs_.pop_front();
-    logs_.push_back({msg, color_pair});
-  }
-  std::vector<std::pair<std::string, int>> get() {
-    std::lock_guard<std::mutex> lock(mu_);
-    return {logs_.begin(), logs_.end()};
-  }
-
-private:
-  std::deque<std::pair<std::string, int>> logs_;
-  const size_t max_size_ = 5;  // 底部5行
-  std::mutex mu_;
+struct ActiveTask {
+  std::string binding_key;
+  size_t step_idx = 0;
+  bool awaiting_next = false;  // 当前 step 已跑完, 阻塞在 wait_for_next
 };
-
-// --- 颜色定义 ---
-#define COLOR_PAIR_DEFAULT 1
-#define COLOR_PAIR_HEADER 2
-#define COLOR_PAIR_SUCCESS 3
-#define COLOR_PAIR_ERROR 4
-#define COLOR_PAIR_WARNING 5
-#define COLOR_PAIR_HIGHLIGHT 6
-
-// --- 节点 ---
 
 class MissionExecutorNode : public rclcpp::Node {
 public:
   MissionExecutorNode() : Node("mission_executor") {
-    initNcurses();
-
-    // [FIX] getenv("HOME") 可返回 nullptr，构造 std::string 是 UB
-    const char* home_env = getenv("HOME");
-    if (!home_env) {
-      RCLCPP_FATAL(get_logger(), "HOME environment variable not set");
-      throw std::runtime_error("HOME env not set");
+    trajectory_timeout_s_ = declare_parameter<double>("trajectory_execution_timeout", 120.0);
+    // 默认值用 ament_index 找 install share, 跨用户名 portable
+    std::string pkg_share;
+    try {
+      pkg_share = ament_index_cpp::get_package_share_directory("arv_v1_moveit");
+    } catch (const std::exception& e) {
+      RCLCPP_WARN(get_logger(), "[Bootstrap] get_package_share_directory failed: %s", e.what());
+      pkg_share = "/tmp";
     }
-    std::string home(home_env);
-    trajectory_dir_ = home + "/ros2_ws/src/arv_v1_moveit/config/trajectories";
-    mission_yaml_path_ = home + "/ros2_ws/src/arv_v1_moveit/config/mission_sequence.yaml";
+    key_bindings_path_ = declare_parameter<std::string>("key_bindings_path",
+                                                        pkg_share + "/config/key_bindings.yaml");
+    trajectory_dir_ =
+        declare_parameter<std::string>("trajectory_dir", pkg_share + "/config/trajectories");
 
-    load_client_ = create_client<LoadTrajectory>("/load_trajectory");
-    save_client_ = create_client<SaveLastTrajectory>("/save_last_trajectory");
-    cartesian_target_pub_ =
-        create_publisher<geometry_msgs::msg::PoseStamped>("/cartesian_target_pose", 10);
-    gripper_client_ = create_client<GripperControl>("/gripper_control");
+    // Callback groups: subscription / service client 各一. Reentrant 让 service
+    // 客户端 wait_for 在不同线程跑, 不阻塞 onTaskCommand 派发.
+    sub_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    client_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
-    ee_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-        "/cartesian_controller/current_pose", 10,
-        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-          std::lock_guard<std::mutex> lk(pose_mu_);
-          current_ee_pose_ = *msg;
-          has_ee_pose_ = true;
-        });
+    load_client_ =
+        create_client<LoadTrajectory>("/load_trajectory", rclcpp::ServicesQoS(), client_cb_group_);
+    gripper_client_ =
+        create_client<GripperControl>("/gripper_control", rclcpp::ServicesQoS(), client_cb_group_);
+    plan_preset_client_ =
+        create_client<PlanToPreset>("/plan_to_preset", rclcpp::ServicesQoS(), client_cb_group_);
+    cancel_client_ = create_client<CancelCurrentTrajectory>(
+        "/cancel_current_trajectory", rclcpp::ServicesQoS(), client_cb_group_);
+
+    rclcpp::SubscriptionOptions sub_opts;
+    sub_opts.callback_group = sub_cb_group_;
 
     task_command_sub_ = create_subscription<std_msgs::msg::Int32>(
         "/task_command", 10,
-        std::bind(&MissionExecutorNode::onTaskCommand, this, std::placeholders::_1));
+        std::bind(&MissionExecutorNode::onTaskCommand, this, std::placeholders::_1), sub_opts);
+
+    control_mode_sub_ = create_subscription<std_msgs::msg::UInt8>(
+        "/control_mode", 10,
+        [this](const std_msgs::msg::UInt8::SharedPtr msg) { control_mode_ = msg->data; }, sub_opts);
 
     control_mode_pub_ = create_publisher<std_msgs::msg::UInt8>("/control_mode", 10);
+    arm_state_pub_ = create_publisher<std_msgs::msg::UInt8>("/arm_state", 10);
 
-    // [FIX] 立即发布 ARMED，防止 torque_controller 默认 RELAX 导致上电掉落。
-    // torque_controller 在 sleep 2 前已启动，此时订阅已建立。
-    publishControlMode(ControlMode::ARMED);
+    arm_status_timer_ = create_wall_timer(100ms, [this]() {
+      auto msg = std_msgs::msg::UInt8();
+      msg.data = deriveArmState();
+      arm_state_pub_->publish(msg);
+    });
 
-    log("Checking services (non-blocking)...", COLOR_PAIR_DEFAULT);
+    mode_broadcast_timer_ = create_wall_timer(1s, [this]() {
+      auto msg = std_msgs::msg::UInt8();
+      msg.data = control_mode_;
+      control_mode_pub_->publish(msg);
+    });
+
+    publishControlMode(ControlMode::RELAX);
+
     if (!load_client_->wait_for_service(2s)) {
-      logWarn("load_trajectory service not ready, will retry on use");
+      RCLCPP_WARN(get_logger(), "load_trajectory service not ready, will retry on use");
     }
-    // 其他服务首次调用时检测
-    save_client_->wait_for_service(500ms);
 
-    loadMissionSequence();
-    fetchTrajectories();
-
-    // 重发: 覆盖 wait_for_service 期间可能重启的节点
-    publishControlMode(ControlMode::ARMED);
-    log("Mission Executor v4.0 ready", COLOR_PAIR_SUCCESS);
-  }
-
-  ~MissionExecutorNode() {
-    // async_ destroyed automatically (RAII) before shutdownNcurses
-    shutdownNcurses();
-  }
-
-  void run() {
-    int ch;
-    int mode_broadcast_counter_ = 0;
-    while (rclcpp::ok() && running_) {
-      drawUI();
-      ch = getch();
-      if (ch != ERR) {
-        handleInput(ch);
-      }
-      rclcpp::spin_some(get_node_base_interface());
-      // ~1s 重发控制模式，防节点重启后丢失
-      if (++mode_broadcast_counter_ >= 10) {
-        mode_broadcast_counter_ = 0;
-        auto msg = std_msgs::msg::UInt8();
-        msg.data = control_mode_;
-        control_mode_pub_->publish(msg);
-      }
-    }
+    loadKeyBindings();
+    publishControlMode(ControlMode::RELAX);
+    RCLCPP_INFO(get_logger(), "Mission Executor ready (headless, %zu bindings)", bindings_.size());
   }
 
 private:
-  // --- Async Task Runner ---
-  class AsyncTaskRunner {
-    using Task = std::packaged_task<void()>;
-    std::thread worker_;
-    std::queue<Task> tasks_;
-    std::mutex mu_;
-    std::condition_variable cv_;
-    std::atomic<bool> stop_{false};
-
-  public:
-    AsyncTaskRunner() {
-      worker_ = std::thread([this] {
-        while (true) {
-          Task task;
-          {
-            std::unique_lock<std::mutex> lk(mu_);
-            cv_.wait(lk, [this] { return stop_ || !tasks_.empty(); });
-            if (stop_ && tasks_.empty()) return;
-            task = std::move(tasks_.front());
-            tasks_.pop();
-          }
-          task();
-        }
-      });
-    }
-    ~AsyncTaskRunner() {
-      {
-        std::lock_guard<std::mutex> lk(mu_);
-        stop_ = true;
-      }
-      cv_.notify_one();
-      if (worker_.joinable()) worker_.join();
-    }
-    template <typename F>
-    void post(F&& fn) {
-      {
-        std::lock_guard<std::mutex> lk(mu_);
-        tasks_.push(Task(std::forward<F>(fn)));
-      }
-      cv_.notify_one();
-    }
-  };
-
-  AsyncTaskRunner async_;
-  bool running_ = true;
-  LogBuffer log_buffer_;
-
-  // --- UI/UX 核心状态 ---
-  enum class View { STATE_MACHINE, TRAJECTORY, CARTESIAN, GRIPPER, HELP };
-  View view_ = View::STATE_MACHINE;
-
-  bool takeover_mode_ = false;  // 隔离全局按键
-
-  enum class InputMode { NONE, SAVE_NAME, SAVE_DESC, DELETE_CONFIRM, OVERWRITE_CONFIRM };
-  InputMode input_mode_ = InputMode::NONE;
-  std::string input_buffer_;
-  std::string pending_name_;
-
-  // --- 状态机 ---
-  std::vector<MissionState> states_;
-  size_t current_idx_ = 0;
-  std::string mission_name_;
-  std::string mission_desc_;
-  std::string reset_trajectory_;
-  std::string mission_yaml_path_;
+  // --- State ---
   std::atomic<bool> executing_{false};
-
-  // --- 轨迹管理 ---
-  std::vector<TrajectoryEntry> trajectories_;
+  double trajectory_timeout_s_ = 120.0;
+  std::string key_bindings_path_;
   std::string trajectory_dir_;
-  static constexpr size_t PER_PAGE = 7;
-  size_t traj_page_ = 0;
+  uint8_t control_mode_ = ControlMode::RELAX;
+  uint8_t last_task_seq_ = 0xFF;
 
-  // --- 夹爪状态 ---
-  double gripper_torque_cmd_ = 0.0;  // 预设力 (N)
-  double gripper_last_sent_ = 0.0;   // 已发送力 (N)
+  std::unordered_map<std::string, Binding>
+      bindings_;  // key="pick_obj_0".."pick_obj_5"/"stow_left"/...
 
-  // --- 笛卡尔状态 ---
-  double cartesian_step_ = 0.005;  // 5mm
-  // 增量叠加在目标上(非TF反馈)，避免PD延迟漂移
-  geometry_msgs::msg::Pose jog_target_pose_;
-  double jog_target_roll_ = 0.0, jog_target_pitch_ = 0.0, jog_target_yaw_ = 0.0;
-  bool jog_target_initialized_ = false;
-  geometry_msgs::msg::PoseStamped current_ee_pose_;
-  std::mutex pose_mu_;
-  bool has_ee_pose_ = false;
+  std::optional<ActiveTask> active_task_;
+  std::mutex active_mu_;
+  std::condition_variable task_cv_;
+  std::atomic<bool> step_skip_requested_{false};   // B 砍 current step
+  std::atomic<bool> task_abort_requested_{false};  // X/ESTOP/F 砍整个序列
+  // 上一个 binding 正常跑完 (非 abort), 当前空闲但保持 hold 位. 操作手凭此区分
+  // "READY = 刚启动空闲" vs "HOLDING = 序列做完等待下一指令".
+  std::atomic<bool> last_sequence_completed_{false};
 
-  // --- 控制模式 ---
+  // --- ROS2 ---
+  rclcpp::Client<LoadTrajectory>::SharedPtr load_client_;
+  rclcpp::Client<GripperControl>::SharedPtr gripper_client_;
+  rclcpp::Client<PlanToPreset>::SharedPtr plan_preset_client_;
+  rclcpp::Client<CancelCurrentTrajectory>::SharedPtr cancel_client_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr task_command_sub_;
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr control_mode_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr control_mode_pub_;
-  uint8_t control_mode_ = ControlMode::ARMED;
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr arm_state_pub_;
+  rclcpp::TimerBase::SharedPtr arm_status_timer_;
+  rclcpp::TimerBase::SharedPtr mode_broadcast_timer_;
+  rclcpp::CallbackGroup::SharedPtr sub_cb_group_;
+  rclcpp::CallbackGroup::SharedPtr client_cb_group_;
+
+  uint8_t deriveArmState() const {
+    if (control_mode_ == ControlMode::RELAX) return 0x05;
+    if (control_mode_ == ControlMode::FREEDRIVE) return 0x06;
+    if (executing_) return 0x01;
+    if (last_sequence_completed_) return 0x02;  // HOLDING: 序列做完, 在 hold 位待命
+    return 0x00;                                // READY: 空闲, 上次 abort/未跑过
+  }
 
   void publishControlMode(uint8_t mode) {
     control_mode_ = mode;
@@ -264,965 +171,444 @@ private:
     msg.data = mode;
     control_mode_pub_->publish(msg);
     static const char* names[] = {"RELAX", "FREEDRIVE", "ARMED"};
-    log(std::string("[MODE] -> ") + (mode <= ControlMode::ARMED ? names[mode] : "?"),
-        mode == 0 ? COLOR_PAIR_WARNING : COLOR_PAIR_SUCCESS);
+    RCLCPP_INFO(get_logger(), "[MODE] -> %s", mode <= 2 ? names[mode] : "?");
   }
 
-  // --- ROS2 客户端 ---
-  rclcpp::Client<LoadTrajectory>::SharedPtr load_client_;
-  rclcpp::Client<SaveLastTrajectory>::SharedPtr save_client_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr cartesian_target_pub_;
-  rclcpp::Client<GripperControl>::SharedPtr gripper_client_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr ee_pose_sub_;
-  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr task_command_sub_;
-  uint8_t last_task_seq_ = 0xFF;  // 去重
+  // --- key_bindings.yaml 加载 ---
 
-  // --- Ncurses 初始化 ---
-
-  void initNcurses() {
-    initscr();
-    cbreak();
-    noecho();
-    keypad(stdscr, TRUE);
-    timeout(100);  // 10Hz 刷新
-
-    if (has_colors()) {
-      start_color();
-      init_pair(COLOR_PAIR_DEFAULT, COLOR_WHITE, COLOR_BLACK);
-      init_pair(COLOR_PAIR_HEADER, COLOR_CYAN, COLOR_BLACK);
-      init_pair(COLOR_PAIR_SUCCESS, COLOR_GREEN, COLOR_BLACK);
-      init_pair(COLOR_PAIR_ERROR, COLOR_RED, COLOR_BLACK);
-      init_pair(COLOR_PAIR_WARNING, COLOR_YELLOW, COLOR_BLACK);
-      init_pair(COLOR_PAIR_HIGHLIGHT, COLOR_BLACK, COLOR_WHITE);  // 反色
-    }
-  }
-
-  void shutdownNcurses() { endwin(); }
-
-  void log(const std::string& msg, int color = COLOR_PAIR_DEFAULT) {
-    log_buffer_.add(msg, color);
-    // 不用 RCLCPP_INFO，防 stdout 与 ncurses 冲突致 UI 撕裂
-  }
-
-  void logErr(const std::string& msg) { log(msg, COLOR_PAIR_ERROR); }
-  void logOk(const std::string& msg) { log(msg, COLOR_PAIR_SUCCESS); }
-  void logWarn(const std::string& msg) { log(msg, COLOR_PAIR_WARNING); }
-
-  // --- 后台加载 ---
-
-  void loadMissionSequence() {
-    std::lock_guard<std::mutex> lk(status_mu_);
-    states_.clear();
-    if (!std::filesystem::exists(mission_yaml_path_)) {
-      logWarn("Mission YAML not found, using IDLE.");
-      states_.push_back({"IDLE", "", "等待指令"});
+  void loadKeyBindings() {
+    bindings_.clear();
+    if (!std::filesystem::exists(key_bindings_path_)) {
+      RCLCPP_ERROR(get_logger(), "key_bindings.yaml not found: %s", key_bindings_path_.c_str());
       return;
     }
     try {
-      auto root = YAML::LoadFile(mission_yaml_path_);
-      auto mission = root["mission"];
-      mission_name_ = mission["name"].as<std::string>("unnamed");
-      mission_desc_ = mission["description"].as<std::string>("");
-      reset_trajectory_ = mission["reset_trajectory"].as<std::string>("");
-      for (const auto& s : mission["states"]) {
-        MissionState ms;
-        ms.id = s["id"].as<std::string>("?");
-        ms.trajectory = s["trajectory"].as<std::string>("");
-        ms.description = s["description"].as<std::string>("");
-        states_.push_back(ms);
+      auto root = YAML::LoadFile(key_bindings_path_);
+      auto bs = root["bindings"];
+      for (auto it = bs.begin(); it != bs.end(); ++it) {
+        std::string key = it->first.as<std::string>();
+        auto node = it->second;
+
+        Binding b;
+        if (node["interruptible_by"]) {
+          for (const auto& c : node["interruptible_by"]) b.interruptible_by.insert(c.as<uint8_t>());
+        }
+        for (const auto& s : node["steps"]) {
+          BindingStep step;
+          step.trajectory = s["trajectory"].as<std::string>("");
+          step.wait_for_next = s["wait_for_next"].as<bool>(false);
+          b.steps.push_back(step);
+        }
+
+        // pick_obj 模板展开成 pick_obj_0..pick_obj_5
+        if (key == "pick_obj") {
+          for (int i = 0; i < 6; ++i) {
+            Binding expanded = b;
+            for (auto& st : expanded.steps) {
+              std::string s = st.trajectory;
+              auto pos = s.find("{param}");
+              while (pos != std::string::npos) {
+                s.replace(pos, 7, std::to_string(i));
+                pos = s.find("{param}");
+              }
+              st.trajectory = s;
+            }
+            bindings_["pick_obj_" + std::to_string(i)] = expanded;
+          }
+        } else {
+          bindings_[key] = b;
+        }
       }
     } catch (const std::exception& e) {
-      logErr("Parse mission YAML failed.");
-      states_.push_back({"IDLE", "", "等待指令(配置错误)"});
+      RCLCPP_ERROR(get_logger(), "Parse key_bindings.yaml failed: %s", e.what());
+      return;
     }
-    current_idx_ = 0;
-  }
 
-  void fetchTrajectories() {
-    if (!load_client_->service_is_ready()) return;
-    auto client = create_client<ListTrajectories>("/list_trajectories");
-    if (!client->wait_for_service(1s)) return;
-    auto req = std::make_shared<ListTrajectories::Request>();
-    auto fut = client->async_send_request(req);
-    // [FIX] 必须捕获 client，否则函数返回后 client 析构 → Broken promise
-    async_.post([this, client, fut = std::move(fut)]() mutable {
-      try {
-        if (fut.wait_for(2s) == std::future_status::ready) {
-          auto res = fut.get();
-          std::lock_guard<std::mutex> lk(status_mu_);
-          trajectories_.clear();
-          for (size_t i = 0; i < res->names.size(); i++) {
-            TrajectoryEntry e;
-            e.name = res->names[i];
-            e.description = i < res->descriptions.size() ? res->descriptions[i] : "";
-            trajectories_.push_back(e);
-          }
-          traj_page_ = 0;
+    // 检查所有引用的 trajectory 文件是否存在, 缺的列出 WARN (不阻止启动)
+    std::vector<std::string> missing;
+    for (const auto& [key, b] : bindings_) {
+      for (const auto& s : b.steps) {
+        std::string path = trajectory_dir_ + "/" + s.trajectory + ".yaml";
+        if (!std::filesystem::exists(path)) {
+          missing.push_back(s.trajectory + " (referenced by " + key + ")");
         }
-      } catch (const std::exception& e) {
-        logErr(std::string("Exception: ") + e.what());
-      } catch (...) {
-        logErr("Unknown exception");
       }
-    });
-  }
-
-  std::mutex status_mu_;  // 保护后台数据
-
-  // --- 输入分发 (核心防冲突逻辑) ---
-
-  void handleInput(int ch) {
-    if (input_mode_ != InputMode::NONE) {
-      handleStringInput(ch);
-      return;
     }
-
-    // [Z] 全局夹爪切换：任何视图/接管模式下均有效
-    if (ch == 'z' || ch == 'Z') {
-      toggleGripper();
-      return;
-    }
-
-    if (takeover_mode_) {
-      handleTakeoverInput(ch);
-      return;
-    }
-
-    handleGlobalInput(ch);
-  }
-
-  void handleGlobalInput(int ch) {
-    if (ch == 'q' || ch == 'Q') {
-      running_ = false;
-      return;
-    }
-
-    if (ch == 'm' || ch == 'M') {
-      view_ = View::STATE_MACHINE;
-      return;
-    }
-    if (ch == 't' || ch == 'T') {
-      view_ = View::TRAJECTORY;
-      fetchTrajectories();
-      return;
-    }
-    if (ch == 'h' || ch == 'H') {
-      view_ = View::HELP;
-      return;
-    }
-
-    if (ch == 'c' || ch == 'C') {
-      view_ = View::CARTESIAN;
-      return;
-    }
-    if (ch == 'g' || ch == 'G') {
-      view_ = View::GRIPPER;
-      return;
-    }
-
-    if (view_ == View::STATE_MACHINE)
-      handleSMCommand(ch);
-    else if (view_ == View::TRAJECTORY)
-      handleTrajCommand(ch);
-    else if (view_ == View::CARTESIAN) {
-      if (ch == '\n' || ch == '\r') {
-        takeover_mode_ = true;
-        {
-          std::lock_guard<std::mutex> lk(pose_mu_);
-          if (has_ee_pose_) {
-            jog_target_pose_ = current_ee_pose_.pose;
-            quaternionToRPY(jog_target_pose_.orientation, jog_target_roll_, jog_target_pitch_,
-                            jog_target_yaw_);
-            jog_target_initialized_ = true;
-          }
-        }
-        logWarn("Entered Takeover mode. Press 'Esc' to release.");
-      }
-    } else if (view_ == View::GRIPPER) {
-      handleGripperInput(ch);
+    if (!missing.empty()) {
+      RCLCPP_WARN(get_logger(), "[KeyBindings] %zu trajectory files missing:", missing.size());
+      for (const auto& m : missing) RCLCPP_WARN(get_logger(), "  - %s.yaml", m.c_str());
     }
   }
 
-  void handleTakeoverInput(int ch) {
-    if (ch == 27) {  // Esc 退出接管
-      takeover_mode_ = false;
-      log("Exited Takeover mode.", COLOR_PAIR_DEFAULT);
-      return;
-    }
+  // --- MCU Command Dispatch ---
 
-    if (view_ == View::CARTESIAN) handleCartesianTakeover(ch);
-  }
-
-  void handleStringInput(int ch) {
-    if (ch == 27) {  // Esc cancel
-      input_mode_ = InputMode::NONE;
-      log("Input canceled.");
-      return;
-    }
-
-    if (input_mode_ == InputMode::DELETE_CONFIRM || input_mode_ == InputMode::OVERWRITE_CONFIRM) {
-      if (input_mode_ == InputMode::DELETE_CONFIRM)
-        handleDeleteConfirm(ch);
-      else if (input_mode_ == InputMode::OVERWRITE_CONFIRM)
-        handleOverwrite(ch);
-      return;
-    }
-
-    if (ch == '\n' || ch == '\r') {
-      std::string val = input_buffer_;
-      input_buffer_.clear();
-      if (input_mode_ == InputMode::SAVE_NAME)
-        handleSaveName(val);
-      else if (input_mode_ == InputMode::SAVE_DESC)
-        handleSaveDesc(val);
-    } else if (ch == KEY_BACKSPACE || ch == 127 || ch == '\b') {
-      if (!input_buffer_.empty()) input_buffer_.pop_back();
-    } else if (isprint(ch)) {
-      if (input_mode_ == InputMode::SAVE_NAME && ch == ' ') return;  // 名字禁空格
-      input_buffer_.push_back(ch);
-    }
-  }
-
-  // 协议: Int32 = cmd<<16 | param<<8 | seq
   void onTaskCommand(const std_msgs::msg::Int32::SharedPtr msg) {
     const uint8_t cmd = static_cast<uint8_t>((msg->data >> 16) & 0xFF);
     const uint8_t param = static_cast<uint8_t>((msg->data >> 8) & 0xFF);
     const uint8_t seq = static_cast<uint8_t>(msg->data & 0xFF);
 
-    if (seq == last_task_seq_) return;  // 去重
+    if (seq == last_task_seq_) return;
     last_task_seq_ = seq;
 
-    char log_buf[64];
+    // 不受 binding 状态约束的全局 cmd
     switch (cmd) {
-      case 0x01:  // EMERGENCY_STOP
-        logWarn("[HW] EMERGENCY_STOP");
+      case 0x01:
+        RCLCPP_WARN(get_logger(), "[HW] EMERGENCY_STOP");
+        emergencyStop();
+        return;
+      case 0x02:
+        RCLCPP_INFO(get_logger(), "[HW] RESET_HOME");
+        triggerTaskAbort();
         resetToIdle();
+        return;
+      case 0x31:
+        RCLCPP_WARN(get_logger(), "[HW] ABORT_TASK");
+        triggerTaskAbort();
+        return;
+      case 0x40:
+        RCLCPP_INFO(get_logger(), "[HW] GRIPPER_CMD param=%u", param);
+        sendGripperAsync(param == 1 ? 70.0 : (param == 0 ? -70.0 : 0.0));
+        return;
+      case 0x50:
+        RCLCPP_INFO(get_logger(), "[HW] SET_CONTROL_MODE param=%u", param);
+        if (param <= ControlMode::ARMED) publishControlMode(param);
+        return;
+    }
+
+    // 启动类 cmd: 决定 binding key
+    std::optional<std::string> start_key;
+    switch (cmd) {
+      case 0x10:
+        if (param < 6)
+          start_key = "pick_obj_" + std::to_string(param);
+        else
+          RCLCPP_WARN(get_logger(), "[HW] PICK_OBJ param=%u out of range, ignored", param);
         break;
-      case 0x02:  // RESET_HOME
-        logOk("[HW] RESET_HOME");
-        resetToIdle();
+      case 0x24:
+        start_key = "stow_left";
         break;
-      case 0x10:  // PICK_OBJ
-        snprintf(log_buf, sizeof(log_buf), "[HW] PICK_OBJ obj_id=%u", param);
-        logOk(log_buf);
-        executeTrajectoryByKey("pick_obj_" + std::to_string(param));
+      case 0x25:
+        start_key = "stow_right";
         break;
-      case 0x11:  // STOW_OBJ
-        snprintf(log_buf, sizeof(log_buf), "[HW] STOW_OBJ slot_id=%u", param);
-        logOk(log_buf);
-        executeTrajectoryByKey("stow_slot_" + std::to_string(param));
+      case 0x26:
+        start_key = "retrieve_left";
         break;
-      case 0x20:  // MOVE_TO_DEPOSIT
-        logOk("[HW] MOVE_TO_DEPOSIT");
-        executeTrajectoryByKey("move_to_deposit");
+      case 0x27:
+        start_key = "retrieve_right";
         break;
-      case 0x21:  // EXECUTE_DEPOSIT
-        snprintf(log_buf, sizeof(log_buf), "[HW] EXECUTE_DEPOSIT slot_id=%u", param);
-        logOk(log_buf);
-        executeTrajectoryByKey("deposit_slot_" + std::to_string(param));
-        break;
-      case 0x30:  // NEXT_STEP
-        logOk("[HW] NEXT_STEP");
-        {
-          std::lock_guard<std::mutex> lk(status_mu_);
-          if (current_idx_ + 1 < states_.size()) {
-            current_idx_++;
-            log("State -> " + states_[current_idx_].id, COLOR_PAIR_WARNING);
-          }
-        }
-        break;
-      case 0x31:  // ABORT_TASK
-        logWarn("[HW] ABORT_TASK");
-        executing_ = false;
-        break;
-      case 0x40:  // GRIPPER_CMD
-        snprintf(log_buf, sizeof(log_buf), "[HW] GRIPPER_CMD param=%u", param);
-        logOk(log_buf);
-        sendGripper(param == 1 ? 5.0 : (param == 0 ? -5.0 : 0.0));
-        break;
-      case 0x50:  // SET_CONTROL_MODE
-        snprintf(log_buf, sizeof(log_buf), "[HW] SET_CONTROL_MODE param=%u", param);
-        logOk(log_buf);
-        if (param <= ControlMode::ARMED) {
-          publishControlMode(param);
-        } else {
-          logWarn("[HW] Invalid control mode value");
-        }
-        break;
+      case 0x30:
+        // B 推进/fast-forward
+        handleNextStep();
+        return;
       default:
-        snprintf(log_buf, sizeof(log_buf), "[HW] Unknown TaskCmd 0x%02X param=%u", cmd, param);
-        logWarn(log_buf);
-        break;
+        RCLCPP_WARN(get_logger(), "[HW] Unknown TaskCmd 0x%02X param=%u", cmd, param);
+        return;
     }
+
+    if (start_key) handleStartBinding(*start_key, cmd);
   }
 
-  void executeTrajectoryByKey(const std::string& name) {
-    if (control_mode_ != ControlMode::ARMED) {
-      logWarn("须先切到 ARMED 模式才能执行: " + name);
-      return;
-    }
-    bool expected = false;
-    if (!executing_.compare_exchange_strong(expected, true)) {
-      logWarn("Busy, ignoring: " + name);
-      return;
-    }
-    log("Exec traj: " + name + "...", COLOR_PAIR_HEADER);
-    auto req = std::make_shared<LoadTrajectory::Request>();
-    req->name = name;
-    req->execute = true;
-    // [FIX] try-catch 防 async_send_request 异常导致 executing_ 卡死
-    try {
-      auto fut = load_client_->async_send_request(req);
-      async_.post([this, fut = std::move(fut), name]() mutable {
-        try {
-          // [FIX] 加超时，防服务节点崩溃时永久阻塞
-          if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
-            auto res = fut.get();
-            if (res->success)
-              logOk("Done: " + name);
-            else
-              logErr("Fail: " + name + " - " + res->message);
-          } else {
-            logErr("Timeout: " + name);
-          }
-        } catch (const std::exception& e) {
-          logErr("Error: " + std::string(e.what()));
-        }
-        executing_ = false;
-      });
-    } catch (const std::exception& e) {
-      logErr("Request failed: " + std::string(e.what()));
-      executing_ = false;
-    }
-  }
+  // --- 启动 binding / 处理打断白名单 ---
 
-  // --- 状态机操作 ---
-
-  void handleSMCommand(int k) {
-    if (k == 'e' || k == 'E')
-      executeCurrentState();
-    else if (k == 'x' || k == 'X')
-      resetToIdle();
-    else if (k == 'r' || k == 'R') {
-      loadMissionSequence();
-      logOk("Sequence reloaded from yaml.");
-    } else if (k == '0')
-      publishControlMode(ControlMode::RELAX);
-    else if (k == '1')
-      publishControlMode(ControlMode::FREEDRIVE);
-    else if (k == '2')
-      publishControlMode(ControlMode::ARMED);
-  }
-
-  void executeCurrentState() {
-    if (control_mode_ != ControlMode::ARMED) {
-      logWarn("须先切到 ARMED 模式 [2] 才能执行轨迹");
-      return;
-    }
-    if (current_idx_ >= states_.size()) {
-      log("All states finished.");
+  void handleStartBinding(const std::string& key, uint8_t cmd) {
+    auto it = bindings_.find(key);
+    if (it == bindings_.end()) {
+      RCLCPP_WARN(get_logger(), "[Binding] key '%s' not found", key.c_str());
       return;
     }
 
-    auto& st = states_[current_idx_];
-    if (st.trajectory.empty()) {
-      if (current_idx_ + 1 < states_.size()) {
-        current_idx_++;
-        log("[" + st.id + "] Skipped (no traj) -> " + states_[current_idx_].id);
+    // 检查是否在执行中
+    bool has_active;
+    {
+      std::lock_guard<std::mutex> lk(active_mu_);
+      has_active = active_task_.has_value();
+    }
+
+    if (has_active) {
+      // 查 current binding 的白名单看是否允许 cmd 打断
+      bool allowed;
+      {
+        std::lock_guard<std::mutex> lk(active_mu_);
+        auto cur_it = bindings_.find(active_task_->binding_key);
+        allowed = (cur_it != bindings_.end() && cur_it->second.interruptible_by.count(cmd) > 0);
       }
-      return;
+      if (!allowed) {
+        RCLCPP_WARN(get_logger(), "[Binding] '%s' rejected (current task not interruptible)",
+                    key.c_str());
+        return;
+      }
+      // 允许打断 → abort 当前 → 启动新
+      RCLCPP_INFO(get_logger(), "[Binding] interrupt current, switch to '%s'", key.c_str());
+      triggerTaskAbort();
+      // 等当前 detach 线程退出 (CV 醒 + load_trajectory cancel 返回)
+      // 简单做法: 自旋等 active_task_ 清空, 最多 5s
+      for (int i = 0; i < 100; ++i) {
+        std::this_thread::sleep_for(50ms);
+        std::lock_guard<std::mutex> lk(active_mu_);
+        if (!active_task_) break;
+      }
+      task_abort_requested_ = false;  // 复位让新任务能跑
     }
 
-    bool expected = false;
-    if (!executing_.compare_exchange_strong(expected, true)) {
-      logWarn("Busy executing...");
+    startBinding(key);
+  }
+
+  void startBinding(const std::string& key) {
+    if (control_mode_ != ControlMode::ARMED) {
+      RCLCPP_WARN(get_logger(), "[Binding] '%s' rejected: not ARMED", key.c_str());
       return;
     }
-    log("Exec [" + st.id + "] : " + st.trajectory + "...", COLOR_PAIR_HEADER);
+    {
+      std::lock_guard<std::mutex> lk(active_mu_);
+      active_task_ = ActiveTask{key, 0, false};
+    }
+    executing_ = true;
+    last_sequence_completed_ = false;  // 新序列启动, 清 HOLDING 标记
+    RCLCPP_INFO(get_logger(), "[Binding] start '%s'", key.c_str());
 
-    auto req = std::make_shared<LoadTrajectory::Request>();
-    req->name = st.trajectory;
-    req->execute = true;
-    try {
+    std::thread([this, key]() { executeBinding(key); }).detach();
+  }
+
+  void executeBinding(const std::string& key) {
+    auto it = bindings_.find(key);
+    if (it == bindings_.end()) {
+      RCLCPP_ERROR(get_logger(), "[Binding] executeBinding: '%s' missing", key.c_str());
+      finishBinding();
+      return;
+    }
+    const auto& binding = it->second;
+
+    for (size_t i = 0; i < binding.steps.size(); ++i) {
+      if (task_abort_requested_) break;
+      if (control_mode_ != ControlMode::ARMED) {
+        RCLCPP_WARN(get_logger(), "[Binding] mode not ARMED mid-sequence, aborting");
+        task_abort_requested_ = true;
+        break;
+      }
+      {
+        std::lock_guard<std::mutex> lk(active_mu_);
+        if (active_task_) active_task_->step_idx = i;
+      }
+
+      const auto& step = binding.steps[i];
+      RCLCPP_INFO(get_logger(), "[Binding] '%s' step %zu/%zu: %s", key.c_str(), i + 1,
+                  binding.steps.size(), step.trajectory.c_str());
+
+      // ---- 调 LoadTrajectory 同步等 action result ----
+      auto req = std::make_shared<LoadTrajectory::Request>();
+      req->name = step.trajectory;
+      req->execute = true;
       auto fut = load_client_->async_send_request(req);
-      async_.post([this, fut = std::move(fut), id = st.id]() mutable {
-        try {
-          if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
-            auto res = fut.get();
-            if (res->success) {
-              logOk("Success: " + id + " (" + std::to_string(res->duration) + "s)");
-              std::lock_guard<std::mutex> lk(status_mu_);
-              if (current_idx_ + 1 < states_.size()) current_idx_++;
-            } else {
-              logErr("Fail: " + id + " - " + res->message);
-            }
-          } else {
-            logErr("Timeout: " + id);
-          }
-        } catch (const std::exception& e) {
-          logErr("Error: " + std::string(e.what()));
-        }
-        executing_ = false;
-      });
-    } catch (const std::exception& e) {
-      logErr("Request failed: " + std::string(e.what()));
-      executing_ = false;
+      auto status = fut.wait_for(std::chrono::duration<double>(trajectory_timeout_s_));
+      bool was_skip = step_skip_requested_.exchange(false);
+
+      if (status != std::future_status::ready) {
+        RCLCPP_ERROR(get_logger(), "[Binding] step %zu LoadTrajectory timeout", i);
+        break;
+      }
+      auto res = fut.get();
+      if (!res->success) {
+        // 自然失败 → abort sequence
+        if (task_abort_requested_) break;
+        RCLCPP_ERROR(get_logger(), "[Binding] step %zu fail: %s", i, res->message.c_str());
+        break;
+      }
+
+      // B fast-forward 砍的轨迹返回 success+message="canceled", 直接进下一步.
+      // 注: gripper schedule 由 trajectory_manager 自己 fork side-thread 触发 (Commit 7),
+      // 这里不再 scheduleGripperActions, 避免重复 + 时序错位.
+      if (was_skip || res->message == "canceled") {
+        RCLCPP_INFO(get_logger(), "[Binding] step %zu canceled (fast-forward), next", i);
+        continue;
+      }
+
+      if (step.wait_for_next) {
+        std::unique_lock<std::mutex> lk(active_mu_);
+        if (active_task_) active_task_->awaiting_next = true;
+        RCLCPP_INFO(get_logger(), "[Binding] step %zu done, waiting for B", i);
+        task_cv_.wait(lk, [&] { return step_skip_requested_ || task_abort_requested_; });
+        if (active_task_) active_task_->awaiting_next = false;
+        if (task_abort_requested_) break;
+        step_skip_requested_ = false;
+      }
     }
+
+    finishBinding();
+  }
+
+  void finishBinding() {
+    bool aborted = task_abort_requested_.load();
+    {
+      std::lock_guard<std::mutex> lk(active_mu_);
+      if (active_task_) {
+        RCLCPP_INFO(get_logger(), "[Binding] '%s' %s", active_task_->binding_key.c_str(),
+                    aborted ? "aborted" : "finished");
+      }
+      active_task_.reset();
+    }
+    step_skip_requested_ = false;
+    task_abort_requested_ = false;
+    executing_ = false;
+    // 正常完成 → HOLDING; abort/X/ESTOP → 不 hold (resetToIdle 会清, ESTOP 切 RELAX)
+    last_sequence_completed_ = !aborted;
+  }
+
+  // --- B 推进 ---
+
+  void handleNextStep() {
+    bool has_active;
+    bool awaiting;
+    {
+      std::lock_guard<std::mutex> lk(active_mu_);
+      has_active = active_task_.has_value();
+      awaiting = has_active && active_task_->awaiting_next;
+    }
+    if (!has_active) {
+      RCLCPP_DEBUG(get_logger(), "[B] no active task, ignored");
+      return;
+    }
+    step_skip_requested_ = true;
+    if (awaiting) {
+      task_cv_.notify_all();
+    } else {
+      // 跑轨迹中 → 调 /cancel_current_trajectory 砍 FJT, LoadTrajectory 会返回 canceled
+      RCLCPP_INFO(get_logger(), "[B] fast-forward: canceling current trajectory");
+      auto req = std::make_shared<CancelCurrentTrajectory::Request>();
+      cancel_client_->async_send_request(req);
+    }
+  }
+
+  // --- abort 路径 ---
+
+  void triggerTaskAbort() {
+    task_abort_requested_ = true;
+    // 同时砍掉跑中轨迹
+    if (cancel_client_->service_is_ready()) {
+      auto req = std::make_shared<CancelCurrentTrajectory::Request>();
+      cancel_client_->async_send_request(req);
+    }
+    task_cv_.notify_all();
+  }
+
+  void emergencyStop() {
+    triggerTaskAbort();
+    executing_ = false;
+    last_sequence_completed_ = false;
+    publishControlMode(ControlMode::RELAX);
+    RCLCPP_WARN(get_logger(), "[ESTOP] Forced RELAX, abort signaled.");
   }
 
   void resetToIdle() {
-    if (!reset_trajectory_.empty()) {
-      bool expected = false;
-      if (!executing_.compare_exchange_strong(expected, true)) return;
-      log("Resetting via: " + reset_trajectory_ + "...");
-      auto req = std::make_shared<LoadTrajectory::Request>();
-      req->name = reset_trajectory_;
-      req->execute = true;
-      try {
-        auto fut = load_client_->async_send_request(req);
-        async_.post([this, fut = std::move(fut)]() mutable {
-          try {
-            if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
-              auto res = fut.get();
-              if (res->success) {
-                logOk("Reset OK.");
-                std::lock_guard<std::mutex> lk(status_mu_);
-                current_idx_ = 0;
-              } else {
-                logErr("Reset Fail: " + res->message);
-              }
-            } else {
-              logErr("Timeout: reset trajectory");
-            }
-          } catch (const std::exception& e) {
-            logErr(std::string("Exception: ") + e.what());
-          } catch (...) {
-            logErr("Unknown exception");
-          }
-          executing_ = false;
-        });
-      } catch (const std::exception& e) {
-        logErr("Request failed: " + std::string(e.what()));
-        executing_ = false;
-      }
-    } else {
-      current_idx_ = 0;
-      logOk("Reset to IDLE.");
+    if (control_mode_ != ControlMode::ARMED) {
+      RCLCPP_WARN(get_logger(), "[RESET_HOME] Not ARMED, ignoring.");
+      return;
     }
-  }
 
-  // --- 轨迹管理操作 ---
-
-  void handleTrajCommand(int k) {
-    if (k == 'r' || k == 'R') {
-      fetchTrajectories();
-      log("List refreshed.");
-    } else if (k == 's' || k == 'S') {
-      input_mode_ = InputMode::SAVE_NAME;
-      input_buffer_.clear();
-    } else if (k == 'n' || k == 'N') {
-      size_t pages = (trajectories_.size() + PER_PAGE - 1) / PER_PAGE;
-      if (pages > 1) traj_page_ = (traj_page_ + 1) % pages;
-    } else if (k == 'p' || k == 'P') {
-      size_t pages = (trajectories_.size() + PER_PAGE - 1) / PER_PAGE;
-      if (pages > 1) traj_page_ = (traj_page_ + pages - 1) % pages;
-    } else if (k == 'd' || k == 'D') {
-      if (trajectories_.empty()) return;
-      input_mode_ = InputMode::DELETE_CONFIRM;
-    } else if (k >= '1' && k <= '9') {
-      size_t idx = (k - '1') + traj_page_ * PER_PAGE;
-      if (idx < trajectories_.size()) executeTraj(trajectories_[idx].name);
+    // 让正在跑的 binding 退出 (triggerTaskAbort 已 set, 这里等线程出来)
+    for (int i = 0; i < 100; ++i) {
+      std::this_thread::sleep_for(50ms);
+      std::lock_guard<std::mutex> lk(active_mu_);
+      if (!active_task_) break;
     }
-  }
+    task_abort_requested_ = false;
 
-  void executeTraj(const std::string& name) {
     bool expected = false;
     if (!executing_.compare_exchange_strong(expected, true)) {
-      logWarn("Busy...");
-      return;
-    }
-    log("Executing: " + name + "...");
-    auto req = std::make_shared<LoadTrajectory::Request>();
-    req->name = name;
-    req->execute = true;
-    try {
-      auto fut = load_client_->async_send_request(req);
-      async_.post([this, fut = std::move(fut), name]() mutable {
-        try {
-          if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
-            auto res = fut.get();
-            if (res->success)
-              logOk("Done: " + name);
-            else
-              logErr("Fail: " + res->message);
-          } else {
-            logErr("Timeout: " + name);
-          }
-        } catch (const std::exception& e) {
-          logErr(std::string("Exception: ") + e.what());
-        } catch (...) {
-          logErr("Unknown exception");
-        }
-        executing_ = false;
-      });
-    } catch (const std::exception& e) {
-      logErr("Request failed: " + std::string(e.what()));
-      executing_ = false;
-    }
-  }
-
-  void handleSaveName(const std::string& name) {
-    if (name.empty()) {
-      input_mode_ = InputMode::NONE;
-      logWarn("Save canceled.");
-      return;
-    }
-    bool exists = false;
-    for (const auto& t : trajectories_) {
-      if (t.name == name) {
-        exists = true;
-        break;
-      }
-    }
-    pending_name_ = name;
-    input_mode_ = exists ? InputMode::OVERWRITE_CONFIRM : InputMode::SAVE_DESC;
-  }
-
-  void handleSaveDesc(const std::string& desc) {
-    doSave(pending_name_, desc);
-    input_mode_ = InputMode::NONE;
-  }
-
-  void handleOverwrite(int k) {
-    if (k == 'y' || k == 'Y') {
-      input_mode_ = InputMode::SAVE_DESC;
-    } else {
-      input_mode_ = InputMode::NONE;
-      logWarn("Overwrite canceled.");
-    }
-  }
-
-  void doSave(const std::string& name, const std::string& desc) {
-    log("Saving " + name + "...");
-    auto req = std::make_shared<SaveLastTrajectory::Request>();
-    req->name = name;
-    req->description = desc;
-    try {
-      auto fut = save_client_->async_send_request(req);
-      async_.post([this, fut = std::move(fut), name]() mutable {
-        try {
-          if (fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
-            auto res = fut.get();
-            if (res->success)
-              logOk("Saved: " + name);
-            else
-              logErr("Save Fail: " + res->message);
-          } else {
-            logErr("Save timeout: " + name);
-          }
-        } catch (const std::exception& e) {
-          logErr(std::string("Exception: ") + e.what());
-        } catch (...) {
-          logErr("Unknown exception");
-        }
-        fetchTrajectories();
-      });
-    } catch (const std::exception& e) {
-      logErr("Save request failed: " + std::string(e.what()));
-    }
-  }
-
-  void handleDeleteConfirm(int k) {
-    if (k >= '1' && k <= '9') {
-      size_t idx = (k - '1') + traj_page_ * PER_PAGE;
-      if (idx < trajectories_.size()) {
-        std::string path = trajectory_dir_ + "/" + trajectories_[idx].name + ".yaml";
-        try {
-          if (std::filesystem::exists(path)) {
-            std::filesystem::remove(path);
-            logOk("Deleted: " + trajectories_[idx].name);
-            fetchTrajectories();
-          }
-        } catch (const std::exception& e) {
-          logErr(std::string("Exception: ") + e.what());
-        } catch (...) {
-          logErr("Unknown exception");
-        }
-      }
-    }
-    input_mode_ = InputMode::NONE;
-  }
-
-  // --- 夹爪全局切换 ---
-
-  void toggleGripper() {
-    gripper_torque_cmd_ = (gripper_torque_cmd_ > 0.0) ? -70.0 : 70.0;
-    sendGripper(gripper_torque_cmd_);
-  }
-
-  // --- 夹爪视图操作 ---
-
-  void handleGripperInput(int ch) {
-    if (ch == ' ') {
-      gripper_torque_cmd_ = 0.0;
-      sendGripper(0.0);
-    }
-  }
-
-  void sendGripper(double torque) {
-    gripper_last_sent_ = torque;
-    auto req = std::make_shared<GripperControl::Request>();
-    req->torque = torque;
-    try {
-      auto fut = gripper_client_->async_send_request(req);
-      async_.post([this, fut = std::move(fut), torque]() mutable {
-        try {
-          if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
-            auto res = fut.get();
-            if (res->success) {
-              logOk("Gripper cmd sent: " + std::to_string(torque));
-            } else {
-              logErr("Gripper fail: " + res->message);
-            }
-          } else {
-            logErr("Gripper timeout");
-          }
-        } catch (const std::exception& e) {
-          logErr("Gripper exception: " + std::string(e.what()));
-        }
-      });
-    } catch (const std::exception& e) {
-      logErr("Gripper request failed: " + std::string(e.what()));
-    }
-  }
-
-  // --- 接管操作：笛卡尔 (Jogging) ---
-
-  void handleCartesianTakeover(int ch) {
-    if (ch == '+' || ch == '=') {
-      cartesian_step_ = std::min(0.1, cartesian_step_ + 0.001);
-      return;
-    }
-    if (ch == '-') {
-      cartesian_step_ = std::max(0.001, cartesian_step_ - 0.001);
+      RCLCPP_WARN(get_logger(), "[RESET_HOME] Busy, ignoring.");
       return;
     }
 
-    double dx = 0, dy = 0, dz = 0, droll = 0, dpitch = 0, dyaw = 0;
-
-    // 平移 W/S=X, A/D=Y, R/F=Z
-    if (ch == 'w' || ch == 'W')
-      dx = cartesian_step_;
-    else if (ch == 's' || ch == 'S')
-      dx = -cartesian_step_;
-    else if (ch == 'a' || ch == 'A')
-      dy = cartesian_step_;
-    else if (ch == 'd' || ch == 'D')
-      dy = -cartesian_step_;
-    else if (ch == 'r' || ch == 'R')
-      dz = cartesian_step_;
-    else if (ch == 'f' || ch == 'F')
-      dz = -cartesian_step_;
-
-    // 姿态 方向键=Pitch/Yaw  Q/E=Roll
-    else if (ch == KEY_UP)
-      dpitch = cartesian_step_;
-    else if (ch == KEY_DOWN)
-      dpitch = -cartesian_step_;
-    else if (ch == KEY_LEFT)
-      dyaw = cartesian_step_;
-    else if (ch == KEY_RIGHT)
-      dyaw = -cartesian_step_;
-    else if (ch == 'q')
-      droll = -cartesian_step_;
-    else if (ch == 'e')
-      droll = cartesian_step_;
-    else
-      return;
-
-    sendCartesianRelative(dx, dy, dz, droll, dpitch, dyaw);
-  }
-
-  // Quaternion → RPY (ZYX convention)
-  static void quaternionToRPY(const geometry_msgs::msg::Quaternion& q, double& roll, double& pitch,
-                              double& yaw) {
-    double sinr_cosp = 2.0 * (q.w * q.x + q.y * q.z);
-    double cosr_cosp = 1.0 - 2.0 * (q.x * q.x + q.y * q.y);
-    roll = std::atan2(sinr_cosp, cosr_cosp);
-    double sinp = 2.0 * (q.w * q.y - q.z * q.x);
-    pitch = (std::abs(sinp) >= 1.0) ? std::copysign(M_PI / 2.0, sinp) : std::asin(sinp);
-    double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
-    double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
-    yaw = std::atan2(siny_cosp, cosy_cosp);
-  }
-
-  void sendCartesianRelative(double dx, double dy, double dz, double droll, double dpitch,
-                             double dyaw) {
-    if (!jog_target_initialized_) {
-      logErr("No EE pose yet. Is cartesian_controller running?");
-      return;
-    }
-
-    jog_target_pose_.position.x += dx;
-    jog_target_pose_.position.y += dy;
-    jog_target_pose_.position.z += dz;
-    jog_target_roll_ += droll;
-    jog_target_pitch_ += dpitch;
-    jog_target_yaw_ += dyaw;
-
-    // wrap to [-π, π]
-    jog_target_roll_ = std::remainder(jog_target_roll_, 2.0 * M_PI);
-    jog_target_pitch_ = std::remainder(jog_target_pitch_, 2.0 * M_PI);
-    jog_target_yaw_ = std::remainder(jog_target_yaw_, 2.0 * M_PI);
-
-    tf2::Quaternion q;
-    q.setRPY(jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
-    q.normalize();
-
-    geometry_msgs::msg::PoseStamped target;
-    target.header.stamp = this->now();
-    target.header.frame_id = "base_link";
-    target.pose.position = jog_target_pose_.position;
-    target.pose.orientation.x = q.x();
-    target.pose.orientation.y = q.y();
-    target.pose.orientation.z = q.z();
-    target.pose.orientation.w = q.w();
-
-    cartesian_target_pub_->publish(target);
-
-    char buf[128];
-    snprintf(buf, sizeof(buf), "Jog -> (%.3f, %.3f, %.3f) RPY(%.2f, %.2f, %.2f)",
-             target.pose.position.x, target.pose.position.y, target.pose.position.z,
-             jog_target_roll_, jog_target_pitch_, jog_target_yaw_);
-    log(buf, COLOR_PAIR_DEFAULT);
-  }
-
-  // --- UTF-8 工具 ---
-
-  // UTF-8 截断至 field_cols 列宽并补齐空格 (CJK=2列)
-  static std::string utf8Pad(const std::string& s, int field_cols) {
-    int cols = 0;
-    size_t pos = 0;
-    while (pos < s.size()) {
-      unsigned char c = s[pos];
-      int char_bytes, char_cols;
-      if (c < 0x80) {
-        char_bytes = 1;
-        char_cols = 1;
-      } else if (c < 0xE0) {
-        char_bytes = 2;
-        char_cols = 1;
-      } else if (c < 0xF0) {
-        char_bytes = 3;
-        char_cols = 2;  // CJK 全角
-      } else {
-        char_bytes = 4;
-        char_cols = 2;
-      }
-      if (cols + char_cols > field_cols) break;
-      cols += char_cols;
-      pos += char_bytes;
-    }
-    std::string result = s.substr(0, pos);
-    result.append(field_cols - cols, ' ');
-    return result;
-  }
-
-  // --- NCURSES UI 重绘 (全屏 10Hz) ---
-
-  void drawUI() {
-    erase();
-    int max_y, max_x;
-    getmaxyx(stdscr, max_y, max_x);
-
-    attron(COLOR_PAIR(COLOR_PAIR_HEADER));
-    mvprintw(0, 0, "===================== ARV_V1 Mission Executor v4.0 =====================");
-    mvprintw(1, 0, "|");
-    attroff(COLOR_PAIR(COLOR_PAIR_HEADER));
-
-    auto drawTab = [&](const std::string& name, View v) {
-      if (view_ == v) attron(A_BOLD | COLOR_PAIR(COLOR_PAIR_HIGHLIGHT));
-      printw(" %s ", name.c_str());
-      if (view_ == v) attroff(A_BOLD | COLOR_PAIR(COLOR_PAIR_HIGHLIGHT));
-      printw("  ");
-    };
-    mvprintw(1, 2, " ");
-    drawTab("[M] StateMachine", View::STATE_MACHINE);
-    drawTab("[T] Trajectory", View::TRAJECTORY);
-    drawTab("[C] Cartesian", View::CARTESIAN);
-    drawTab("[G] Gripper", View::GRIPPER);
-
-    {
-      static const char* mode_labels[] = {"RELAX", "FREEDRIVE", "ARMED"};
-      int mode_color = (control_mode_ == ControlMode::RELAX)     ? COLOR_PAIR_ERROR
-                     : (control_mode_ == ControlMode::FREEDRIVE) ? COLOR_PAIR_WARNING
-                                                                 : COLOR_PAIR_SUCCESS;
-      attron(A_BOLD | COLOR_PAIR(mode_color));
-      printw(" [%s] ", control_mode_ <= ControlMode::ARMED ? mode_labels[control_mode_] : "?");
-      attroff(A_BOLD | COLOR_PAIR(mode_color));
-    }
-
-    attron(COLOR_PAIR(COLOR_PAIR_HEADER));
-    mvprintw(1, 71, "|");
-    mvprintw(2, 0, "------------------------------------------------------------------------");
-    attroff(COLOR_PAIR(COLOR_PAIR_HEADER));
-
-    if (takeover_mode_) {
-      attron(COLOR_PAIR(COLOR_PAIR_ERROR) | A_BOLD);
-      mvprintw(3, 2, ">>> TAKEOVER MODE ACTIVE <<< [Esc] to exit. Global hotkeys M/T/C/G blocked.");
-      attroff(COLOR_PAIR(COLOR_PAIR_ERROR) | A_BOLD);
-    } else {
-      if (view_ == View::CARTESIAN) {
-        attron(COLOR_PAIR(COLOR_PAIR_WARNING));
-        mvprintw(3, 2, "Press [Enter] to takeover and control.");
-        attroff(COLOR_PAIR(COLOR_PAIR_WARNING));
-      } else {
-        mvprintw(3, 2, "Global hotkeys active.");
-      }
-    }
-
-    int cur_line = 5;
-    std::lock_guard<std::mutex> lk(status_mu_);
-
-    if (view_ == View::STATE_MACHINE) {
-      mvprintw(cur_line++, 2, "Mission: %s - %s", mission_name_.c_str(),
-               utf8Pad(mission_desc_, max_x - 12 - (int)mission_name_.size()).c_str());
-      cur_line++;
-      for (size_t i = 0; i < states_.size(); i++) {
-        if (i == current_idx_)
-          attron(A_BOLD | COLOR_PAIR(COLOR_PAIR_WARNING));
-        else if (i < current_idx_)
-          attron(COLOR_PAIR(COLOR_PAIR_SUCCESS));
-        else
-          attron(A_DIM);
-
-        const char* marker = (i < current_idx_ ? "*" : (i == current_idx_ ? ">" : " "));
-        const std::string& traj_str =
-            states_[i].trajectory.empty() ? "(No Traj)" : states_[i].trajectory;
-        int desc_cols = std::max(1, max_x - 42 - 8);  // 留 8 列给 "<- NOW"
-        std::string desc_field = utf8Pad(states_[i].description, desc_cols);
-
-        mvprintw(cur_line, 4, "[%s] ", marker);
-        mvprintw(cur_line, 8, "%s", utf8Pad(states_[i].id, 16).c_str());
-        mvprintw(cur_line, 25, "%s", utf8Pad(traj_str, 16).c_str());
-        mvprintw(cur_line, 42, "%s", desc_field.c_str());
-        if (i == current_idx_) mvprintw(cur_line, max_x - 8, "<- NOW");
-        cur_line++;
-
-        attroff(A_BOLD | COLOR_PAIR(COLOR_PAIR_WARNING));
-        attroff(COLOR_PAIR(COLOR_PAIR_SUCCESS));
-        attroff(A_DIM);
-      }
-      cur_line++;
-      mvprintw(cur_line++, 2,
-               "Hotkeys: [E] Execute   [X] Reset   [R] Reload   [0]Relax [1]Free [2]Hold");
-    } else if (view_ == View::TRAJECTORY) {
-      size_t pages = (trajectories_.size() + PER_PAGE - 1) / PER_PAGE;
-      mvprintw(cur_line++, 2, "Database: %zu found (Page %zu/%zu)", trajectories_.size(),
-               traj_page_ + 1, std::max((size_t)1, pages));
-      cur_line++;
-      size_t s = traj_page_ * PER_PAGE;
-      size_t e = std::min(s + PER_PAGE, trajectories_.size());
-      for (size_t i = s; i < e; i++) {
-        mvprintw(cur_line++, 4, "[%zu] %-20s %s", (i - s + 1), trajectories_[i].name.c_str(),
-                 trajectories_[i].description.c_str());
-      }
-      cur_line = 14;
-      mvprintw(cur_line++, 2,
-               "Hotkeys: [1-9] Execute   [S] Save Last   [D] Delete   [N/P] Next/Prev Page");
-    } else if (view_ == View::CARTESIAN) {
-      mvprintw(cur_line++, 2, "Cartesian Jogging Panel");
-      cur_line++;
-      {
-        std::lock_guard<std::mutex> plk(pose_mu_);
-        if (has_ee_pose_) {
-          auto& p = current_ee_pose_.pose;
-          double r, pi, y;
-          quaternionToRPY(p.orientation, r, pi, y);
-          attron(COLOR_PAIR(COLOR_PAIR_SUCCESS));
-          mvprintw(cur_line++, 4, "EE Pos : X=%.3f  Y=%.3f  Z=%.3f", p.position.x, p.position.y,
-                   p.position.z);
-          mvprintw(cur_line++, 4, "EE RPY : R=%.2f  P=%.2f  Y=%.2f", r, pi, y);
-          attroff(COLOR_PAIR(COLOR_PAIR_SUCCESS));
+    std::thread([this]() {
+      auto req = std::make_shared<PlanToPreset::Request>();
+      req->preset_name = "Escape";
+      req->planning_timeout = 5.0;
+      req->speed_factor = 1.0;
+      auto fut = plan_preset_client_->async_send_request(req);
+      if (fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+        auto res = fut.get();
+        if (res->success) {
+          RCLCPP_INFO(get_logger(), "[RESET_HOME] Escaped (%.1fs)", res->duration);
         } else {
-          attron(COLOR_PAIR(COLOR_PAIR_ERROR));
-          mvprintw(cur_line++, 4, "EE Pose: waiting for /cartesian_controller/current_pose ...");
-          attroff(COLOR_PAIR(COLOR_PAIR_ERROR));
+          RCLCPP_ERROR(get_logger(), "[RESET_HOME] Failed: %s", res->message.c_str());
         }
+      } else {
+        RCLCPP_ERROR(get_logger(), "[RESET_HOME] Service timeout");
       }
-      cur_line++;
-      attron(A_BOLD);
-      mvprintw(cur_line++, 4, "Step Size: %.3f m / rad", cartesian_step_);
-      attroff(A_BOLD);
-      cur_line++;
-      mvprintw(cur_line++, 4, "Translation: [W/S] X axis  [A/D] Y axis  [R/F] Z axis");
-      mvprintw(cur_line++, 4, "Orientation: [Up/Down] Pitch  [Left/Right] Yaw  [Q/E] Roll");
-      mvprintw(cur_line++, 4, "Config     : [+/-] Change Step Size");
-    } else if (view_ == View::GRIPPER) {
-      mvprintw(cur_line++, 2, "Gripper Status");
-      cur_line++;
+      executing_ = false;
+      last_sequence_completed_ = false;  // 回零后是 READY, 不是 HOLDING
+    }).detach();
+  }
 
-      const char* state_str = (gripper_last_sent_ > 0.0) ? "GRIP"
-                            : (gripper_last_sent_ < 0.0) ? "RELEASE"
-                                                         : "STOP";
-      int state_color = (gripper_last_sent_ > 0.0) ? COLOR_PAIR_SUCCESS
-                      : (gripper_last_sent_ < 0.0) ? COLOR_PAIR_WARNING
-                                                   : COLOR_PAIR_DEFAULT;
-      mvprintw(cur_line++, 4, "State : ");
-      attron(COLOR_PAIR(state_color) | A_BOLD);
-      printw("%s  (%.0f N)", state_str, gripper_last_sent_);
-      attroff(COLOR_PAIR(state_color) | A_BOLD);
+  // --- Gripper ---
 
-      cur_line++;
-      mvprintw(cur_line++, 4, "Global hotkey (works everywhere):");
-      mvprintw(cur_line++, 6, "[ Z ]     Toggle grip/release  (+70 N / -70 N)");
-      mvprintw(cur_line++, 6, "[ SPACE ] Stop (0 N)  -- only in this view");
-    }
+  void sendGripperAsync(double force) {
+    auto req = std::make_shared<GripperControl::Request>();
+    req->force = force;
+    gripper_client_->async_send_request(
+        req, [this, force](rclcpp::Client<GripperControl>::SharedFuture fut) {
+          try {
+            auto res = fut.get();
+            if (res->success)
+              RCLCPP_INFO(get_logger(), "Gripper: %.0f N", force);
+            else
+              RCLCPP_ERROR(get_logger(), "Gripper fail: %s", res->message.c_str());
+          } catch (const std::exception& e) {
+            RCLCPP_ERROR(get_logger(), "Gripper error: %s", e.what());
+          }
+        });
+  }
 
-    cur_line = max_y - 7;
-    attron(COLOR_PAIR(COLOR_PAIR_HEADER));
-    mvprintw(cur_line++, 0,
-             "------------------------------------------------------------------------");
-    attroff(COLOR_PAIR(COLOR_PAIR_HEADER));
-
-    if (input_mode_ == InputMode::SAVE_NAME) {
-      mvprintw(cur_line, 2, "Enter Trajectory Name (no spaces): %s", input_buffer_.c_str());
-    } else if (input_mode_ == InputMode::SAVE_DESC) {
-      mvprintw(cur_line, 2, "Enter Description: %s", input_buffer_.c_str());
-    } else if (input_mode_ == InputMode::DELETE_CONFIRM) {
-      attron(COLOR_PAIR(COLOR_PAIR_ERROR));
-      mvprintw(cur_line, 2, "Delete? Press [1-9] matching index, or [Esc] to cancel.");
-      attroff(COLOR_PAIR(COLOR_PAIR_ERROR));
-    } else if (input_mode_ == InputMode::OVERWRITE_CONFIRM) {
-      attron(COLOR_PAIR(COLOR_PAIR_ERROR));
-      mvprintw(cur_line, 2, "Name '%s' exists! Overwrite? [Y/N]", pending_name_.c_str());
-      attroff(COLOR_PAIR(COLOR_PAIR_ERROR));
+  bool sendGripperSync(double force) {
+    auto req = std::make_shared<GripperControl::Request>();
+    req->force = force;
+    auto fut = gripper_client_->async_send_request(req);
+    if (fut.wait_for(5s) == std::future_status::ready) {
+      auto res = fut.get();
+      if (res->success) {
+        RCLCPP_INFO(get_logger(), "Gripper: %.0f N", force);
+        return true;
+      }
+      RCLCPP_ERROR(get_logger(), "Gripper fail: %s", res->message.c_str());
     } else {
-      if (!takeover_mode_) mvprintw(cur_line, 2, "Press [H] for Help | [Q] to Quit");
+      RCLCPP_ERROR(get_logger(), "Gripper sync timeout");
     }
+    return false;
+  }
 
-    cur_line++;
-    auto logs = log_buffer_.get();
-    for (const auto& l : logs) {
-      attron(COLOR_PAIR(l.second));
-      mvprintw(cur_line++, 0, "  %s", l.first.c_str());
-      attroff(COLOR_PAIR(l.second));
+  static std::optional<double> parseGripperAction(const std::string& action) {
+    if (action == "open") return -70.0;
+    if (action == "close") return 70.0;
+    if (action == "stop") return 0.0;
+    return std::nullopt;
+  }
+
+  // 注: wall-clock 调度. 当前轨迹末点 v=0 稳定段触发, 误差不致命.
+  // 联机如观察到 gripper 触发时 actual q 与目标差大, 改用 action feedback 触发.
+  void scheduleGripperActions(const std::vector<double>& times,
+                              const std::vector<std::string>& commands) {
+    if (times.empty()) return;
+    if (times.size() != commands.size()) {
+      RCLCPP_ERROR(get_logger(), "gripper_action arrays size mismatch");
+      return;
     }
-
-    refresh();
+    auto start = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < times.size(); i++) {
+      auto target = start + std::chrono::duration<double>(times[i]);
+      std::this_thread::sleep_until(target);
+      auto force = parseGripperAction(commands[i]);
+      if (force) sendGripperSync(*force);
+    }
   }
 };
 
 int main(int argc, char** argv) {
-  setlocale(LC_ALL, "");  // ncurses UTF-8 支持
   rclcpp::init(argc, argv);
-  try {
-    auto node = std::make_shared<MissionExecutorNode>();
-    node->run();
-  } catch (const std::exception& e) {
-    std::cerr << "Fatal: " << e.what() << std::endl;
-    return 1;
-  }
+  auto node = std::make_shared<MissionExecutorNode>();
+  // MultiThreadedExecutor + Reentrant client_cb_group_ 让 service 客户端 wait_for
+  // 在 detach 线程里阻塞时, action 响应能在另一线程跑, 不死锁.
+  rclcpp::executors::MultiThreadedExecutor exec;
+  exec.add_node(node);
+  exec.spin();
   rclcpp::shutdown();
   return 0;
 }

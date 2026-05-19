@@ -308,6 +308,35 @@ detect_mujoco_path() {
     return 1
 }
 
+# ========== 清理残留 DDS 共享内存 + daemon discovery 缓存 ==========
+# 必须 stop daemon 再清 shm 再启 daemon, 否则 daemon 内存里还持有 ghost endpoint,
+# 导致 ros2 node list 出现重名 publisher / subscriber, MCU 收到双发力矩 → 关节抽搐
+cleanup_dds() {
+    # 关键: 在 daemon 启动前 export LOCALHOST, 让 daemon 自己也限定本机 discovery
+    # 否则 daemon 用 SUBNET 启动后 cache 远程 endpoint, 后面再 export 已无效
+    export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+
+    # 1. 先停 ros2 daemon, 它持有 discovery 缓存, 不停会复活已删的 shm endpoint
+    ros2 daemon stop >/dev/null 2>&1 || true
+
+    # 2. 杀同名僵尸进程, 释放它们占用的 shm
+    pkill -f "ros2 run arv_v1_moveit" 2>/dev/null || true
+    sleep 0.5
+
+    # 3. 强制清 shm (无条件, 即使 grep 看不到也清, 防止 grep 漏)
+    local before
+    before=$(ls /dev/shm/ 2>/dev/null | grep -cE "fast|rtps|ros2" || true)
+    rm -f /dev/shm/fastrtps_* /dev/shm/*rtps* /dev/shm/sem.fastrtps_* \
+          /tmp/fastrtps_* 2>/dev/null || true
+    if [ "$before" -gt 0 ]; then
+        log_success "已清理 $before 个 DDS shm 残留 + daemon 缓存"
+    fi
+
+    # 4. 重启 daemon 让它从干净状态开始 discovery
+    ros2 daemon start >/dev/null 2>&1 || true
+    sleep 0.3
+}
+
 # ========== 设置环境 ==========
 setup_environment() {
     log_info "设置环境变量..."
@@ -320,8 +349,12 @@ setup_environment() {
     source /opt/ros/jazzy/setup.bash
     [ -f "install/setup.bash" ] && source install/setup.bash
 
+    # 限定 ROS 2 discovery 到本机, 避免子网内其他主机（如 NUC）的 ARV 节点被
+    # 自动 discover 后污染 graph（双 publisher 引起 J4/J5 抽搐, 2026-05-11 实地定位）
+    export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+
     detect_mujoco_path || exit 1
-    log_success "环境设置完成"
+    log_success "环境设置完成 (ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST)"
 }
 
 # ========== 编译项目 ==========
@@ -329,8 +362,9 @@ build_workspace() {
     log_info "编译项目..."
     cd "$WORKSPACE_DIR"
 
-    colcon build --packages-select arv_v1_interfaces arv_v1_model arv_v1_moveit --cmake-args -DCMAKE_BUILD_TYPE=Release
-    
+    # 注意: 不传 --cmake-args，复用已有 cmake 缓存，避免触发全量重编
+    colcon build --packages-select arv_v1_interfaces arv_v1_model arv_v1_moveit
+
     if [ $? -eq 0 ]; then
         log_success "编译成功！"
         source install/setup.bash
@@ -365,7 +399,7 @@ start_node() {
 
 # ========== 模式1: 纯仿真 ==========
 start_sim_mode() {
-    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
+    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params_sim.yaml"
     local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
     STEP_CURRENT=0; STEP_TOTAL=6
 
@@ -376,23 +410,28 @@ start_sim_mode() {
     start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
 
-    update_status "MissionExecutor"
-    # [FIX] MissionExecutor 必须先于 MuJoCo 启动，以便在物理仿真开始前发布 HOLD 模式。
+    update_status "MissionExecutor (headless)"
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
 
     update_status "MuJoCo (仿真)"
-    start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node" 2
+    start_node "MuJoCo(仿真)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p sim_mode:=true" 2
 
     update_status "TrajectoryManager"
-    start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
+    start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node --ros-args -p trajectory_dir:=$WORKSPACE_DIR/src/arv_v1_moveit/config/trajectories" 1
 
     update_status "CartesianController (IK)"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
+
+    # Python GUI 工具 (独立窗口)
+    log_info "启动 Mission Panel GUI..."
+    ros2 run arv_v1_moveit mission_panel.py &
+    log_info "启动 Motion Planning Tool..."
+    ros2 run arv_v1_moveit move_to_pose.py &
 }
 
 # ========== 模式2: 串口 + 数字孪生 ==========
 start_serial_mode() {
-    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params.yaml"
+    local config_path="$WORKSPACE_DIR/src/arv_v1_moveit/config/controller_params_hw.yaml"
     local cartesian_config="$WORKSPACE_DIR/src/arv_v1_moveit/config/cartesian_controller_param.yaml"
     STEP_CURRENT=0; STEP_TOTAL=7
 
@@ -408,21 +447,26 @@ start_serial_mode() {
     start_node "TorqueController" "ros2 run arv_v1_moveit torque_controller_node --ros-args --params-file $config_path" 0
     sleep 3
 
-    update_status "MissionExecutor"
-    # [FIX] MissionExecutor 先启动，确保 HOLD 模式在物理接口启动前到达 torque_controller。
+    update_status "MissionExecutor (headless)"
     start_node "MissionExecutor" "ros2 run arv_v1_moveit mission_executor_node" 0
 
     update_status "SerialInterface ($DETECTED_SERIAL_DEVICE)"
     start_node "SerialInterface" "ros2 run arv_v1_moveit hardware_interface_node --ros-args -p serial_port:=$DETECTED_SERIAL_DEVICE" 2
 
     update_status "MuJoCo (数字孪生)"
-    start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p visualization_only:=true" 2
+    start_node "MuJoCo(孪生)" "ros2 run arv_v1_moveit mujoco_interface_node --ros-args -p sim_mode:=false" 2
 
     update_status "TrajectoryManager"
-    start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node" 1
+    start_node "TrajectoryManager" "ros2 run arv_v1_moveit trajectory_manager_node --ros-args -p trajectory_dir:=$WORKSPACE_DIR/src/arv_v1_moveit/config/trajectories" 1
 
     update_status "CartesianController (IK)"
     start_node "CartesianController" "ros2 run arv_v1_moveit cartesian_controller_node --ros-args --params-file $cartesian_config" 0
+
+    # Python GUI 工具 (独立窗口)
+    log_info "启动 Mission Panel GUI..."
+    ros2 run arv_v1_moveit mission_panel.py &
+    log_info "启动 Motion Planning Tool..."
+    ros2 run arv_v1_moveit move_to_pose.py &
 }
 
 
@@ -430,6 +474,7 @@ start_serial_mode() {
 # ========== 主函数 ==========
 main() {
     # 阶段1: 环境设置（猫猫出现前完成，避免输出打乱画面）
+    cleanup_dds
     setup_environment
     build_workspace
 

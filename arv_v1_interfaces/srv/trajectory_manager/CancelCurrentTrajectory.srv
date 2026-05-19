@@ -1,0 +1,6 @@
+# CancelCurrentTrajectory.srv - 取消正在执行的 FollowJointTrajectory action goal
+# 幂等: 无 active goal 时也返回 success=true
+# 请求: 无
+---
+bool success
+string message

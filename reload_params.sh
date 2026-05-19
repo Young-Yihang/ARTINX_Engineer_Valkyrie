@@ -3,9 +3,16 @@
 # 使用方法: ./reload_params.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/arv_v1_moveit/config/controller_params.yaml"
+
+SIM_MODE=$(ros2 param get /mujoco_interface sim_mode 2>/dev/null | grep -oP '(?<=value: ).*' || echo "true")
+if [ "$SIM_MODE" = "True" ] || [ "$SIM_MODE" = "true" ]; then
+    CONFIG_FILE="$SCRIPT_DIR/arv_v1_moveit/config/controller_params_sim.yaml"
+else
+    CONFIG_FILE="$SCRIPT_DIR/arv_v1_moveit/config/controller_params_hw.yaml"
+fi
 
 echo "=== 热重载控制器参数 ==="
+echo "模式: $([ "$SIM_MODE" = "true" ] || [ "$SIM_MODE" = "True" ] && echo '仿真' || echo '真机')"
 echo "配置文件: $CONFIG_FILE"
 
 if [ ! -f "$CONFIG_FILE" ]; then

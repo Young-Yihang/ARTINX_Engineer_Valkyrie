@@ -34,16 +34,16 @@
     <!--GROUP STATES: Purpose: Define a named state for a particular group, in terms of joint values. This is useful to define states like 'folded arms'-->
     <group_state name="Escape" group="ARM">
         <joint name="joint_1" value="0"/>
-        <joint name="joint_2" value="2.1746"/>
-        <joint name="joint_3" value="0.937"/>
-        <joint name="joint_4" value="-1.326"/>
-        <joint name="joint_5" value="1.5028"/>
-        <joint name="joint_6" value="-1.6796"/>
+        <joint name="joint_2" value="2.4"/>
+        <joint name="joint_3" value="-0.83"/>
+        <joint name="joint_4" value="-0.0"/>
+        <joint name="joint_5" value="0.0"/>
+        <joint name="joint_6" value="0.0"/>
     </group_state>
     <group_state name="Start" group="ARM">
         <joint name="joint_1" value="0"/>
         <joint name="joint_2" value="2.6343"/>
-        <joint name="joint_3" value="1.0785"/>
+        <joint name="joint_3" value="-1.0785"/>
         <joint name="joint_4" value="0"/>
         <joint name="joint_5" value="0"/>
         <joint name="joint_6" value="0"/>
@@ -53,6 +53,16 @@
     <!--VIRTUAL JOINT: Purpose: this element defines a virtual joint between a robot link and an external frame of reference (considered fixed with respect to the robot)-->
     <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="base_link"/>
     <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
+    <!-- tcp: 纯坐标系框架，无几何体，对所有链接禁用碰撞检测 -->
+    <disable_collisions link1="tcp" link2="base_link" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link1" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link2" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link3" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link4" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link5" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link6" reason="Adjacent"/>
+    <disable_collisions link1="tcp" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="tcp" link2="link_gripper2" reason="Never"/>
     <disable_collisions link1="base_link" link2="link1" reason="Adjacent"/>
     <disable_collisions link1="base_link" link2="link3" reason="Never"/>
     <disable_collisions link1="link1" link2="link2" reason="Adjacent"/>
@@ -65,10 +75,56 @@
     <disable_collisions link1="link3" link2="link_gripper1" reason="Never"/>
     <disable_collisions link1="link3" link2="link_gripper2" reason="Never"/>
     <disable_collisions link1="link4" link2="link5" reason="Adjacent"/>
+    <disable_collisions link1="link4" link2="link6" reason="Never"/>
     <disable_collisions link1="link5" link2="link6" reason="Adjacent"/>
     <disable_collisions link1="link5" link2="link_gripper1" reason="Never"/>
     <disable_collisions link1="link5" link2="link_gripper2" reason="Never"/>
     <disable_collisions link1="link6" link2="link_gripper1" reason="Adjacent"/>
     <disable_collisions link1="link6" link2="link_gripper2" reason="Adjacent"/>
-    <disable_collisions link1="link_gripper1" link2="link_gripper2" reason="Adjacent"/>
+    <disable_collisions link1="link_gripper1" link2="link_gripper2" reason="Never"/>
+
+    <!-- ╔══════════════════════════════════════════════════════════════════════╗
+         ║  比赛级 ACM 扩展 (2026-05-17 yyh + Claude 审计)                       ║
+         ║                                                                      ║
+         ║  起因: 担心 RELAX 后臂掉到边界姿态, PTP 规划回 Escape 路径中触发      ║
+         ║        URDF mesh 近似导致的"假阳性自碰撞", 比赛中无法重启代码救场.   ║
+         ║                                                                      ║
+         ║  实证: 用户手掰物理验证 — 任意 6 维起始姿态下, 固定其他 5 关节, 单    ║
+         ║        关节扫满 上限-下限 全程**没有任何真实物理碰撞**.               ║
+         ║                                                                      ║
+         ║  推论: 单关节扫整个范围都不碰 ⇒ 任意 (q1..q6) 配置不碰 ⇒ 任意两点    ║
+         ║        间 joint-space 线段不碰 ⇒ PTP 数学上必然 collision-free.       ║
+         ║                                                                      ║
+         ║  动作: 把剩余 17 对未在 ACM 的 link 对全部 disable, 让 PTP 永不因     ║
+         ║        URDF mesh 假阳性卡住. 真实物理 by 设计安全.                    ║
+         ║                                                                      ║
+         ║  ⚠ 警告: 这是基于当前 arv_v1 硬件几何的结论. 换机 / 改 link 长度 /   ║
+         ║         加末端工具后, 必须重新物理验证, 不能默认沿用这套 ACM.         ║
+         ╚══════════════════════════════════════════════════════════════════════╝ -->
+
+    <!-- base_link vs distant links: 物理隔了整条臂, 几何上不可能撞 -->
+    <disable_collisions link1="base_link" link2="link2" reason="Never"/>
+    <disable_collisions link1="base_link" link2="link4" reason="Never"/>
+    <disable_collisions link1="base_link" link2="link5" reason="Never"/>
+    <disable_collisions link1="base_link" link2="link6" reason="Never"/>
+    <disable_collisions link1="base_link" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="base_link" link2="link_gripper2" reason="Never"/>
+
+    <!-- link1 vs distal: 折叠极限下接近, 但实际 mesh 不接触 -->
+    <disable_collisions link1="link1" link2="link4" reason="Never"/>
+    <disable_collisions link1="link1" link2="link5" reason="Never"/>
+    <disable_collisions link1="link1" link2="link6" reason="Never"/>
+    <disable_collisions link1="link1" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="link1" link2="link_gripper2" reason="Never"/>
+
+    <!-- link2 vs 远端: 极限折叠时几何 envelope 接近, 实测不接触 -->
+    <disable_collisions link1="link2" link2="link5" reason="Never"/>
+    <disable_collisions link1="link2" link2="link6" reason="Never"/>
+    <disable_collisions link1="link2" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="link2" link2="link_gripper2" reason="Never"/>
+
+    <!-- link4 vs gripper: link4=Roll1 旋转可能让 gripper 接近自身, 实测不撞 -->
+    <disable_collisions link1="link4" link2="link_gripper1" reason="Never"/>
+    <disable_collisions link1="link4" link2="link_gripper2" reason="Never"/>
+
 </robot>

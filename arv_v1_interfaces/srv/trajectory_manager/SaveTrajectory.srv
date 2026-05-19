@@ -3,6 +3,10 @@
 string name                              # 轨迹名称
 string description                       # 描述(可选)
 trajectory_msgs/JointTrajectory trajectory  # 要保存的轨迹
+
+# Gripper 同步动作 (可选, 字段对齐 LoadTrajectory.srv)
+float64[] gripper_action_times           # 夹爪动作时间戳(秒, 相对轨迹起点)
+string[] gripper_action_commands         # 夹爪动作: "open"/"close"/"stop"
 ---
 # 响应
 bool success

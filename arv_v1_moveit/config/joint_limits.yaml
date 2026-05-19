@@ -8,42 +8,43 @@ default_acceleration_scaling_factor: 1.0
 # Specific joint properties can be changed with the keys [max_position, min_position, max_velocity, max_acceleration]
 # Joint limits can be turned off with [has_velocity_limits, has_acceleration_limits]
 joint_limits:
-  joint_1:  # ±70°
+  # MoveIt planning limits — 比 URDF 限位宽 0.01 rad，容忍传感器噪声/PD跟踪误差
+  joint_1:  # ±70° + margin
     has_position_limits: true
-    min_position: -1.2217
-    max_position: 1.2217
+    min_position: -1.2317
+    max_position: 1.2317
     has_velocity_limits: true
     max_velocity: 10.47
     has_acceleration_limits: true
     max_acceleration: 10.0
-  joint_2:  # 30°~170°
+  joint_2:  # 30°~170° + margin
     has_position_limits: true
-    min_position: 0.5236
-    max_position: 2.9671
+    min_position: 0.48
+    max_position: 3.15
     has_velocity_limits: true
     max_velocity: 10.47
     has_acceleration_limits: true
     max_acceleration: 10.0
-  joint_3:  # -90°~180°
+  joint_3:  # -90°~40° + margin
     has_position_limits: true
-    min_position: -1.5708
-    max_position: 3.1416
+    min_position: -0.91
+    max_position: 0.71
     has_velocity_limits: true
     max_velocity: 10.47
     has_acceleration_limits: true
     max_acceleration: 10.0
-  joint_4:  # ±180°
+  joint_4:  # ±170° + margin
     has_position_limits: true
-    min_position: -3.1416
-    max_position: 3.1416
+    min_position: -2.985
+    max_position: 3.15
     has_velocity_limits: true
     max_velocity: 13.8
     has_acceleration_limits: true
     max_acceleration: 10.0
-  joint_5:  # ±90°
+  joint_5:  # ±90° + margin
     has_position_limits: true
-    min_position: -1.5708
-    max_position: 1.5708
+    min_position: -1.5808
+    max_position: 1.5808
     has_velocity_limits: true
     max_velocity: 10.47
     has_acceleration_limits: true

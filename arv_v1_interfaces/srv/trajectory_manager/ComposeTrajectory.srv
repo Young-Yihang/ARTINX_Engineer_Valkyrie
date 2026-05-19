@@ -1,0 +1,23 @@
+# ComposeTrajectory.srv - 用 MoveIt 多段规划合成一条经过指定关节空间路点的轨迹, 保存为 YAML
+#
+# 语义: waypoints 是"高精度停顿点"(取/存对准点), 段间 v=0 是 feature 不是 bug
+# 行为:
+#   1. waypoints[0] 作为 YAML 第一个点 (= 录制时机械臂应在的起点)
+#   2. 依次规划 waypoints[i-1] -> waypoints[i], 时间拼接 (段间天然 v=0)
+#   3. 落盘 YAML, meta.waypoints 段保留原始关节角做溯源
+#   4. 不立即执行, 走 LoadTrajectory 流程 Execute
+#
+# 请求
+string name                              # 轨迹名称
+string description                       # 描述(可选)
+sensor_msgs/JointState[] waypoints       # 关节空间路点序列, 至少 2 个; position 取前 6 关节
+float64 speed_factor                     # 0 < x <= 1, 默认 0.3 (max_vel/max_acc scaling)
+float64[] gripper_action_times           # 夹爪动作时间戳(秒, 相对轨迹起点, 可选)
+string[] gripper_action_commands         # 夹爪动作: "open"/"close"/"stop"
+---
+# 响应
+bool success
+string message
+string saved_path                        # 保存的文件路径
+float64 duration                         # 轨迹总时长(秒)
+uint32 point_count                       # 稠密点总数

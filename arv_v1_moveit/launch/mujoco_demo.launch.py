@@ -41,12 +41,16 @@ def launch_setup(context, *args, **kwargs):
             {"trajectory_execution.allowed_execution_duration_scaling": 2.0},
             {"default_robot_padding": -0.005},  # 碰撞体内缩 5mm, 容忍微小位置偏差
             {"jiggle_fraction": 0.05},  # 起点 in collision 时微调 5% 逃出
+            {"default_planning_request_adapters.fix_start_state": True},  # 限位边缘微量越界自动clamp回限内
             {"publish_planning_scene": True},
             {"publish_geometry_updates": True},
             {"publish_state_updates": True},
             {"publish_transforms_updates": True},
             {"publish_robot_description": True},
             {"publish_robot_description_semantic": True},
+            # 限制 planning scene 发布频率，防止 1kHz 真机 joint state
+            # 导致 FCL DynamicAABBTree::update() 并发竞态崩溃
+            {"planning_scene_monitor_options.publish_planning_scene_hz": 25.0},
         ],
     )
 

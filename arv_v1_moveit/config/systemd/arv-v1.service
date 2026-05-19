@@ -1,0 +1,26 @@
+[Unit]
+Description=ARV_V1 Robotic Arm Control System
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=%h/ros2_ws/src/arv_v1_moveit/config/systemd/arv_v1_start.sh
+ExecStop=/bin/kill -INT $MAINPID
+TimeoutStopSec=15
+KillMode=mixed
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=append:%h/arv_v1_logs/systemd.log
+StandardError=append:%h/arv_v1_logs/systemd.log
+
+# Allow RT scheduling for torque_controller
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+Nice=-10
+
+[Install]
+WantedBy=default.target

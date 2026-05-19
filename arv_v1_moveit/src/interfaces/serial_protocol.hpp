@@ -9,37 +9,45 @@
 #include <vector>
 
 #include "Crc.hpp"
-// TX: 0x0002 torque 1kHz 24B, 0x0004 gripper 50Hz 1B, 0x0006 status 10Hz 4B
+// TX: 0x0002 joint cmd 1kHz 24B, 0x0004 gripper 50Hz 1B, 0x0006 status 10Hz 4B
 // RX: 0x0001 feedback 1kHz 84B, 0x0005 task_cmd on-demand 3B
 
 namespace SerialProtocol {
 constexpr uint8_t SOF = 0xA5;
 
-constexpr uint16_t CMD_JOINT_FEEDBACK = 0x0001;   // RX 7-joint state 1kHz
-constexpr uint16_t CMD_TORQUE_CONTROL = 0x0002;   // TX 6-axis torque 1kHz
-constexpr uint16_t CMD_GRIPPER_CONTROL = 0x0004;  // TX gripper flag 50Hz
-constexpr uint16_t CMD_TASK_COMMAND = 0x0005;     // RX task cmd 3B
-constexpr uint16_t CMD_ARM_STATUS = 0x0006;       // TX arm status 4B 10Hz
+// --- CmdID values: byte-level frozen (MCU 固件锁版本); 名字反映 PC 端语义 ---
+//     0x0002 历史叫 TORQUE_CONTROL, 实际上现在 (route_mode=true) 载荷是
+//     joint position target (rad). 字节布局没变 (6×float = 24B), 仅 PC 端
+//     命名跟上语义. MCU 固件那侧字段仍可能叫 torques, 不影响互通.
+constexpr uint16_t CMD_JOINT_FEEDBACK = 0x0001;         // RX 7-joint state 1kHz
+constexpr uint16_t CMD_JOINT_POSITION_TARGET = 0x0002;  // TX 6-axis q_target rad 1kHz
+constexpr uint16_t CMD_GRIPPER_CONTROL = 0x0004;        // TX gripper flag 50Hz
+constexpr uint16_t CMD_TASK_COMMAND = 0x0005;           // RX task cmd 3B
+constexpr uint16_t CMD_ARM_STATUS = 0x0006;             // TX arm status 4B 10Hz
 
 constexpr size_t NUM_ARM_JOINTS = 6;
 constexpr size_t NUM_ALL_JOINTS = 7;  // arm + gripper
 
 // ─────────── 0x0005 TaskCmd: [cmd(1)][param(1)][seq(1)] ───────────
+// 与下位机 ARTINX/engineer_2026 components/Controller/HostCom/HostProtocol.hpp 对齐
 enum class TaskCmd : uint8_t {
   EMERGENCY_STOP = 0x01,    // param ignored
-  RESET_HOME = 0x02,        // param ignored
-  PICK_OBJ = 0x10,          // param = obj_id (0-5)
-  STOW_OBJ = 0x11,          // param = slot_id (0-5)
-  DEPOSIT_MODE = 0x20,      // param: 1=enter, 0=exit
-  NEXT_STEP = 0x30,         // param ignored
-  ABORT_TASK = 0x31,        // param ignored, hold position
-  GRIPPER_CMD = 0x40,       // param = GripperAction
+  RESET_HOME = 0x02,        // param ignored, X 键回 escape
+  PICK_OBJ = 0x10,          // param = obj_id (0-5), W/A/S/D/Q/E
+  DEPOSIT_MODE = 0x20,      // param: 1=enter, 0=exit (SDC 模式切换)
+  STOW_LEFT = 0x24,         // Z 键: 存矿到身上左槽
+  STOW_RIGHT = 0x25,        // C 键: 存矿到身上右槽
+  RETRIEVE_LEFT = 0x26,     // Shift+Z: 从身上左槽取矿
+  RETRIEVE_RIGHT = 0x27,    // Shift+C: 从身上右槽取矿
+  NEXT_STEP = 0x30,         // B 键, 任意时刻 fast-forward
+  ABORT_TASK = 0x31,        // F 键, hold position
+  GRIPPER_CMD = 0x40,       // G 键, param = GripperAction
   SET_CONTROL_MODE = 0x50,  // param = ControlMode
 };
 
 // ─────────── 0x0006 ArmStatus: [state][progress][error][gripper] ───────────
-enum class ArmState : uint8_t {
-  IDLE = 0x00,
+enum class ArmState : uint8_t {  // 0x00 to 0x04, all in armed.
+  READY = 0x00,  // ARMED + at home + idx=0, waiting for command (active hold, non-zero torque)
   EXECUTING = 0x01,
   HOLDING = 0x02,
   ERROR = 0x03,
@@ -72,8 +80,8 @@ enum class GripperState : uint8_t {
 
 // ─────────── 数据结构 ───────────
 
-struct TorqueCommand {
-  std::array<float, NUM_ARM_JOINTS> torques;  // [J1..J6]
+struct JointPositionTarget {
+  std::array<float, NUM_ARM_JOINTS> positions;  // [J1..J6] q_target (rad)
 };
 
 enum class GripperAction : uint8_t {
@@ -163,7 +171,7 @@ inline std::vector<uint8_t> buildPacket(uint16_t cmd_id, uint16_t flags,
   append_uint16(pkt, flags);
   pkt.insert(pkt.end(), payload.begin(), payload.end());
 
-  const uint16_t data_len = static_cast<uint16_t>(pkt.size() - 4);
+  const uint16_t data_len = static_cast<uint16_t>(payload.size() + 2);  // float_data + CRC16
   pkt[1] = static_cast<uint8_t>(data_len & 0xFF);
   pkt[2] = static_cast<uint8_t>((data_len >> 8) & 0xFF);
   pkt[3] = Get_CRC8_Check_Sum(pkt.data(), 3, 0xFF);
@@ -174,16 +182,16 @@ inline std::vector<uint8_t> buildPacket(uint16_t cmd_id, uint16_t flags,
 }
 
 // ─────────── Per-command builders ───────────
-inline std::vector<uint8_t> buildTorquePacket(const TorqueCommand &cmd) {
+inline std::vector<uint8_t> buildPositionTargetPacket(const JointPositionTarget &cmd) {
   std::vector<uint8_t> payload;
   payload.reserve(NUM_ARM_JOINTS * 4);
-  for (size_t i = 0; i < NUM_ARM_JOINTS; ++i) append_float(payload, cmd.torques[i]);
-  return buildPacket(CMD_TORQUE_CONTROL, 0x0000, payload);
+  for (size_t i = 0; i < NUM_ARM_JOINTS; ++i) append_float(payload, cmd.positions[i]);
+  return buildPacket(CMD_JOINT_POSITION_TARGET, 0x0000, payload);
 }
 
 inline std::vector<uint8_t> buildGripperPacket(GripperAction action) {
-  std::vector<uint8_t> payload = {static_cast<uint8_t>(action)};
-  return buildPacket(CMD_GRIPPER_CONTROL, 0x0000, payload);
+  // action transported in flags field (1 byte, not float-aligned payload)
+  return buildPacket(CMD_GRIPPER_CONTROL, static_cast<uint16_t>(action), {});
 }
 
 inline std::vector<uint8_t> buildArmStatusPacket(const ArmStatusPacket &status) {

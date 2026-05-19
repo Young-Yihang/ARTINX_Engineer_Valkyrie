@@ -1,0 +1,50 @@
+# MCU 按键 → 上位机轨迹序列绑定
+#
+# 语义:
+#   - bindings.<name>.steps 是按顺序执行的轨迹序列
+#   - wait_for_next: true 时, step 跑完会停下等 B 按下再推进
+#   - B 任意时刻 fast-forward: 跑轨迹中按 B 也立即砍 current step 进下一步
+#   - 段间天然 v=0 (Pilz PTP), 对应"高精度停顿对准"语义
+#   - interruptible_by 是 cmd 白名单, 序列执行中只接受这些 cmd, 其他 PICK_OBJ 等丢弃
+#
+# pick_obj 是模板, loader 启动展开成 6 条 internal binding (pick_obj_0..pick_obj_5),
+# {param} 字符串由 cmd 0x10 的 param 字节替换.
+
+bindings:
+  # 取矿: W/A/S/D/Q/E (cmd 0x10, param=矿id 0~5)
+  pick_obj:
+    interruptible_by: [0x01, 0x02, 0x30, 0x24, 0x25]   # ESTOP/X/B/Z/C
+    steps:
+      - trajectory: "cap_{param}_1"   # 逼近, 等 B 确认夹取
+        wait_for_next: true
+      - trajectory: "cap_{param}_2"   # 取出回 escape, 起点 close gripper
+
+  # 左存矿: Z (cmd 0x24)
+  stow_left:
+    interruptible_by: [0x01, 0x02, 0x30]               # ESTOP/X/B
+    steps:
+      - trajectory: "save_left_111"        # 存矿到身上左槽, 末尾 open gripper (放下矿石)
+      - trajectory: "save_left_reset"      # 不碰矿石撤离 → escape
+
+  # 右存矿: C (cmd 0x25)
+  stow_right:
+    interruptible_by: [0x01, 0x02, 0x30]
+    steps:
+      - trajectory: "save_right_111"
+      - trajectory: "save_right_reset"
+
+  # 从自身左槽取矿: Shift+Z (cmd 0x26)
+  retrieve_left:
+    interruptible_by: [0x01, 0x02, 0x30]
+    steps:
+      - trajectory: "pick_s_left_111"      # 逼近自身左槽, 末尾 close gripper, 等 B 确认夹取
+        wait_for_next: true
+      - trajectory: "pick_left_1111"       # 夹住矿石取出回 escape (注: 4 个 1, 与 pick_right 不对称)
+
+  # 从自身右槽取矿: Shift+C (cmd 0x27)
+  retrieve_right:
+    interruptible_by: [0x01, 0x02, 0x30]
+    steps:
+      - trajectory: "pick_s_right_111"
+        wait_for_next: true
+      - trajectory: "pick_right_111"       # 夹住矿石取出回 escape

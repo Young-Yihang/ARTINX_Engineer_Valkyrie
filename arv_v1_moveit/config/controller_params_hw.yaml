@@ -1,11 +1,19 @@
-# 控制器参数 | 修改后执行 ./reload_params.sh 热重载
-# 控制律: τ = 动力学前馈(M+C+G) + 摩擦前馈(fc·fal+fv·q̇) + cascade_PD + 载荷补偿
+# 真机参数 (real motor dynamics) | 修改后执行 ./reload_params.sh 热重载
+# 对应文件: controller_params_sim.yaml (仿真版本)
+#控制律: τ = 动力学前馈(M+C+G) + 摩擦前馈(fc·fal+fv·q̇) + cascade PD+PI + 载荷补偿
 
 /torque_controller_action_server:
   ros__parameters:
+    # ========== route_mode: 控制律 bypass, 仅路由 q_target 给 MCU ==========
+    # ON: torque_controller 退化为 target router (源: /joint_position_target topic + 轨迹 action)
+    #     effort_topic 的 data[0..5] 语义变为 q_target(rad), MCU 端需配合解析
+    #     避免上位机闭环延迟引起 J5 等关节抽搐 (2026-05-11 决策)
+    # OFF: 原 PID/阻抗 + 动力学控制律
+    route_mode: true
+
     # ========== 卡尔曼滤波器（速度滤波，降低噪声）==========
     kalman:
-      enabled: true
+      enabled: false
       Q_pos: 1.0e-5    # 过程噪声：位置
       Q_vel: 1.0e-4    # 过程噪声：速度
       R_pos: 1.0e-3    # 测量噪声：位置
@@ -25,64 +33,80 @@
     # 原始单环参数(566971e): J1=30/1, J2=50/1, J3=30/1, J4=10/0.3, J5=1/1, J6=1/1
     cascade_pid:
       joint_1:
-        pos_Kp: 30.0
+        pos_Kp: 15.0
         pos_Ki: 0.0
-        pos_Kd: 0.0       # Kd_eq = (0+1)*1 = 1.0 = 原Kd
+        pos_Kd: 0.003       # Kd_eq = (0+1)*1 = 1.0 = 原Kd
         max_integral_pos: 2.0
         vel_Kp: 3.0        # 透传: 内环天然阻尼=1.0
-        vel_Ki: 0.0
+        vel_Ki: 0.012
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 2.5
 
       joint_2:
-        pos_Kp: 50.0
+        pos_Kp: 16.2
         pos_Ki: 0.0
-        pos_Kd: 0.0
+        pos_Kd: 0.255       # MCU dDivDt=true, 2ms采样周期
         max_integral_pos: 2.0
-        vel_Kp: 2.0
+        vel_Kp: 12.0
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 3.0      # MCU posPid max_output=3.0
 
       joint_3:
         pos_Kp: 30.0
         pos_Ki: 0.0
         pos_Kd: 0.0
         max_integral_pos: 2.0
-        vel_Kp: 2.0
+        vel_Kp: 4.0
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 5.0
 
       joint_4:
-        pos_Kp: 10.0
+        pos_Kp: 13.0       # MCU 同值; dMode(2,true) 见 torque_controller_node init
         pos_Ki: 0.0
-        pos_Kd: 0.0       # Kd_eq = 1.0 > 原0.3, J4过阻尼但更稳
-        max_integral_pos: 0.3
-        vel_Kp: 1.0
+        pos_Kd: 0.02       # MCU 同值
+        max_integral_pos: 2.0
+        vel_Kp: 0.9        # MCU 同值
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 1.0   # MCU posPid max_output=1.0
 
       joint_5:
-        pos_Kp: 50.0
+        pos_Kp: 15.0
         pos_Ki: 0.0
         pos_Kd: 0.0
         max_integral_pos: 0.5
-        vel_Kp: 3.0
+        vel_Kp: 0.2
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 3.0
 
       joint_6:
-        pos_Kp: 50.0
+        pos_Kp: 10.0
         pos_Ki: 0.0
         pos_Kd: 0.0
         max_integral_pos: 0.3
-        vel_Kp: 2.0
+        vel_Kp: 0.2
         vel_Ki: 0.0
         vel_Kd: 0.0
-        vel_limit: 10.0
+        vel_limit: 3.0
+
+    # ========== 阻抗控制 (J1/J5): tau = K*(qt-q) - D*qdot ==========
+    # 与 STM32 本地阻抗参数同步，D-priority 抗饱和
+    impedance:
+      joint_1:
+        K: 60.0
+        D: 10.5
+        tau_limit: 28.0
+      joint_2:        # unused: J2已改为cascade PID，保留以满足参数声明
+        K: 80.0
+        D: 11.0
+        tau_limit: 40.0
+      joint_5:
+        K: 10.0
+        D: 0.63
+        tau_limit: 7.0
 
     # ========== Safety Parameters ==========
     safety:

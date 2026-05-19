@@ -23,12 +23,11 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(realtime_tools REQUIRED)
 find_package(geometric_shapes REQUIRED)
 find_package(shape_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
-find_package(PkgConfig REQUIRED)
 find_package(OpenGL REQUIRED)
-pkg_check_modules(IMGUI REQUIRED imgui)
 
 # ========== MuJoCo手动配置 ==========
 # 设置MuJoCo安装路径
@@ -95,9 +94,23 @@ target_include_directories(cascade_pid PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-# ========== ImGui后端 + ImPlot 源码编译 ==========
-# ImGui后端目录 (apt包不含后端实现，需要源码编译)
-set(IMGUI_BACKENDS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends/backends)
+# ========== ImGui + 后端 + ImPlot 源码编译 ==========
+# 统一使用 third_party，避免不同设备系统包版本不一致
+set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends)
+set(IMGUI_BACKENDS_DIR ${IMGUI_DIR}/backends)
+set(IMPLOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/implot)
+
+# Dear ImGui core
+add_library(imgui STATIC
+  ${IMGUI_DIR}/imgui.cpp
+  ${IMGUI_DIR}/imgui_draw.cpp
+  ${IMGUI_DIR}/imgui_tables.cpp
+  ${IMGUI_DIR}/imgui_widgets.cpp
+)
+target_include_directories(imgui PUBLIC
+  ${IMGUI_DIR}
+  ${IMGUI_BACKENDS_DIR}
+)
 
 # ImGui后端库 (GLFW + OpenGL3)
 add_library(imgui_backends STATIC
@@ -105,26 +118,25 @@ add_library(imgui_backends STATIC
   ${IMGUI_BACKENDS_DIR}/imgui_impl_opengl3.cpp
 )
 target_include_directories(imgui_backends PUBLIC
+  ${IMGUI_DIR}
   ${IMGUI_BACKENDS_DIR}
-  ${IMGUI_INCLUDE_DIRS}
 )
 target_link_libraries(imgui_backends PUBLIC
-  ${IMGUI_LIBRARIES}
+  imgui
   glfw
   OpenGL::GL
 )
 
-# ImPlot源码编译 (apt没有implot包)
-set(IMPLOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/implot)
+# ImPlot源码编译
 add_library(implot STATIC
   ${IMPLOT_DIR}/implot.cpp
   ${IMPLOT_DIR}/implot_items.cpp
 )
 target_include_directories(implot PUBLIC
   ${IMPLOT_DIR}
-  ${IMGUI_INCLUDE_DIRS}
+  ${IMGUI_DIR}
 )
-target_link_libraries(implot PUBLIC ${IMGUI_LIBRARIES})
+target_link_libraries(implot PUBLIC imgui)
 
 # ============= 3. 创建可执行文件 =============
 
@@ -175,6 +187,7 @@ ament_target_dependencies(torque_controller_node
   Eigen3
   ament_index_cpp
   arv_v1_interfaces
+  realtime_tools
 )
 
 # -------------------------------------------
@@ -190,7 +203,7 @@ target_link_libraries(mujoco_interface_node
   ${MUJOCO_LIBRARIES}  # ← 使用手动配置的MuJoCo库
   glfw  # GLFW窗口库
   OpenGL::GL
-  ${IMGUI_LIBRARIES}
+  imgui
   imgui_backends  # ← 新增: ImGui GLFW/OpenGL3后端
   implot
   yaml-cpp  # 读取 scene_obstacles.yaml
@@ -203,7 +216,7 @@ target_include_directories(mujoco_interface_node PUBLIC
   ${rclcpp_INCLUDE_DIRS}
   ${ament_index_cpp_INCLUDE_DIRS}
   ${MUJOCO_INCLUDE_DIRS}  # ← 添加MuJoCo头文件
-  ${IMGUI_INCLUDE_DIRS}
+  ${IMGUI_DIR}
   ${IMGUI_BACKENDS_DIR}   # ← 新增: ImGui后端头文件
 )
 
@@ -282,6 +295,8 @@ ament_target_dependencies(trajectory_manager_node
   trajectory_msgs
   control_msgs
   arv_v1_interfaces
+  moveit_ros_planning_interface
+  ament_index_cpp
 )
 
 # -------------------------------------------
@@ -292,29 +307,27 @@ add_executable(cartesian_controller_node
 
 target_link_libraries(cartesian_controller_node
   ${rclcpp_LIBRARIES}
-  ${orocos_kdl_LIBRARIES}
-  ${kdl_parser_LIBRARIES}
 )
 
 target_include_directories(cartesian_controller_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/core>
   $<INSTALL_INTERFACE:include>
   ${rclcpp_INCLUDE_DIRS}
-  ${orocos_kdl_INCLUDE_DIRS}
-  ${kdl_parser_INCLUDE_DIRS}
 )
 
 ament_target_dependencies(cartesian_controller_node
   rclcpp
+  rclcpp_action
   std_msgs
   sensor_msgs
   geometry_msgs
+  trajectory_msgs
+  control_msgs
   tf2
   tf2_ros
   tf2_geometry_msgs
-  kdl_parser
-  orocos_kdl
-  ament_index_cpp
+  arv_v1_interfaces
 )
 
 # -------------------------------------------
@@ -325,8 +338,7 @@ add_executable(mission_executor_node
 
 target_link_libraries(mission_executor_node
   ${rclcpp_LIBRARIES}
-  yaml-cpp  # For reading trajectory info
-  ncurses   # For the TUI
+  yaml-cpp
 )
 
 ament_target_dependencies(mission_executor_node
@@ -335,29 +347,7 @@ ament_target_dependencies(mission_executor_node
   geometry_msgs
   tf2
   arv_v1_interfaces
-)
-
-# -------------------------------------------
-# Scene Manager Node (Application Layer - 障碍物场景管理)
-add_executable(scene_manager_node
-  src/application/scene_manager_node.cpp
-)
-
-target_link_libraries(scene_manager_node
-  ${rclcpp_LIBRARIES}
-  yaml-cpp  # 直接读取 collision_shapes (ROS2 params 不支持嵌套列表)
-)
-
-ament_target_dependencies(scene_manager_node
-  rclcpp
-  geometry_msgs
-  tf2
-  urdf
   ament_index_cpp
-  moveit_ros_planning_interface
-  geometric_shapes
-  shape_msgs
-  std_srvs
 )
 
 # ============= 4. 安装 =============
@@ -367,6 +357,7 @@ install(TARGETS
   dynamics_computer       # ← 工具类库
   kalman_filter
   cascade_pid
+  imgui
   imgui_backends          # ← 新增: ImGui后端库
   implot
   torque_controller_node
@@ -375,7 +366,6 @@ install(TARGETS
   trajectory_manager_node    # ← 轨迹管理节点
   cartesian_controller_node  # ← 笛卡尔坐标控制节点
   mission_executor_node      # ← Application Layer Node
-  scene_manager_node         # ← 障碍物场景管理节点
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -392,6 +382,8 @@ install(FILES .setup_assistant DESTINATION share/${PROJECT_NAME})
 
 # 安装 Python 脚本
 install(PROGRAMS
+  scripts/move_to_pose.py
+  scripts/mission_panel.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

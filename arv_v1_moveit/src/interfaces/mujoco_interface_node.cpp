@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -38,15 +39,17 @@ public:
         visualization_only_(false) {
     RCLCPP_INFO(this->get_logger(), "[START] MuJoCo interface node starting");
 
+    this->declare_parameter("sim_mode", true);
     this->declare_parameter("visualization_only", false);
-    visualization_only_ = this->get_parameter("visualization_only").as_bool();
+    sim_mode_ = this->get_parameter("sim_mode").as_bool();
+    bool viz_only_explicit = this->get_parameter("visualization_only").as_bool();
+    visualization_only_ = !sim_mode_ || viz_only_explicit;
 
     if (visualization_only_) {
-      RCLCPP_INFO(this->get_logger(),
-                  "[MODE] Digital Twin - visualization only (subscribing /joint_states)");
+      RCLCPP_INFO(this->get_logger(), "[MODE] Digital Twin (sim_mode=%s, no scene obstacles)",
+                  sim_mode_ ? "true" : "false");
     } else {
-      RCLCPP_INFO(this->get_logger(),
-                  "[MODE] Physics Simulation (subscribing /effort_controller/commands)");
+      RCLCPP_INFO(this->get_logger(), "[MODE] Physics Simulation (sim_mode=true, full scene)");
     }
 
     try {
@@ -88,16 +91,19 @@ public:
 
     if (visualization_only_) {
       joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-          "/joint_states", 10,
+          "/joint_states", rclcpp::SensorDataQoS(),
           std::bind(&MuJoCoInterfaceNode::jointStateCallback, this, std::placeholders::_1));
       RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /joint_states (digital twin)");
     } else {
-      effort_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
-          "/effort_controller/commands", 10,
-          std::bind(&MuJoCoInterfaceNode::effortCallback, this, std::placeholders::_1));
-      RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /effort_controller/commands");
+      cmd_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
+          "/joint_position_target_to_mcu", rclcpp::SensorDataQoS(),
+          std::bind(&MuJoCoInterfaceNode::cmdCallback, this, std::placeholders::_1));
+      // NOTE: MuJoCo MJCF actuator 仍是 <motor> 类型, route_mode 下 sim 把 position 值
+      //       当 torque 喂给 actuator, 仿真行为与真机 (MCU 跑位置环) 不一致. Sim 仅可信几何/碰撞.
+      RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /joint_position_target_to_mcu");
 
-      joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
+      joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
+          "/joint_states", rclcpp::SensorDataQoS());
       RCLCPP_INFO(this->get_logger(), "[OK] Publishing: /joint_states");
 
       auto period = std::chrono::duration<double, std::milli>(1000.0 / sim_frequency_);
@@ -159,20 +165,21 @@ public:
   }
 
 private:
-  // ========== MuJoCo ==========
+  // --- MuJoCo ---
   mjModel *model_;
   mjData *data_;
 
-  // ========== ROS2 ==========
-  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr effort_sub_;
+  // --- ROS2 ---
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr cmd_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;  // digital-twin
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::TimerBase::SharedPtr sim_timer_;
 
-  // ========== 运行模式 ==========
+  // --- 运行模式 ---
+  bool sim_mode_;            // true=full sim with scene, false=digital-twin (no scene)
   bool visualization_only_;  // true=digital-twin, false=physics-sim
 
-  // ========== 配置 ==========
+  // --- 配置 ---
   std::string pkg_share_dir_;
   std::string urdf_path_;
   std::string mesh_dir_;
@@ -180,7 +187,7 @@ private:
   double sim_frequency_;
   std::string scene_config_path_;  // scene_obstacles.yaml path
 
-  // ========== 可视化 ==========
+  // --- 可视化 ---
   std::thread render_thread_;
   std::atomic<bool> render_running_;
 
@@ -191,20 +198,20 @@ private:
   mjrContext con_;
   std::mutex sim_mutex_;
 
-  // ========== 启动安全 ==========
+  // --- 启动安全 ---
   std::atomic<bool> received_first_command_;
 
-  // ========== Health monitoring ==========
+  // --- Health monitoring ---
   std::atomic<uint64_t> sim_step_count_{0};
   std::atomic<uint64_t> command_rx_count_{0};
   rclcpp::TimerBase::SharedPtr health_timer_;
 
-  // ========== 关节 ==========
+  // --- 关节 ---
   const std::vector<std::string> joint_names_ = {"joint_1",        "joint_2",       "joint_3",
                                                  "joint_4",        "joint_5",       "joint_6",
                                                  "joint_gripper1", "joint_gripper2"};
 
-  // ========== 磁力吸引 ==========
+  // --- 磁力吸引 ---
   // 恒力模型: 矿核指向六边形中心, 被棍子碰撞挡住 → 无穿越振荡
   struct MagnetAnchor {
     int body_id;
@@ -217,7 +224,7 @@ private:
   double magnet_force_default_ = 14.4;  // mg + 10N
   double magnet_detach_dist_ = 0.25;    // core~0.11m离中心, 留余量
 
-  // ========== 交互状态 ==========
+  // --- 交互状态 ---
   bool button_left_ = false;
   bool button_middle_ = false;
   bool button_right_ = false;
@@ -229,7 +236,7 @@ private:
   bool show_contacts_ = false;
   bool show_forces_ = false;
 
-  // ========== 笛卡尔目标可视化 ==========
+  // --- 笛卡尔目标可视化 ---
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr cartesian_target_sub_;
   std::mutex target_pose_mutex_;  // 保护 target_pose_ (renderLoop读, callback写)
   geometry_msgs::msg::PoseStamped target_pose_;
@@ -259,7 +266,7 @@ private:
   void setInitialPose();
   std::string buildObstacleMJCF();
   std::string loadObstacleURDF(const std::string &id, const std::string &urdf_uri);
-  void effortCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+  void cmdCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
   void simulationStep();
   void publishJointStates();
@@ -384,12 +391,15 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
   size_t mujoco_end = mjcf_string.find("</mujoco>");
   mjcf_string.insert(mujoco_end, actuator_mjcf);
 
-  // 注入障碍物 (碰撞由下方 contype/conaffinity 统一设置)
-  std::string obstacle_mjcf = buildObstacleMJCF();
-  if (!obstacle_mjcf.empty()) {
-    mujoco_end = mjcf_string.find("</mujoco>");
-    mjcf_string.insert(mujoco_end, obstacle_mjcf);
-    RCLCPP_INFO(this->get_logger(), "[OK] Scene obstacles injected into MJCF");
+  if (sim_mode_) {
+    std::string obstacle_mjcf = buildObstacleMJCF();
+    if (!obstacle_mjcf.empty()) {
+      mujoco_end = mjcf_string.find("</mujoco>");
+      mjcf_string.insert(mujoco_end, obstacle_mjcf);
+      RCLCPP_INFO(this->get_logger(), "[OK] Scene obstacles injected into MJCF");
+    }
+  } else {
+    RCLCPP_INFO(this->get_logger(), "[INFO] Hardware mode: scene obstacles skipped");
   }
 
   // 提升 ambient 光照 (MuJoCo 默认 ambient=0 导致背光面全黑)
@@ -502,7 +512,10 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
     size_t p = 0;
     while ((p = mjcf_string.find("<geom ", p)) != std::string::npos) {
       size_t tag_end = mjcf_string.find("/>", p);
-      if (tag_end == std::string::npos) { p++; continue; }
+      if (tag_end == std::string::npos) {
+        p++;
+        continue;
+      }
       std::string tag = mjcf_string.substr(p, tag_end - p);
       // 只匹配 graspable vcol (contype="8")
       if (tag.find("contype=\"8\"") != std::string::npos) {
@@ -552,9 +565,10 @@ bool MuJoCoInterfaceNode::loadMuJoCoModel() {
 
   RCLCPP_INFO(this->get_logger(), "[OK] MuJoCo model loaded successfully");
 
-  // mj_forward 使 data_->xpos 有效 (collectMagnetAnchors 需要)
   mj_forward(model_, data_);
-  collectMagnetAnchors();
+  if (sim_mode_) {
+    collectMagnetAnchors();
+  }
 
   return true;
 }
@@ -628,7 +642,8 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
         ma.body_id, ma.anchor[0], ma.anchor[1], ma.anchor[2], xpos[0], xpos[1], xpos[2], dist,
         ma.force_mag);
 
-    // [SAFETY] 前200步不检测脱离, 防止初始碰撞弹力误触发
+    // [SAFETY] skip detach check for first 200 steps — avoids false trigger from initial
+    // spring-back.
     if (dist > ma.detach_dist && sim_step_count_ > 200) {
       ma.detached = true;
       data_->xfrc_applied[6 * ma.body_id + 0] = 0;
@@ -971,17 +986,16 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
   return mjcf.str();
 }
 
-void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+void MuJoCoInterfaceNode::cmdCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
   if (msg->data.size() != static_cast<size_t>(kAllJoints)) {
-    RCLCPP_ERROR(this->get_logger(), "[ERROR] Torque array size mismatch! Expected %d, got %zu",
+    RCLCPP_ERROR(this->get_logger(), "[ERROR] Command array size mismatch! Expected %d, got %zu",
                  kAllJoints, msg->data.size());
     return;
   }
 
   if (!received_first_command_) {
     received_first_command_ = true;
-    RCLCPP_INFO(this->get_logger(),
-                "[OK] First torque command received, MuJoCo simulation started");
+    RCLCPP_INFO(this->get_logger(), "[OK] First joint command received, MuJoCo simulation started");
   }
 
   command_rx_count_++;
@@ -1026,7 +1040,7 @@ void MuJoCoInterfaceNode::simulationStep() {
   applyMagnetForces();
   mj_step(model_, data_);
 
-  // [SAFETY] NaN检测 (仅日志, TODO: 调试后恢复重置)
+  // [SAFETY] NaN check (log-only). [TODO] restore reset path after sim debugging.
   if (data_->warning[mjWARN_BADQACC].number > 0) {
     RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000,
                           "[SAFETY] QACC NaN detected (count=%d) — reset DISABLED for debug",
@@ -1050,6 +1064,11 @@ void MuJoCoInterfaceNode::publishJointStates() {
 
   // 7 joints (6 arm + 1 gripper), 不含 mimic
   for (int i = 0; i < kAllJoints; i++) {
+    if (!std::isfinite(data_->qpos[i]) || !std::isfinite(data_->qvel[i])) {
+      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 1000,
+                            "[SAFETY] NaN in joint %d, suppressing /joint_states publish", i);
+      return;
+    }
     msg.name.push_back(joint_names_[i]);
     msg.position.push_back(data_->qpos[i]);
     msg.velocity.push_back(data_->qvel[i]);
@@ -1179,7 +1198,7 @@ void MuJoCoInterfaceNode::renderLoop() {
   RCLCPP_INFO(this->get_logger(), "[INFO] Render loop ended");
 }
 
-// ========== GLFW callbacks ==========
+// --- GLFW callbacks ---
 
 void MuJoCoInterfaceNode::mouseButtonCallback(GLFWwindow *window, int button, int action,
                                               int mods) {
@@ -1324,10 +1343,29 @@ void MuJoCoInterfaceNode::drawTargetMarker() {
   double base_p[3], base_m[9];
   {
     std::lock_guard<std::mutex> lock(sim_mutex_);
+    // MuJoCo 转 URDF 时消除 world→base_link fixed joint,
+    // base_link 不存在于 MJCF 中, 偏移被合并到 link1 的 pos 属性.
+    // base_link 姿态 = 纯平移 (无旋转), 直接用 URDF 中的 world_fixed offset.
     int base_id = mj_name2id(model_, mjOBJ_BODY, "base_link");
-    if (base_id < 0) base_id = 0;
-    std::memcpy(base_p, data_->xpos + 3 * base_id, 3 * sizeof(double));
-    std::memcpy(base_m, data_->xmat + 9 * base_id, 9 * sizeof(double));
+    if (base_id >= 0) {
+      std::memcpy(base_p, data_->xpos + 3 * base_id, 3 * sizeof(double));
+      std::memcpy(base_m, data_->xmat + 9 * base_id, 9 * sizeof(double));
+    } else {
+      // URDF world_fixed: <origin xyz="-0.05 0 0.295" rpy="0 0 0"/>
+      static constexpr double kWorldBaseOffset[3] = {-0.05, 0.0, 0.295};
+      RCLCPP_WARN_ONCE(this->get_logger(),
+                       "[draw] base_link body not found, falling back to URDF world_fixed offset");
+      int link1_id = mj_name2id(model_, mjOBJ_BODY, "link1");
+      if (link1_id >= 0) {
+        // link1 body pos 就是 base_link 在世界系的位置 (joint_1 不改变位置)
+        std::memcpy(base_p, data_->xpos + 3 * link1_id, 3 * sizeof(double));
+      } else {
+        std::memcpy(base_p, kWorldBaseOffset, 3 * sizeof(double));
+      }
+      // base_link 无旋转 → 单位矩阵
+      std::memset(base_m, 0, 9 * sizeof(double));
+      base_m[0] = base_m[4] = base_m[8] = 1.0;
+    }
   }
 
   // pos_world = base_p + base_m * local_pos
@@ -1414,7 +1452,7 @@ void MuJoCoInterfaceNode::healthCheck() {
   last_cmd_count = current_cmds;
 }
 
-// ========== main ==========
+// --- main ---
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
