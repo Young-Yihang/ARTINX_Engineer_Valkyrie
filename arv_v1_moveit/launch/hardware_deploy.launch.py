@@ -168,7 +168,7 @@ def launch_setup(context, *args, **kwargs):
             os.path.join(session_dir, "rosbag", "session"),
             "--topics",
             "/joint_states",
-            "/effort_controller/commands",
+            "/joint_position_target_to_mcu",
             "/ARM_controller/follow_joint_trajectory/_action/status",
             "/cartesian_controller/current_pose",
             "/cartesian_target_pose",

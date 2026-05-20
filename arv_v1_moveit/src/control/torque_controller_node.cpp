@@ -125,7 +125,7 @@ public:
     this->declare_parameter("route_mode", false);
     route_mode_ = this->get_parameter("route_mode").as_bool();
     RCLCPP_INFO(this->get_logger(),
-                "[ROUTE_MODE] %s — control law %s, effort_topic data[0..5] = %s",
+                "[ROUTE_MODE] %s — control law %s, cmd_topic data[0..5] = %s",
                 route_mode_.load() ? "ENABLED" : "DISABLED",
                 route_mode_.load() ? "BYPASSED" : "ACTIVE",
                 route_mode_.load() ? "q_target(rad)" : "tau(Nm)");
@@ -318,14 +318,15 @@ public:
     RCLCPP_INFO(this->get_logger(),
                 "[OK] Action server created: /ARM_controller/follow_joint_trajectory");
 
-    torque_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
-        "/effort_controller/commands", rclcpp::SensorDataQoS());
-    rt_torque_pub_ =
+    cmd_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
+        "/joint_position_target_to_mcu", rclcpp::SensorDataQoS());
+    rt_cmd_pub_ =
         std::make_unique<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(
-            torque_pub_);
+            cmd_pub_);
 
     RCLCPP_INFO(this->get_logger(),
-                "[OK] Effort publisher created: /effort_controller/commands (RT, BestEffort)");
+                "[OK] Command publisher created: /joint_position_target_to_mcu "
+                "(RT, BestEffort; data[0..5]=q_target rad, data[6]=gripper signal)");
 
     gripper_service_ = this->create_service<arv_v1_interfaces::srv::GripperControl>(
         "/gripper_control", std::bind(&TorqueControllerActionServer::gripperControlCallback, this,
@@ -400,9 +401,9 @@ private:
 
   size_t control_loop_count_ = 0;
   rclcpp::TimerBase::SharedPtr control_timer_;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr torque_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr cmd_pub_;
   std::unique_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>
-      rt_torque_pub_;
+      rt_cmd_pub_;
   LoopProfiler loop_prof_;  // timing instrumentation
   std::chrono::steady_clock::time_point last_control_loop_entry_;
   std::atomic<uint64_t> torque_publish_count_{0};
@@ -519,7 +520,7 @@ private:
     // 1. Send zero torque immediately
     std_msgs::msg::Float64MultiArray safe_msg;
     safe_msg.data.resize(kAllJoints, 0.0);
-    torque_pub_->publish(safe_msg);
+    cmd_pub_->publish(safe_msg);
     torque_publish_count_++;
 
     // 2. Execute complete recovery ceremony
@@ -1218,7 +1219,7 @@ bool TorqueControllerActionServer::safeTorquePublish(const KDL::JntArray &tau_ar
   msg.data[kArmJoints] = std::clamp(gripper_force, -gripper_max_torque_, gripper_max_torque_);
   // data[7] = seq id (单调递增 uint8 回卷, hardware 侧用来检测重复/跳序 callback)
   msg.data[kAllJoints] = static_cast<double>(torque_seq_++ & 0xFF);
-  rt_torque_pub_->try_publish(msg);
+  rt_cmd_pub_->try_publish(msg);
   torque_publish_count_++;
   for (int i = 0; i < kAllJoints; i++) {
     last_valid_torque_[i] = msg.data[i];
@@ -1226,8 +1227,8 @@ bool TorqueControllerActionServer::safeTorquePublish(const KDL::JntArray &tau_ar
   return true;
 }
 
-// route_mode 路径: 不算 PID/阻抗/G, 仅采当前 q_target 转发到 effort topic
-// effort_msg.data[0..5] 语义 = q_target(rad), data[6] = gripper, data[7] = seq
+// route_mode 路径: 不算 PID/阻抗/G, 仅采当前 q_target 转发到 cmd topic
+// pos_target_msg.data[0..5] 语义 = q_target(rad), data[6] = gripper, data[7] = seq
 // MCU 端配合: 收到 0x0002 后解析 data[0..5] 为 q_target, 用本地 K/D 跑闭环
 // 锁顺序遵守: action_mutex_ → state_mutex_ → gripper_mutex_
 void TorqueControllerActionServer::routeTargetToHardware() {
@@ -1332,7 +1333,7 @@ void TorqueControllerActionServer::routeTargetToHardware() {
   }
   msg.data[kArmJoints] = std::clamp(gripper_force_copy, -gripper_max_torque_, gripper_max_torque_);
   msg.data[kAllJoints] = static_cast<double>(torque_seq_++ & 0xFF);
-  rt_torque_pub_->try_publish(msg);
+  rt_cmd_pub_->try_publish(msg);
   torque_publish_count_++;
 }
 
@@ -1469,7 +1470,7 @@ void TorqueControllerActionServer::controlLoop() {
       path_name = "RELAX";
       {
         const auto t0 = Clock::now();
-        rt_torque_pub_->try_publish(zero_msg_preallocated_);
+        rt_cmd_pub_->try_publish(zero_msg_preallocated_);
         torque_publish_count_++;
         pub_us = std::chrono::duration_cast<us>(Clock::now() - t0).count();
       }
@@ -1728,7 +1729,7 @@ rcl_interfaces::msg::SetParametersResult TorqueControllerActionServer::parameter
     if (name == "route_mode") {
       route_mode_ = param.as_bool();
       RCLCPP_WARN(this->get_logger(),
-                  "[ROUTE_MODE] dynamically set to %s — effort_topic data[0..5] = %s",
+                  "[ROUTE_MODE] dynamically set to %s — cmd_topic data[0..5] = %s",
                   route_mode_.load() ? "ENABLED" : "DISABLED",
                   route_mode_.load() ? "q_target(rad)" : "tau(Nm)");
     } else if (name == "kalman.enabled") {

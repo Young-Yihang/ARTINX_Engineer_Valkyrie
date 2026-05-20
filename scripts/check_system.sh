@@ -21,7 +21,7 @@ SAMPLE_TIME=3
 
 # --- 可配置参数 (改频率只改这里) ---
 CONTROL_RATE_HZ=1000      # /joint_states 期望频率 (Hz)
-EFFORT_RATE_HZ=1000       # /effort_controller/commands 期望频率 (Hz)
+EFFORT_RATE_HZ=1000       # /joint_position_target_to_mcu 期望频率 (Hz)
 JITTER_WARN_MS=0.2        # 抖动警告阈值 (ms), 1kHz周期=1ms
 RT_CORE=3                 # RT-PREEMPT 隔离核心编号
 
@@ -337,8 +337,8 @@ log_section "2. 话题与通信质量"
 update_loading "采样 /joint_states"
 check_hz_silently "/joint_states" $CONTROL_RATE_HZ "关节状态"
 
-update_loading "采样 /effort_controller/commands"
-check_hz_silently "/effort_controller/commands" $EFFORT_RATE_HZ "力矩指令"
+update_loading "采样 /joint_position_target_to_mcu"
+check_hz_silently "/joint_position_target_to_mcu" $EFFORT_RATE_HZ "MCU 指令"
 
 # --- 步骤 3: 错误扫描 ---
 update_loading "分析系统日志"

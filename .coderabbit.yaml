@@ -37,7 +37,7 @@ reviews:
       instructions: |
         接口层。review 重点：
         - Seasky 协议 CmdID / payload 尺寸不可随意修改（需 MCU 固件同步）
-        - /effort_controller/commands 必须是 7 元素 Float64MultiArray
+        - /joint_position_target_to_mcu 必须是 7 元素 Float64MultiArray ([0..5]=q_target rad, [6]=gripper signal)
         - /joint_states 必须是 7 关节
         - MuJoCo 渲染相关改动注意线程安全（OpenGL context）
     - path: "arv_v1_moveit/src/application/**"
@@ -45,7 +45,6 @@ reviews:
         应用层节点。review 重点：
         - 不应直接依赖接口层
         - 轨迹执行需要有超时和取消机制
-        - ncurses TUI 改动注意终端状态恢复
     - path: "arv_v1_moveit/config/**"
       instructions: |
         YAML 配置文件。检查：

@@ -97,10 +97,12 @@ public:
           std::bind(&MuJoCoInterfaceNode::jointStateCallback, this, std::placeholders::_1));
       RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /joint_states (digital twin)");
     } else {
-      effort_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
-          "/effort_controller/commands", rclcpp::SensorDataQoS(),
-          std::bind(&MuJoCoInterfaceNode::effortCallback, this, std::placeholders::_1));
-      RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /effort_controller/commands");
+      cmd_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
+          "/joint_position_target_to_mcu", rclcpp::SensorDataQoS(),
+          std::bind(&MuJoCoInterfaceNode::cmdCallback, this, std::placeholders::_1));
+      // NOTE: MuJoCo MJCF actuator 仍是 <motor> 类型, route_mode 下 sim 把 position 值
+      //       当 torque 喂给 actuator, 仿真行为与真机 (MCU 跑位置环) 不一致. Sim 仅可信几何/碰撞.
+      RCLCPP_INFO(this->get_logger(), "[OK] Subscribing: /joint_position_target_to_mcu");
 
       joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
           "/joint_states", rclcpp::SensorDataQoS());
@@ -170,7 +172,7 @@ private:
   mjData *data_;
 
   // ========== ROS2 ==========
-  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr effort_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr cmd_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;  // digital-twin
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::TimerBase::SharedPtr sim_timer_;
@@ -266,7 +268,7 @@ private:
   void setInitialPose();
   std::string buildObstacleMJCF();
   std::string loadObstacleURDF(const std::string &id, const std::string &urdf_uri);
-  void effortCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+  void cmdCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
   void simulationStep();
   void publishJointStates();
@@ -985,9 +987,9 @@ std::string MuJoCoInterfaceNode::buildObstacleMJCF() {
   return mjcf.str();
 }
 
-void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+void MuJoCoInterfaceNode::cmdCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
   if (msg->data.size() != static_cast<size_t>(kAllJoints)) {
-    RCLCPP_ERROR(this->get_logger(), "[ERROR] Torque array size mismatch! Expected %d, got %zu",
+    RCLCPP_ERROR(this->get_logger(), "[ERROR] Command array size mismatch! Expected %d, got %zu",
                  kAllJoints, msg->data.size());
     return;
   }
@@ -995,7 +997,7 @@ void MuJoCoInterfaceNode::effortCallback(const std_msgs::msg::Float64MultiArray:
   if (!received_first_command_) {
     received_first_command_ = true;
     RCLCPP_INFO(this->get_logger(),
-                "[OK] First torque command received, MuJoCo simulation started");
+                "[OK] First joint command received, MuJoCo simulation started");
   }
 
   command_rx_count_++;

@@ -2,9 +2,9 @@
 # Observe ARV dataflow topic frequency without starting or stopping nodes.
 #
 # Focus:
-#   /joint_states                 hardware -> controller feedback
-#   /effort_controller/commands   controller -> hardware torque command
-#   /hardware_link_diag           hardware TX/RX link counters/rates
+#   /joint_states                       hardware -> controller feedback
+#   /joint_position_target_to_mcu       controller -> hardware cmd (pos+gripper)
+#   /hardware_link_diag                 hardware TX/RX link counters/rates
 
 set -euo pipefail
 
@@ -14,7 +14,7 @@ WINDOW=10000
 OUT_DIR=""
 
 JOINT_TOPIC="/joint_states"
-EFFORT_TOPIC="/effort_controller/commands"
+EFFORT_TOPIC="/joint_position_target_to_mcu"
 LINK_TOPIC="/hardware_link_diag"
 
 usage() {
@@ -74,7 +74,7 @@ ENV_LOG="$OUT_DIR/environment.txt"
 NODE_LOG="$OUT_DIR/nodes.txt"
 TOPIC_LOG="$OUT_DIR/topics.txt"
 JOINT_HZ_LOG="$OUT_DIR/joint_states_hz.log"
-EFFORT_HZ_LOG="$OUT_DIR/effort_commands_hz.log"
+EFFORT_HZ_LOG="$OUT_DIR/joint_position_target_to_mcu_hz.log"
 LINK_ECHO_LOG="$OUT_DIR/hardware_link_diag.log"
 TOP_LOG="$OUT_DIR/top.log"
 
@@ -255,7 +255,7 @@ MONITOR_PIDS=()
   printf 'DATAFLOW_VERIFY_WINDOW=%s\n' "$WINDOW"
   printf '\n--- topic frequency summary ---\n'
   summarize_hz_log "joint_states" "$JOINT_HZ_LOG" 1000
-  summarize_hz_log "effort_controller_commands" "$EFFORT_HZ_LOG" 1000
+  summarize_hz_log "joint_position_target_to_mcu" "$EFFORT_HZ_LOG" 1000
   printf '\n--- hardware link summary ---\n'
   summarize_link_diag "$LINK_ECHO_LOG"
   printf '\n--- latest joint_states hz ---\n'

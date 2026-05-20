@@ -7,11 +7,13 @@ ARV_V1 重力补偿全自动标定
 全自动流程:
   1. 发 /joint_position_target 移臂到目标 (q2,q3)
   2. 等静止 (J2/J3 速度 < 阈值持续 2s)
-  3. 采集 2s 的 /effort_controller/commands J2 分量
+  3. 采集 2s 的 /joint_position_target_to_mcu J2 分量
   4. 下一个点
   5. 最小二乘拟合 A,C,D
 
 前提: 系统已启动，ARMED hold 模式
+注意: route_mode=true 时该 topic 载荷是 q_target(rad) 而非 tau(Nm),
+      本脚本仅在 route_mode=false (原始力矩控制路径) 下产出有效标定.
 
 用法:
   python3 gravity_calibration.py           # 全自动
@@ -53,7 +55,7 @@ class CalibNode(Node):
         self._eff = None
         self._lock = threading.Lock()
         self.create_subscription(JointState, "/joint_states", self._js_cb, 10)
-        self.create_subscription(Float64MultiArray, "/effort_controller/commands", self._eff_cb, 10)
+        self.create_subscription(Float64MultiArray, "/joint_position_target_to_mcu", self._eff_cb, 10)
         self.target_pub = self.create_publisher(Float64MultiArray, "/joint_position_target", 10)
 
     def _js_cb(self, msg):

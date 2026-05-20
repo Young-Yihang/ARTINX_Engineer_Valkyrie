@@ -2,7 +2,10 @@
 """
 力矩方向验证脚本 — 逐关节发 1Nm，观察编码器响应
 用法: python3 torque_test.py
-前提: 只启动 hardware_interface_node (force_zero_torque:=false)
+前提:
+  - 只启动 hardware_interface_node (force_zero_torque:=false)
+  - 上位机/MCU 处于 route_mode=false 的力矩模式 (默认 route_mode=true 时该
+    topic 载荷被 MCU 解释为 q_target rad, 1.0 会被当成位置目标而非 1Nm).
 """
 
 import rclpy
@@ -24,7 +27,7 @@ JOINT_NAMES = ['J1(腰)', 'J2(肩)', 'J3(肘)', 'J4(腕旋)', 'J5(腕摆)', 'J6(
 class TorqueTestNode(Node):
     def __init__(self):
         super().__init__('torque_test')
-        self.pub = self.create_publisher(Float64MultiArray, '/effort_controller/commands', 10)
+        self.pub = self.create_publisher(Float64MultiArray, '/joint_position_target_to_mcu', 10)
         self.latest_js = None
         self.sub = self.create_subscription(JointState, '/joint_states', self.js_cb, 10)
         signal.signal(signal.SIGINT, self.emergency_stop)
