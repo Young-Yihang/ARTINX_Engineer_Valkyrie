@@ -338,8 +338,7 @@ add_executable(mission_executor_node
 
 target_link_libraries(mission_executor_node
   ${rclcpp_LIBRARIES}
-  yaml-cpp  # For reading trajectory info
-  ncursesw  # Wide-char ncurses, 支持 UTF-8 中文显示
+  yaml-cpp
 )
 
 ament_target_dependencies(mission_executor_node
