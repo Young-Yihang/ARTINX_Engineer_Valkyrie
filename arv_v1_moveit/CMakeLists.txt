@@ -350,29 +350,6 @@ ament_target_dependencies(mission_executor_node
   ament_index_cpp
 )
 
-# -------------------------------------------
-# Scene Manager Node (Application Layer - 障碍物场景管理)
-add_executable(scene_manager_node
-  src/application/scene_manager_node.cpp
-)
-
-target_link_libraries(scene_manager_node
-  ${rclcpp_LIBRARIES}
-  yaml-cpp  # 直接读取 collision_shapes (ROS2 params 不支持嵌套列表)
-)
-
-ament_target_dependencies(scene_manager_node
-  rclcpp
-  geometry_msgs
-  tf2
-  urdf
-  ament_index_cpp
-  moveit_ros_planning_interface
-  geometric_shapes
-  shape_msgs
-  std_srvs
-)
-
 # ============= 4. 安装 =============
 
 # 安装可执行文件和库
@@ -389,7 +366,6 @@ install(TARGETS
   trajectory_manager_node    # ← 轨迹管理节点
   cartesian_controller_node  # ← 笛卡尔坐标控制节点
   mission_executor_node      # ← Application Layer Node
-  scene_manager_node         # ← 障碍物场景管理节点
   DESTINATION lib/${PROJECT_NAME}
 )
 

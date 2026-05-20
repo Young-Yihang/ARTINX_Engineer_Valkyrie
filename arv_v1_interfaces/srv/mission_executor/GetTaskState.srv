@@ -1,8 +1,0 @@
-# GetTaskState.srv - 获取当前任务状态
-# 请求
-# (无参数)
----
-# 响应
-string state                             # 当前状态: IDLE, READY, EXECUTING
-string current_action                    # 当前加载的动作名称
-string[] available_actions               # 可用的动作列表
