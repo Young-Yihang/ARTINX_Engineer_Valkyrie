@@ -177,7 +177,7 @@ class PanelNode(Node):
             t = time.time() - self.teach_start_wall
             with self._lock:
                 self.teach_gripper_events.append((t, cmd))
-        req = GripperControl.Request(); req.torque = float(force)
+        req = GripperControl.Request(); req.force = float(force)
         res = self._wait_future(self.gripper_cli.call_async(req), 3.0)
         return ("OK" if res.success else res.message) if res else "timeout"
 

@@ -540,15 +540,15 @@ private:
 
   // --- Gripper ---
 
-  void sendGripperAsync(double torque) {
+  void sendGripperAsync(double force) {
     auto req = std::make_shared<GripperControl::Request>();
-    req->torque = torque;
+    req->force = force;
     gripper_client_->async_send_request(
-        req, [this, torque](rclcpp::Client<GripperControl>::SharedFuture fut) {
+        req, [this, force](rclcpp::Client<GripperControl>::SharedFuture fut) {
           try {
             auto res = fut.get();
             if (res->success)
-              RCLCPP_INFO(get_logger(), "Gripper: %.0f N", torque);
+              RCLCPP_INFO(get_logger(), "Gripper: %.0f N", force);
             else
               RCLCPP_ERROR(get_logger(), "Gripper fail: %s", res->message.c_str());
           } catch (const std::exception& e) {
@@ -557,14 +557,14 @@ private:
         });
   }
 
-  bool sendGripperSync(double torque) {
+  bool sendGripperSync(double force) {
     auto req = std::make_shared<GripperControl::Request>();
-    req->torque = torque;
+    req->force = force;
     auto fut = gripper_client_->async_send_request(req);
     if (fut.wait_for(5s) == std::future_status::ready) {
       auto res = fut.get();
       if (res->success) {
-        RCLCPP_INFO(get_logger(), "Gripper: %.0f N", torque);
+        RCLCPP_INFO(get_logger(), "Gripper: %.0f N", force);
         return true;
       }
       RCLCPP_ERROR(get_logger(), "Gripper fail: %s", res->message.c_str());
@@ -594,8 +594,8 @@ private:
     for (size_t i = 0; i < times.size(); i++) {
       auto target = start + std::chrono::duration<double>(times[i]);
       std::this_thread::sleep_until(target);
-      auto torque = parseGripperAction(commands[i]);
-      if (torque) sendGripperSync(*torque);
+      auto force = parseGripperAction(commands[i]);
+      if (force) sendGripperSync(*force);
     }
   }
 };

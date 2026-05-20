@@ -189,12 +189,12 @@ public:
     double gripper_limit =
         this->get_parameter("safety.max_torque_per_joint.joint_gripper1").as_double();
     if (gripper_limit > 0) {
-      gripper_max_torque_ = gripper_limit;
+      gripper_max_force_ = gripper_limit;
     }
 
     RCLCPP_INFO(this->get_logger(),
                 "[SAFETY] Timeout: %.0f ms, Velocity sanity: %.1f rad/s, Gripper limit: %.1f N",
-                joint_state_timeout_sec_ * 1000.0, max_velocity_sanity_, gripper_max_torque_);
+                joint_state_timeout_sec_ * 1000.0, max_velocity_sanity_, gripper_max_force_);
 
     this->declare_parameter("payload.enabled", false);
     this->declare_parameter("payload.mass", 0.447);
@@ -454,8 +454,8 @@ private:
 
   // 夹爪控制 (prismatic joint, 单位: N)
   std::mutex gripper_mutex_;
-  double gripper_torque_cmd_ = 0.0;   // 当前夹爪力指令 (N)
-  double gripper_max_torque_ = 70.0;  // 夹爪力限幅 (N), 从yaml覆盖
+  double gripper_force_cmd_ = 0.0;   // 当前夹爪力指令 (N)
+  double gripper_max_force_ = 70.0;  // 夹爪力限幅 (N), 从yaml覆盖
   rclcpp::Service<arv_v1_interfaces::srv::GripperControl>::SharedPtr gripper_service_;
 
   // --- 载荷重力补偿: τ_payload = J(q)^T × [0,0,-mg,0,0,0] ---
@@ -603,11 +603,11 @@ private:
       const std::shared_ptr<arv_v1_interfaces::srv::GripperControl::Request> request,
       std::shared_ptr<arv_v1_interfaces::srv::GripperControl::Response> response) {
     std::lock_guard<std::mutex> lock(gripper_mutex_);
-    double clamped = std::clamp(request->torque, -gripper_max_torque_, gripper_max_torque_);
-    gripper_torque_cmd_ = clamped;
+    double clamped = std::clamp(request->force, -gripper_max_force_, gripper_max_force_);
+    gripper_force_cmd_ = clamped;
     response->success = true;
-    response->message = "Gripper torque set to " + std::to_string(clamped) + " Nm";
-    RCLCPP_INFO(this->get_logger(), "[GRIPPER] Torque command: %.3f Nm", clamped);
+    response->message = "Gripper force set to " + std::to_string(clamped) + " N";
+    RCLCPP_INFO(this->get_logger(), "[GRIPPER] Force command: %.3f N", clamped);
   }
 
   void controlModeCallback(const std_msgs::msg::UInt8::SharedPtr msg) {
@@ -1216,7 +1216,7 @@ bool TorqueControllerActionServer::safeTorquePublish(const KDL::JntArray &tau_ar
       updateMaxAtomic(torque_saturation_max_milli_, static_cast<uint64_t>(exceed * 1000.0));
     }
   }
-  msg.data[kArmJoints] = std::clamp(gripper_force, -gripper_max_torque_, gripper_max_torque_);
+  msg.data[kArmJoints] = std::clamp(gripper_force, -gripper_max_force_, gripper_max_force_);
   // data[7] = seq id (单调递增 uint8 回卷, hardware 侧用来检测重复/跳序 callback)
   msg.data[kAllJoints] = static_cast<double>(torque_seq_++ & 0xFF);
   rt_cmd_pub_->try_publish(msg);
@@ -1324,14 +1324,14 @@ void TorqueControllerActionServer::routeTargetToHardware() {
   double gripper_force_copy;
   {
     std::lock_guard<std::mutex> glock(gripper_mutex_);
-    gripper_force_copy = gripper_torque_cmd_;
+    gripper_force_copy = gripper_force_cmd_;
   }
 
   auto &msg = torque_msg_preallocated_;
   for (int i = 0; i < kArmJoints; i++) {
     msg.data[i] = std::isfinite(q_target_out(i)) ? q_target_out(i) : q_copy(i);
   }
-  msg.data[kArmJoints] = std::clamp(gripper_force_copy, -gripper_max_torque_, gripper_max_torque_);
+  msg.data[kArmJoints] = std::clamp(gripper_force_copy, -gripper_max_force_, gripper_max_force_);
   msg.data[kAllJoints] = static_cast<double>(torque_seq_++ & 0xFF);
   rt_cmd_pub_->try_publish(msg);
   torque_publish_count_++;
@@ -1505,7 +1505,7 @@ void TorqueControllerActionServer::controlLoop() {
     double gripper_force_copy;
     {
       std::lock_guard<std::mutex> glock(gripper_mutex_);
-      gripper_force_copy = gripper_torque_cmd_;
+      gripper_force_copy = gripper_force_cmd_;
     }
 
     // --- SAFETY: Check joint state timeout ---
@@ -1663,7 +1663,7 @@ void TorqueControllerActionServer::controlLoop() {
   double grip_force;
   {
     std::lock_guard<std::mutex> glock(gripper_mutex_);
-    grip_force = gripper_torque_cmd_;
+    grip_force = gripper_force_cmd_;
   }
 
   // --- TRACK: M(q_d)*q̈_d + C(q_d,q̇_d) + G(q) + friction + PD + payload ---

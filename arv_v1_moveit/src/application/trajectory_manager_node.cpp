@@ -425,23 +425,23 @@ private:
     for (size_t i = 0; i < times.size(); ++i) {
       auto target = start + std::chrono::duration<double>(times[i]);
       std::this_thread::sleep_until(target);
-      double torque;
+      double force;
       if (commands[i] == "open")
-        torque = -70.0;
+        force = -70.0;
       else if (commands[i] == "close")
-        torque = 70.0;
+        force = 70.0;
       else if (commands[i] == "stop")
-        torque = 0.0;
+        force = 0.0;
       else
         continue;
 
       auto req = std::make_shared<GripperControl::Request>();
-      req->torque = torque;
+      req->force = force;
       auto fut = gripper_client_->async_send_request(req);
       if (fut.wait_for(std::chrono::seconds(3)) == std::future_status::ready) {
         auto res = fut.get();
         RCLCPP_INFO(this->get_logger(), "[Gripper] t=%.2fs %s (%.0f N)", times[i],
-                    commands[i].c_str(), torque);
+                    commands[i].c_str(), force);
         (void)res;
       } else {
         RCLCPP_ERROR(this->get_logger(), "[Gripper] timeout at t=%.2fs", times[i]);

@@ -1,6 +1,11 @@
-# 夹爪力矩控制
-# 正值=夹紧方向, 负值=松开方向, 0=停止
-float64 torque
+# Gripper force command.
+# Field unit is Newton (gripper is a prismatic joint; sign maps to direction).
+#   force > 0   → close direction (GRIP, hardware fires CmdID 0x0004 with GRIP)
+#   force < 0   → open direction (RELEASE)
+#   force = 0   → STOP
+# 上位机 clamp 到 [-gripper_max_torque_, +gripper_max_torque_] (controller_params yaml).
+# 字段历史叫 torque (字段名误导, 实际是 N), 现统一改名.
+float64 force
 ---
 bool success
 string message
