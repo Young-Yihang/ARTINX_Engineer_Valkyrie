@@ -618,10 +618,10 @@ private:
     }
     const int64_t cache_us = std::chrono::duration_cast<us>(Clock::now() - t_cache0).count();
 
-    // ── 发送力矩包 ──
-    SerialProtocol::TorqueCommand cmd;
+    // ── 发送 0x0002 包 (载荷 = 6×q_target rad, byte 布局历史叫 torque) ──
+    SerialProtocol::JointPositionTarget cmd;
     for (size_t i = 0; i < SerialProtocol::NUM_ARM_JOINTS; ++i) {
-      cmd.torques[i] = cmd_to_send[i];
+      cmd.positions[i] = cmd_to_send[i];
     }
 
     auto sendRaw = [&](const std::vector<uint8_t> &pkt) -> int64_t {
@@ -651,7 +651,7 @@ private:
     };
 
     const auto t_build_cmd0 = Clock::now();
-    const auto cmd_packet = SerialProtocol::buildTorquePacket(cmd);
+    const auto cmd_packet = SerialProtocol::buildPositionTargetPacket(cmd);
     const int64_t build_cmd_us =
         std::chrono::duration_cast<us>(Clock::now() - t_build_cmd0).count();
     const int64_t send_cmd_us = sendRaw(cmd_packet);
