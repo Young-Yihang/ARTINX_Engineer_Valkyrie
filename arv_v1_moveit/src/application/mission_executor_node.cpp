@@ -258,12 +258,11 @@ private:
         return;
       case 0x02:
         RCLCPP_INFO(get_logger(), "[HW] RESET_HOME");
-        triggerTaskAbort();
         resetToIdle();
         return;
       case 0x31:
         RCLCPP_WARN(get_logger(), "[HW] ABORT_TASK");
-        triggerTaskAbort();
+        triggerTaskAbortAndWait();
         return;
       case 0x40:
         RCLCPP_INFO(get_logger(), "[HW] GRIPPER_CMD param=%u", param);
@@ -357,6 +356,10 @@ private:
     if (control_mode_ != ControlMode::ARMED) {
       RCLCPP_WARN(get_logger(), "[Binding] '%s' rejected: not ARMED", key.c_str());
       return;
+    }
+    // 防御: 残留 abort flag 静默吞掉新 binding 是历史 bug, 留个 warning 指纹
+    if (task_abort_requested_.exchange(false)) {
+      RCLCPP_WARN(get_logger(), "[Binding] stale abort flag cleared at start of '%s'", key.c_str());
     }
     {
       std::lock_guard<std::mutex> lk(active_mu_);
@@ -490,8 +493,27 @@ private:
     task_cv_.notify_all();
   }
 
-  void emergencyStop() {
+  // set abort flag, 等 binding 线程退出后清 flag.
+  // 用于无 follow-up reset 路径的 abort 入口 (ABORT_TASK, ESTOP), 防止 flag 残留污染下一个 binding.
+  void triggerTaskAbortAndWait() {
     triggerTaskAbort();
+    {
+      std::lock_guard<std::mutex> lk(active_mu_);
+      if (!active_task_) {
+        task_abort_requested_ = false;
+        return;
+      }
+    }
+    for (int i = 0; i < 100; ++i) {
+      std::this_thread::sleep_for(50ms);
+      std::lock_guard<std::mutex> lk(active_mu_);
+      if (!active_task_) break;
+    }
+    task_abort_requested_ = false;
+  }
+
+  void emergencyStop() {
+    triggerTaskAbortAndWait();
     executing_ = false;
     last_sequence_completed_ = false;
     publishControlMode(ControlMode::RELAX);
@@ -504,7 +526,9 @@ private:
       return;
     }
 
-    // 让正在跑的 binding 退出 (triggerTaskAbort 已 set, 这里等线程出来)
+    triggerTaskAbort();
+
+    // 让正在跑的 binding 退出
     for (int i = 0; i < 100; ++i) {
       std::this_thread::sleep_for(50ms);
       std::lock_guard<std::mutex> lk(active_mu_);
