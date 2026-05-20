@@ -1,7 +1,5 @@
-/**
- * @file Crc.cpp
- * @brief CRC8/CRC16 computation and verification for Seasky serial protocol
- */
+/// @file Crc.cpp
+/// @brief CRC8/CRC16 lookup tables and helpers for Seasky serial protocol.
 #include "Crc.hpp"
 
 const uint8_t Crc::CRC8_INIT = 0xFF;

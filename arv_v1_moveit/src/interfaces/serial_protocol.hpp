@@ -19,11 +19,11 @@ constexpr uint8_t SOF = 0xA5;
 //     0x0002 历史叫 TORQUE_CONTROL, 实际上现在 (route_mode=true) 载荷是
 //     joint position target (rad). 字节布局没变 (6×float = 24B), 仅 PC 端
 //     命名跟上语义. MCU 固件那侧字段仍可能叫 torques, 不影响互通.
-constexpr uint16_t CMD_JOINT_FEEDBACK = 0x0001;          // RX 7-joint state 1kHz
-constexpr uint16_t CMD_JOINT_POSITION_TARGET = 0x0002;   // TX 6-axis q_target rad 1kHz
-constexpr uint16_t CMD_GRIPPER_CONTROL = 0x0004;         // TX gripper flag 50Hz
-constexpr uint16_t CMD_TASK_COMMAND = 0x0005;            // RX task cmd 3B
-constexpr uint16_t CMD_ARM_STATUS = 0x0006;              // TX arm status 4B 10Hz
+constexpr uint16_t CMD_JOINT_FEEDBACK = 0x0001;         // RX 7-joint state 1kHz
+constexpr uint16_t CMD_JOINT_POSITION_TARGET = 0x0002;  // TX 6-axis q_target rad 1kHz
+constexpr uint16_t CMD_GRIPPER_CONTROL = 0x0004;        // TX gripper flag 50Hz
+constexpr uint16_t CMD_TASK_COMMAND = 0x0005;           // RX task cmd 3B
+constexpr uint16_t CMD_ARM_STATUS = 0x0006;             // TX arm status 4B 10Hz
 
 constexpr size_t NUM_ARM_JOINTS = 6;
 constexpr size_t NUM_ALL_JOINTS = 7;  // arm + gripper

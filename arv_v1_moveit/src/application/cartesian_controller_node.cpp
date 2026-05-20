@@ -326,8 +326,8 @@ void CartesianControllerNode::moveToCartesianCallback(
           }
         }
       }
-      response->message = "IK failed at step " + std::to_string(step) + "/" +
-                          std::to_string(N) + " t=" + std::to_string(t).substr(0, 4) +
+      response->message = "IK failed at step " + std::to_string(step) + "/" + std::to_string(N) +
+                          " t=" + std::to_string(t).substr(0, 4) +
                           (diag.empty() ? " (unreachable)" : " limit:" + diag);
       RCLCPP_WARN(this->get_logger(), "[LIN] %s", response->message.c_str());
       return;

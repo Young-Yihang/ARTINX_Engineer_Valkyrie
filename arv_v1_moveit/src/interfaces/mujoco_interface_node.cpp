@@ -46,12 +46,10 @@ public:
     visualization_only_ = !sim_mode_ || viz_only_explicit;
 
     if (visualization_only_) {
-      RCLCPP_INFO(this->get_logger(),
-                  "[MODE] Digital Twin (sim_mode=%s, no scene obstacles)",
+      RCLCPP_INFO(this->get_logger(), "[MODE] Digital Twin (sim_mode=%s, no scene obstacles)",
                   sim_mode_ ? "true" : "false");
     } else {
-      RCLCPP_INFO(this->get_logger(),
-                  "[MODE] Physics Simulation (sim_mode=true, full scene)");
+      RCLCPP_INFO(this->get_logger(), "[MODE] Physics Simulation (sim_mode=true, full scene)");
     }
 
     try {
@@ -167,21 +165,21 @@ public:
   }
 
 private:
-  // ========== MuJoCo ==========
+  // --- MuJoCo ---
   mjModel *model_;
   mjData *data_;
 
-  // ========== ROS2 ==========
+  // --- ROS2 ---
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr cmd_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;  // digital-twin
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::TimerBase::SharedPtr sim_timer_;
 
-  // ========== 运行模式 ==========
+  // --- 运行模式 ---
   bool sim_mode_;            // true=full sim with scene, false=digital-twin (no scene)
   bool visualization_only_;  // true=digital-twin, false=physics-sim
 
-  // ========== 配置 ==========
+  // --- 配置 ---
   std::string pkg_share_dir_;
   std::string urdf_path_;
   std::string mesh_dir_;
@@ -189,7 +187,7 @@ private:
   double sim_frequency_;
   std::string scene_config_path_;  // scene_obstacles.yaml path
 
-  // ========== 可视化 ==========
+  // --- 可视化 ---
   std::thread render_thread_;
   std::atomic<bool> render_running_;
 
@@ -200,20 +198,20 @@ private:
   mjrContext con_;
   std::mutex sim_mutex_;
 
-  // ========== 启动安全 ==========
+  // --- 启动安全 ---
   std::atomic<bool> received_first_command_;
 
-  // ========== Health monitoring ==========
+  // --- Health monitoring ---
   std::atomic<uint64_t> sim_step_count_{0};
   std::atomic<uint64_t> command_rx_count_{0};
   rclcpp::TimerBase::SharedPtr health_timer_;
 
-  // ========== 关节 ==========
+  // --- 关节 ---
   const std::vector<std::string> joint_names_ = {"joint_1",        "joint_2",       "joint_3",
                                                  "joint_4",        "joint_5",       "joint_6",
                                                  "joint_gripper1", "joint_gripper2"};
 
-  // ========== 磁力吸引 ==========
+  // --- 磁力吸引 ---
   // 恒力模型: 矿核指向六边形中心, 被棍子碰撞挡住 → 无穿越振荡
   struct MagnetAnchor {
     int body_id;
@@ -226,7 +224,7 @@ private:
   double magnet_force_default_ = 14.4;  // mg + 10N
   double magnet_detach_dist_ = 0.25;    // core~0.11m离中心, 留余量
 
-  // ========== 交互状态 ==========
+  // --- 交互状态 ---
   bool button_left_ = false;
   bool button_middle_ = false;
   bool button_right_ = false;
@@ -238,7 +236,7 @@ private:
   bool show_contacts_ = false;
   bool show_forces_ = false;
 
-  // ========== 笛卡尔目标可视化 ==========
+  // --- 笛卡尔目标可视化 ---
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr cartesian_target_sub_;
   std::mutex target_pose_mutex_;  // 保护 target_pose_ (renderLoop读, callback写)
   geometry_msgs::msg::PoseStamped target_pose_;
@@ -644,7 +642,8 @@ void MuJoCoInterfaceNode::applyMagnetForces() {
         ma.body_id, ma.anchor[0], ma.anchor[1], ma.anchor[2], xpos[0], xpos[1], xpos[2], dist,
         ma.force_mag);
 
-    // [SAFETY] 前200步不检测脱离, 防止初始碰撞弹力误触发
+    // [SAFETY] skip detach check for first 200 steps — avoids false trigger from initial
+    // spring-back.
     if (dist > ma.detach_dist && sim_step_count_ > 200) {
       ma.detached = true;
       data_->xfrc_applied[6 * ma.body_id + 0] = 0;
@@ -996,8 +995,7 @@ void MuJoCoInterfaceNode::cmdCallback(const std_msgs::msg::Float64MultiArray::Sh
 
   if (!received_first_command_) {
     received_first_command_ = true;
-    RCLCPP_INFO(this->get_logger(),
-                "[OK] First joint command received, MuJoCo simulation started");
+    RCLCPP_INFO(this->get_logger(), "[OK] First joint command received, MuJoCo simulation started");
   }
 
   command_rx_count_++;
@@ -1042,7 +1040,7 @@ void MuJoCoInterfaceNode::simulationStep() {
   applyMagnetForces();
   mj_step(model_, data_);
 
-  // [SAFETY] NaN检测 (仅日志, TODO: 调试后恢复重置)
+  // [SAFETY] NaN check (log-only). [TODO] restore reset path after sim debugging.
   if (data_->warning[mjWARN_BADQACC].number > 0) {
     RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000,
                           "[SAFETY] QACC NaN detected (count=%d) — reset DISABLED for debug",
@@ -1200,7 +1198,7 @@ void MuJoCoInterfaceNode::renderLoop() {
   RCLCPP_INFO(this->get_logger(), "[INFO] Render loop ended");
 }
 
-// ========== GLFW callbacks ==========
+// --- GLFW callbacks ---
 
 void MuJoCoInterfaceNode::mouseButtonCallback(GLFWwindow *window, int button, int action,
                                               int mods) {
@@ -1454,7 +1452,7 @@ void MuJoCoInterfaceNode::healthCheck() {
   last_cmd_count = current_cmds;
 }
 
-// ========== main ==========
+// --- main ---
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);

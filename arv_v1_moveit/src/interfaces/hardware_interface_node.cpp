@@ -1,5 +1,6 @@
 /// @file hardware_interface_node.cpp
-/// @brief Hardware USB CDC interface — TX cmd (position+gripper)/RX joint states via Seasky protocol.
+/// @brief Hardware USB CDC interface — TX cmd (position+gripper)/RX joint states via Seasky
+/// protocol.
 #include <atomic>
 #include <chrono>
 #include <climits>
@@ -114,7 +115,8 @@ public:
   ~HardwareInterfaceNode() {
     running_ = false;
 
-    // [FIX] 锁内 swap-out 端口，锁外 close，避免持锁阻塞导致 receiveLoop 死锁
+    // [FIX] swap-out port under lock, close outside lock — holding the lock during
+    //       close would deadlock receiveLoop.
     decltype(serial_port_) port_to_close;
     {
       std::lock_guard<std::mutex> slock(serial_mutex_);
@@ -155,7 +157,7 @@ private:
   std::unique_ptr<drivers::common::IoContext> io_ctx_;
   std::unique_ptr<drivers::serial_driver::SerialDriver> serial_driver_;
   std::shared_ptr<drivers::serial_driver::SerialPort> serial_port_;
-  std::mutex serial_mutex_;  // [FIX] 保护 serial_port_ 跨线程操作 (RX/TX/析构)
+  std::mutex serial_mutex_;  // [FIX] guards serial_port_ across RX / TX / dtor threads.
   std::thread receive_thread_;
   std::thread link_diag_thread_;
 
@@ -220,8 +222,8 @@ private:
     int64_t build_status_sum_us{0}, send_status_sum_us{0};
     uint64_t count{0}, overruns{0};
     void record(int64_t total, int64_t lock, int64_t gap, int64_t param, int64_t cache,
-                int64_t build_cmd, int64_t send_cmd, int64_t build_gripper,
-                int64_t send_gripper, int64_t build_status, int64_t send_status) {
+                int64_t build_cmd, int64_t send_cmd, int64_t build_gripper, int64_t send_gripper,
+                int64_t build_status, int64_t send_status) {
       if (total < min_us) min_us = total;
       if (total > max_us) max_us = total;
       if (gap > gap_max_us) gap_max_us = gap;
@@ -312,7 +314,7 @@ private:
   // ── torque cache 健康计数 (替换锁内日志, 防止 send_thread_ 卡顿) ──
   std::atomic<uint64_t> cache_stale_warn_{0};         // age > 10ms 秒
   std::atomic<uint64_t> cache_stale_invalidated_{0};  // age > 100ms, 已开始发魔
-  std::atomic<uint64_t> cache_no_cmd_{0};          // cmd_data_valid_=false
+  std::atomic<uint64_t> cache_no_cmd_{0};             // cmd_data_valid_=false
   std::atomic<uint64_t> cache_force_zero_{0};         // force_zero_torque 模式
 
   void linkDiagLoop() {
@@ -383,7 +385,8 @@ private:
   }
 
   bool ensureSerialOpen(std::chrono::milliseconds backoff) {
-    // [FIX] 锁内仅做状态检查和重连尝试，sleep 移到锁外避免阻塞 sendLoop/receiveLoop
+    // [FIX] only state-check + reconnect under lock; sleep stays outside lock so
+    //       sendLoop / receiveLoop are not stalled.
     {
       std::lock_guard<std::mutex> slock(serial_mutex_);
       if (serial_port_ && serial_port_->is_open()) {
@@ -445,7 +448,7 @@ private:
       const size_t need = len - received;
       tmp.assign(need, 0);
 
-      // [FIX] 只持锁复制 shared_ptr，锁外执行 receive()
+      // [FIX] copy shared_ptr under lock, call receive() outside.
       // 避免阻塞 IO 长期占用 serial_mutex_ 导致 ROS2 executor（sendLoop）永久冻结
       std::shared_ptr<drivers::serial_driver::SerialPort> port_snap;
       {
@@ -473,7 +476,7 @@ private:
       }
 
       if (n == 0) {
-        // [FIX] 避免忙循环耗尽 CPU
+        // [FIX] back off to avoid busy-loop CPU burn.
         std::this_thread::sleep_for(std::chrono::microseconds(200));
         continue;
       }
@@ -610,8 +613,7 @@ private:
         std::fill(cmd_to_send, cmd_to_send + SerialProtocol::NUM_ARM_JOINTS, 0.0f);
         cache_force_zero_++;
       } else if (data_fresh) {
-        std::copy(cached_cmd_, cached_cmd_ + SerialProtocol::NUM_ARM_JOINTS,
-                  cmd_to_send);
+        std::copy(cached_cmd_, cached_cmd_ + SerialProtocol::NUM_ARM_JOINTS, cmd_to_send);
       } else {
         std::fill(cmd_to_send, cmd_to_send + SerialProtocol::NUM_ARM_JOINTS, 0.0f);
       }
@@ -721,9 +723,9 @@ private:
     // ── sendLoop 时序统计 (每1000次打印一次, 约1s) ──
     {
       const int64_t total_us = std::chrono::duration_cast<us>(Clock::now() - t_entry).count();
-      send_stats_.record(total_us, serial_lock_us, timer_gap_us, param_us, cache_us,
-                         build_cmd_us, send_cmd_us, build_gripper_us, send_gripper_us,
-                         build_status_us, send_status_us);
+      send_stats_.record(total_us, serial_lock_us, timer_gap_us, param_us, cache_us, build_cmd_us,
+                         send_cmd_us, build_gripper_us, send_gripper_us, build_status_us,
+                         send_status_us);
 
       if (total_us > 1500) {
         RCLCPP_WARN(this->get_logger(),

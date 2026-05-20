@@ -1,5 +1,6 @@
 /// @file mission_executor_node.cpp
-/// @brief Headless mission state machine — MCU 按键 → 轨迹序列调度 + 中断白名单 + B fast-forward.
+/// @brief Headless mission state machine — MCU key events → trajectory sequencing + interrupt
+/// allowlist + B fast-forward.
 
 #include <yaml-cpp/yaml.h>
 

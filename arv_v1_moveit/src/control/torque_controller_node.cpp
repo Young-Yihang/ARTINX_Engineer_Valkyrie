@@ -21,10 +21,8 @@
 #include <string>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
-// ---------------------------------------------------------------------------
-// Lightweight per-section loop profiler (no heap, no locks)
+// --- Lightweight per-section loop profiler (no heap, no locks) ---
 // Usage: record(us) each iteration, dump_and_reset() every N loops.
-// ---------------------------------------------------------------------------
 struct SectionStats {
   int64_t min_us{INT64_MAX}, max_us{0}, sum_us{0};
   uint64_t count{0};
@@ -124,8 +122,7 @@ public:
     // --- route_mode: 控制律 bypass, 仅路由 q_target ---
     this->declare_parameter("route_mode", false);
     route_mode_ = this->get_parameter("route_mode").as_bool();
-    RCLCPP_INFO(this->get_logger(),
-                "[ROUTE_MODE] %s — control law %s, cmd_topic data[0..5] = %s",
+    RCLCPP_INFO(this->get_logger(), "[ROUTE_MODE] %s — control law %s, cmd_topic data[0..5] = %s",
                 route_mode_.load() ? "ENABLED" : "DISABLED",
                 route_mode_.load() ? "BYPASSED" : "ACTIVE",
                 route_mode_.load() ? "q_target(rad)" : "tau(Nm)");
@@ -171,9 +168,7 @@ public:
     max_position_error_ = this->get_parameter("safety.max_position_error").as_double();
 
     // Load per-joint torque limits (prefer config, fallback to URDF, then default)
-    max_torque_per_joint_.resize(6, max_torque_default_);  // Initialize with default
-
-    // Then override with config if specified
+    max_torque_per_joint_.resize(6, max_torque_default_);
     for (int i = 1; i <= 6; i++) {
       std::string param_name = "safety.max_torque_per_joint.joint_" + std::to_string(i);
       this->declare_parameter(param_name, -1.0);  // -1 means "use URDF value"
@@ -402,8 +397,7 @@ private:
   size_t control_loop_count_ = 0;
   rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr cmd_pub_;
-  std::unique_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>
-      rt_cmd_pub_;
+  std::unique_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>> rt_cmd_pub_;
   LoopProfiler loop_prof_;  // timing instrumentation
   std::chrono::steady_clock::time_point last_control_loop_entry_;
   std::atomic<uint64_t> torque_publish_count_{0};
@@ -491,8 +485,7 @@ private:
 
   void updateMaxAtomic(std::atomic<uint64_t> &target, uint64_t value) {
     uint64_t old = target.load(std::memory_order_relaxed);
-    while (old < value &&
-           !target.compare_exchange_weak(old, value, std::memory_order_relaxed)) {
+    while (old < value && !target.compare_exchange_weak(old, value, std::memory_order_relaxed)) {
     }
   }
 
@@ -517,13 +510,11 @@ private:
   void emergencyStop(const std::string &reason) {
     RCLCPP_ERROR(this->get_logger(), "[EMERGENCY STOP] %s", reason.c_str());
 
-    // 1. Send zero torque immediately
     std_msgs::msg::Float64MultiArray safe_msg;
     safe_msg.data.resize(kAllJoints, 0.0);
     cmd_pub_->publish(safe_msg);
     torque_publish_count_++;
 
-    // 2. Execute complete recovery ceremony
     {
       std::lock_guard<std::mutex> action_lock(action_mutex_);
       if (is_executing_.load(std::memory_order_acquire) && current_goal_handle_) {
@@ -619,8 +610,9 @@ private:
       return;
     }
 
-    // [FIX] 各锁独立获取，不嵌套，消除死锁可能
-    // 1. action 域：abort 当前轨迹
+    // --- Lock ordering: action_mutex_ → state_mutex_ → filter_mutex_  (DO NOT REORDER) ---
+    // 各域独立获取, 不嵌套, 消除死锁可能. PID/impedance 仅本回调和 controlLoop timer
+    // 交替访问, resetAll 自身线程安全, 无需上锁.
     if (is_executing_.load(std::memory_order_acquire) && new_mode != ControlMode::ARMED) {
       std::lock_guard<std::mutex> action_lock(action_mutex_);
       if (is_executing_.load(std::memory_order_acquire)) {  // double-check under lock
@@ -628,7 +620,6 @@ private:
       }
     }
 
-    // 2. state 域：切 ARMED 时锁定当前位置为目标
     if (new_mode == ControlMode::ARMED) {
       std::lock_guard<std::mutex> state_lock(state_mutex_);
       if (state_received_) {
@@ -637,7 +628,6 @@ private:
       }
     }
 
-    // 3. PID 无需锁保护（仅本回调和 controlLoop timer 交替访问，resetAll 本身线程安全）
     if (cascade_pid_) cascade_pid_->resetAll();
     if (impedance_controller_) impedance_controller_->resetAll();
 
@@ -878,47 +868,37 @@ void TorqueControllerActionServer::jointStateCallback(
 
     // 启用滤波：使用卡尔曼滤波器过滤速度
     for (size_t i = 0; i < kArmJoints; i++) {
-      // 首次接收：初始化滤波器
+      // --- Filter enabled: first sample initializes, subsequent run predict+update ---
+      // 仅取 filtered 的 velocity, position 保留原始 (q_actual_ 已在 state_mutex_ 下赋值).
       if (!state_received_) {
         joint_filters_[i].initialize(msg->position[i], msg->velocity[i]);
       } else {
-        // 后续：预测-更新循环
         joint_filters_[i].predict();
         joint_filters_[i].update(msg->position[i], msg->velocity[i]);
       }
-
-      // [NOTE] Key modification: only use filtered velocity, position remains original
-      // q_actual_(i) 已经在上面设置为 msg->position[i]，保持不变
       q_dot_filtered_(i) = joint_filters_[i].getVelocity();
     }
   }  // filter_mutex_ 自动释放
   else {
-    // 禁用滤波：直接使用原始测量值
+    // --- Filter disabled: pass-through raw velocity ---
     for (size_t i = 0; i < kArmJoints; i++) {
-      q_dot_filtered_(i) = q_dot_actual_(i);  // 直接使用原始速度
-                                              // q_actual_ 已在上面赋值为原始位置，保持不变
+      q_dot_filtered_(i) = q_dot_actual_(i);
     }
   }
 
-  // --- 修复死锁 #1: 首次接收数据时避免嵌套锁 ---
-  // 策略: 先在 state_mutex_ 下拷贝数据和标记, 然后释放锁, 再获取 action_mutex_
+  // --- First-sample bootstrap: copy q_startup under state_mutex_, then promote state_received_ ---
+  // state_received_ 必须在所有初始化都跑完后才置 true, 确保 controlLoop 看到 true 时数据完整可用.
+  // 锁顺序: state_mutex_ 仍持有, 后续 filter_mutex_ 独立获取 (避免嵌套).
   bool is_first_state = !state_received_;
   KDL::JntArray q_startup(kArmJoints);
 
   if (is_first_state) {
     RCLCPP_INFO(this->get_logger(), "[OK] First joint state data received");
-
-    // 拷贝启动位置 (仍在state_mutex_保护下)
     q_startup = q_actual_;
-
-    // --- 关键：在所有初始化完成后才标记state_received_ ---
-    // 确保状态机闭环：只有当数据完整处理后才设置标志
     state_received_ = true;
-
     RCLCPP_INFO(this->get_logger(), "[STATE] state_received=true, ready for control");
   }
 
-  // 避免嵌套锁: state_mutex_ 仍持有，filter_mutex_ 独立获取
   if (is_first_state && kalman_filter_enabled_) {
     std::lock_guard<std::mutex> filter_lock(filter_mutex_);
     RCLCPP_INFO(this->get_logger(), "📝  First Kalman gain (Joint 1):");
@@ -1103,7 +1083,7 @@ bool TorqueControllerActionServer::interpolateTrajectory(
   double t_before = point_before.time_from_start.sec + point_before.time_from_start.nanosec * 1e-9;
   double t_after = point_after.time_from_start.sec + point_after.time_from_start.nanosec * 1e-9;
 
-  // [FIX] 除零判断移到除法之前
+  // [FIX] divide-by-zero guard before the division.
   double dt_seg = t_after - t_before;
   double alpha = (dt_seg < 1e-9) ? 0.0 : (t_now - t_before) / dt_seg;
 
@@ -1236,8 +1216,8 @@ void TorqueControllerActionServer::routeTargetToHardware() {
   const uint8_t mode = control_mode_.load(std::memory_order_acquire);
 
   KDL::JntArray q_target_out(kArmJoints);
-  bool out_valid = false;          // q_target_out 已由轨迹路径填好
-  bool trajectory_done = false;    // 本帧轨迹结束 (用 last_point + succeed action)
+  bool out_valid = false;        // q_target_out 已由轨迹路径填好
+  bool trajectory_done = false;  // 本帧轨迹结束 (用 last_point + succeed action)
   std::shared_ptr<GoalHandleFJT> completed_handle;  // 待 succeed 的 goal
 
   // ---- Phase 2: 轨迹执行中, 实时插值 q_d 作为 q_target ----
@@ -1254,8 +1234,7 @@ void TorqueControllerActionServer::routeTargetToHardware() {
     if (!traj_copy.points.empty()) {
       const double t_now = (this->now() - traj_start_copy).seconds();
       const auto &last_pt = traj_copy.points.back();
-      const double total_dur =
-          last_pt.time_from_start.sec + last_pt.time_from_start.nanosec * 1e-9;
+      const double total_dur = last_pt.time_from_start.sec + last_pt.time_from_start.nanosec * 1e-9;
       if (t_now >= total_dur) {
         // 轨迹时间到, 收尾用 last_point, 标记 succeed
         for (int i = 0; i < kArmJoints; i++) {
@@ -1397,11 +1376,10 @@ void TorqueControllerActionServer::controlLoop() {
                   "pub: avg=%ldus max=%ldus count=%lu | overruns=%lu",
                   loop_prof_.total.min_us, loop_prof_.total.avg_us(), loop_prof_.total.max_us,
                   loop_prof_.gap.avg_us(), loop_prof_.gap.max_us, loop_prof_.joint_age.avg_us(),
-                  loop_prof_.joint_age.max_us,
-                  loop_prof_.state_lock.avg_us(), loop_prof_.state_lock.max_us,
-                  loop_prof_.dynamics.avg_us(), loop_prof_.dynamics.max_us,
-                  loop_prof_.publish.avg_us(), loop_prof_.publish.max_us, publish_delta,
-                  loop_prof_.overruns);
+                  loop_prof_.joint_age.max_us, loop_prof_.state_lock.avg_us(),
+                  loop_prof_.state_lock.max_us, loop_prof_.dynamics.avg_us(),
+                  loop_prof_.dynamics.max_us, loop_prof_.publish.avg_us(),
+                  loop_prof_.publish.max_us, publish_delta, loop_prof_.overruns);
       loop_prof_.reset_all();
     }
   };
@@ -1658,8 +1636,8 @@ void TorqueControllerActionServer::controlLoop() {
     last_state_time_exec = last_joint_state_time_;
     grip_pos = gripper_position_;
   }
-  joint_state_age_us = static_cast<int64_t>((this->now() - last_state_time_exec).seconds() *
-                                            1000000.0);
+  joint_state_age_us =
+      static_cast<int64_t>((this->now() - last_state_time_exec).seconds() * 1000000.0);
   double grip_force;
   {
     std::lock_guard<std::mutex> glock(gripper_mutex_);
