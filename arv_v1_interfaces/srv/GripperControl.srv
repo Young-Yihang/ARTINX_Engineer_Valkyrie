@@ -3,7 +3,7 @@
 #   force > 0   → close direction (GRIP, hardware fires CmdID 0x0004 with GRIP)
 #   force < 0   → open direction (RELEASE)
 #   force = 0   → STOP
-# 上位机 clamp 到 [-gripper_max_torque_, +gripper_max_torque_] (controller_params yaml).
+# 上位机 clamp 到 [-gripper_max_force_, +gripper_max_force_] (controller_params yaml).
 # 字段历史叫 torque (字段名误导, 实际是 N), 现统一改名.
 float64 force
 ---

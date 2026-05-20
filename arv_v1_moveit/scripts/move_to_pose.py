@@ -30,9 +30,10 @@ ctk.set_appearance_mode("dark")
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import JointState 
+from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
 
+from ament_index_python.packages import get_package_share_directory
 from moveit_configs_utils import MoveItConfigsBuilder
 from moveit.planning import MoveItPy, PlanRequestParameters
 from moveit.core.robot_state import RobotState
@@ -74,10 +75,9 @@ VISUAL_ORIGINS = {
 }
 FK_CHAIN = ["base_link", "link1", "link2", "link3", "link4", "link5", "link6",
             "link_gripper1", "link_gripper2", "tcp"]
-MESHES_DIR = os.path.expanduser("~/ros2_ws/src/arv_v1_model/meshes")
-
-PRESETS_PATH = os.path.expanduser(
-    "~/ros2_ws/src/arv_v1_moveit/config/planning_presets.yaml"
+MESHES_DIR = os.path.join(get_package_share_directory("arv_v1_model"), "meshes")
+PRESETS_PATH = os.path.join(
+    get_package_share_directory("arv_v1_moveit"), "config", "planning_presets.yaml"
 )
 
 # Catppuccin Mocha

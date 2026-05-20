@@ -581,8 +581,8 @@ private:
 
   void controlLoop();
 
-  // route_mode 主路径: 仅路由 q_target 到 hardware (复用 effort topic, 语义变 q_target rad)
-  // 来源优先级: trajectory action (TODO Phase 2) → /joint_position_target → q_actual fallback
+  // route_mode 主路径: 仅路由 q_target 到 hardware (发到 /joint_position_target_to_mcu)
+  // 来源优先级: trajectory action (TODO Phase 2) → /joint_position_target (上游订阅) → q_actual fallback
   void routeTargetToHardware();
 
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;

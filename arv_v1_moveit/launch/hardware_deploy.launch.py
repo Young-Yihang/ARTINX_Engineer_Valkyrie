@@ -63,10 +63,10 @@ def launch_setup(context, *args, **kwargs):
         "arv_v1_model", package_name="arv_v1_moveit"
     ).to_moveit_configs()
 
-    ws_src = os.path.expanduser("~/ros2_ws/src/arv_v1_moveit/config")
-    controller_params = os.path.join(ws_src, "controller_params_hw.yaml")
-    cartesian_params = os.path.join(ws_src, "cartesian_controller_param.yaml")
-    trajectory_dir = os.path.join(ws_src, "trajectories")
+    # 用 install share 路径而非硬编码 ~/ros2_ws/src, 跨用户名 portable (同 ab5e919 原则)
+    controller_params = os.path.join(config_dir, "controller_params_hw.yaml")
+    cartesian_params = os.path.join(config_dir, "cartesian_controller_param.yaml")
+    trajectory_dir = os.path.join(config_dir, "trajectories")
 
     # --- Nodes ---
 
