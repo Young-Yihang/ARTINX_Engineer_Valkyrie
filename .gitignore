@@ -10,6 +10,6 @@ build
 __pycache__/
 *.pyc
 
-# 不公开的文档和项目指令
-docs/
+# 不公开的文档和项目指令 (仅 root 层 docs/, 即毕设/比赛规则/架构草图)
+/docs/
 CLAUDE.md
