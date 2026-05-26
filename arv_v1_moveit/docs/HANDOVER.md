@@ -11,7 +11,7 @@
 
 ## 0. 30 秒速览
 
-```
+```text
 PC (上位机)                          MCU (下位机, 锁版本)            一体化关节模组
 ┌──────────────────┐                ┌──────────────────┐         ┌──────────────┐
 │  trajectory      │                │                  │  CAN    │  内部电流环   │
@@ -75,6 +75,7 @@ MCU 在下面跑实际的位置/速度环, CTC + 重力前馈. 电流环在关�
 **症状**: `ros2 node list` 同名 node 出现 2 次, `/joint_position_target_to_mcu` publisher count=2, 但只有 1 个 hardware_interface 进程.
 
 **Fix**: `start_mujoco_system.sh` 的 `setup_environment()` 强制:
+
 ```bash
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 ros2 daemon stop && ros2 daemon start  # 必须重启 daemon, 旧 discovery 缓存会持续
@@ -342,11 +343,9 @@ ros2 daemon stop && ros2 daemon start  # 必须重启 daemon, 旧 discovery 缓�
 
 ## 7. 紧急联系
 
-**作者**: Young-Yihang (毕业后转 Mondo)
-**MEMORY**: `~/.claude/projects/-home-huan-ros2-ws-src/memory/` (Claude session 上下文, 含完整背景)
-**git history**: `git log --all --oneline | head -200` 看完整决策序列
+**作者**: Young-Yihang
 
-如果你看完这份文档还是不懂某条决策的来由, 优先看对应 commit message (本项目 commit message 写得相对详细). 实在没辙, 翻 memory 文件夹里的 `feedback_*.md` / `project_*.md`.
+看完这份文档还有不懂的, 直接问我。
 
 ---
 

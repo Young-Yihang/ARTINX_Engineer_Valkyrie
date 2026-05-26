@@ -504,10 +504,21 @@ private:
         return;
       }
     }
+    bool cleared = false;
     for (int i = 0; i < 100; ++i) {
       std::this_thread::sleep_for(50ms);
       std::lock_guard<std::mutex> lk(active_mu_);
-      if (!active_task_) break;
+      if (!active_task_) {
+        cleared = true;
+        break;
+      }
+    }
+    if (!cleared) {
+      // 5s 自旋超时: binding 线程仍未退出 (可能卡在 LoadTrajectory action). 强清 flag 但告警,
+      // 否则真机上静默清 flag 会让人误以为 abort 干净完成, 排查无从下手.
+      RCLCPP_ERROR(get_logger(),
+                   "[Abort] active_task_ 5s 内未清空, 强制清 task_abort_requested_; "
+                   "binding 线程可能卡在 action, 下一个 binding 行为不可保证");
     }
     task_abort_requested_ = false;
   }
