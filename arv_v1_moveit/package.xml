@@ -8,7 +8,7 @@
   </description>
   <maintainer email="3119801747@qq.com">WuHuan</maintainer>
 
-  <license>BSD-3-Clause</license>
+  <license>MIT</license>
 
   <url type="website">http://moveit.ros.org/</url>
   <url type="bugtracker">https://github.com/moveit/moveit2/issues</url>

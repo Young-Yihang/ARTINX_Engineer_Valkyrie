@@ -6,7 +6,7 @@
   <description>The arv_v1_model package - 6-DOF manipulator</description>
   
   <maintainer email="your_email@example.com">Your Name</maintainer>
-  <license>BSD</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   
