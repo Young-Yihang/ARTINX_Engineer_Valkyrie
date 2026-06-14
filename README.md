@@ -1,4 +1,5 @@
 # ARTINX Engineer Valkyrie
+<img width="1280" height="970" alt="robot_valkyrie_web" src="https://github.com/user-attachments/assets/15995258-50a7-4839-ae39-f760e92598c5" />
 
   > 是的，这是一个ARTINX的机械臂项目，该项目稳定可靠的服役完成了RM2026的分区赛，以及国赛
   >
